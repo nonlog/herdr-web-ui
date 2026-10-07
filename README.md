@@ -99,7 +99,7 @@ Windows x64, in PowerShell:
 irm https://devswha.github.io/herdr-web-ui/install.ps1 | iex
 ```
 
-Requires [Git for Windows](https://git-scm.com/download/win). Installs missing herdr and Bun for your user, then installs the same plugin. No Node or WSL is needed. Open **Phone setup** in herdr for phone access. Windows terminals use the [screen mirror](docs/remote-pcs.md#windows-pcs), with typing and a fixed grid, until herdr supports terminal attach there.
+Requires [Git for Windows](https://git-scm.com/download/win). Installs missing herdr and Bun for your user, then installs the same plugin. No Node or WSL is needed. Open **Phone setup** in herdr for phone access. Native Windows uses herdr's [terminal session controller](docs/remote-pcs.md#windows-pcs) for live output, fitted browser geometry, input and scrollback even though direct `terminal attach` is not available there.
 
 <p align="center">
   <img src="docs/screenshots/install.png" width="720" alt="Installer output: Bun, Node and the herdr plugin install, then tailscale serve publishes the app and a QR code for the phone appears.">
@@ -139,7 +139,7 @@ Session files stay on the PC running each agent, and their contents are served t
 
 **Does it work on Windows?**
 
-Yes, on Windows x64 without WSL. Until herdr can attach a terminal there, the terminal is a [screen mirror](docs/remote-pcs.md#windows-pcs) with typing and a fixed grid.
+Yes, on Windows x64 without WSL. Herdr's direct `terminal attach` is still unavailable there, so the bridge uses [`terminal session control`](docs/remote-pcs.md#windows-pcs) instead; the browser gets live terminal frames, resize, input and scrollback.
 
 **How is it different from collie, roamgate or herdr-remote?**
 

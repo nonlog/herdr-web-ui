@@ -404,7 +404,7 @@ export function PaneTerminal({
       // terminal session control has no local PTY for xterm to encode the wheel into.
       // Send one semantic wheel command to herdr instead; herdr routes it to host scrollback,
       // DEC mouse reporting or alternate scroll according to the pane's current terminal mode.
-      if (controlSessionRef.current) {
+      if (controlSessionRef.current && !observeRef.current) {
         if (event.ctrlKey || event.deltaY === 0) return false;
         if (term.hasSelection()) term.clearSelection();
         const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
@@ -1531,7 +1531,7 @@ export function PaneTerminal({
         )}
         {paneId !== null && !chatView && unsupported && (
           <div className="terminal-banner terminal-banner-soon" role="status">
-            <span>{t("Live terminal is coming to Windows PCs: herdr cannot attach a terminal there yet. The chat lens works now.")}</span>
+            <span>{t("Live terminal is unavailable on this bridge")}</span>
           </div>
         )}
         {paneId !== null && outputError && (

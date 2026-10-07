@@ -687,26 +687,132 @@ export function createServer(
     }
 
     if (controlled) {
-      const control = new TerminalControlSession({
-        command: process.env["HERDR_WEB_HERDR_BIN"] || "herdr",
-        target: paneId,
-        cols: spawnCols,
-        rows: spawnRows,
-        env: { HERDR_SOCKET_PATH: herdrSocketPath() },
-        onData: (data) => {
+      // terminal session control uses the same exclusive server slot as direct attach. Its
+      // newline-JSON close record makes refusals easier to classify, but it still needs the
+      // same read-race retry, held-bridge wait and explicit takeover semantics.
+      attachment.ready = false;
+      let retries = 0;
+      let refusedSince: number | null = null;
+      let starting = false;
+      let takeoverWanted: Client | null = null;
+      let attachedTerminal = terminalId;
+      const wanted = (): boolean => attachment.clients.size > 0 || [...clients].some((client) => client.data.attached.has(paneId));
+      const mayTakeOver = (client: Client | null): client is Client =>
+        client !== null && attachment.clients.has(client) && client.data.mode === "interact" && !client.data.closing;
+      const finish = (code: number | null): void => {
+        if (attachments.get(paneId) !== attachment) return;
+        broadcast(paneId, { type: "pty-exit", pane_id: paneId, code });
+        closeAttachment(paneId);
+      };
+      const schedule = (delay: number, takeover: Client | null = null): void => {
+        clearTimeout(attachment.retry);
+        attachment.retry = setTimeout(() => start(takeover), delay);
+      };
+      const relookup = (code: number | null, deadline: number): void => {
+        if (attachments.get(paneId) !== attachment) return;
+        if (!wanted()) { closeAttachment(paneId); return; }
+        void terminalInfoFor(paneId, Math.min(1000, Math.max(1, deadline - Date.now()))).then(({ terminalId: now }) => {
           if (attachments.get(paneId) !== attachment) return;
-          attachment.replay.append(data);
-          for (const client of attachment.clients) sendOutput(client, paneId, data);
-          reconcileOutput(paneId);
-        },
-        onExit: (code) => {
+          if (now !== attachedTerminal) {
+            attachedTerminal = now;
+            retries = 0;
+            refusedSince = null;
+            const takeover = mayTakeOver(takeoverWanted) ? takeoverWanted : null;
+            takeoverWanted = null;
+            start(takeover);
+            return;
+          }
+          if (Date.now() >= deadline) { finish(code); return; }
+          attachment.relookup = setTimeout(() => relookup(code, deadline), 100);
+        }, (error: unknown) => {
           if (attachments.get(paneId) !== attachment) return;
-          broadcast(paneId, { type: "pty-exit", pane_id: paneId, code });
-          closeAttachment(paneId);
-        },
-      });
-      attachment.pty = control;
-      attachment.control = control;
+          if (error instanceof HerdrError && PANE_GONE_CODES.has(error.code)) { finish(code); return; }
+          if (Date.now() >= deadline) { finish(code); return; }
+          attachment.relookup = setTimeout(() => relookup(code, deadline), 100);
+        });
+      };
+      const start = (requestedTakeover: Client | null = null): void => {
+        if (attachments.get(paneId) !== attachment) return;
+        clearTimeout(attachment.retry);
+        attachment.retry = undefined;
+        if (!wanted()) { closeAttachment(paneId); return; }
+        const takingOver = mayTakeOver(requestedTakeover) ? requestedTakeover : null;
+        starting = true;
+        let seenFrame = false;
+        let session!: TerminalControlSession;
+        session = new TerminalControlSession({
+          command: process.env["HERDR_WEB_HERDR_BIN"] || "herdr",
+          target: paneId,
+          cols: attachment.cols,
+          rows: attachment.rows,
+          takeover: takingOver !== null,
+          env: { HERDR_SOCKET_PATH: herdrSocketPath() },
+          onData: (data) => {
+            if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
+            if (!seenFrame) {
+              seenFrame = true;
+              starting = false;
+              retries = 0;
+              refusedSince = null;
+              takeoverWanted = null;
+              if (attachment.held) {
+                attachment.held = false;
+                broadcast(paneId, { type: "attach-resumed", pane_id: paneId });
+              }
+              attachment.ready = true;
+              broadcast(paneId, { type: "input-ready", pane_id: paneId });
+            }
+            if (!data) return;
+            attachment.replay.append(data);
+            for (const client of attachment.clients) sendOutput(client, paneId, data);
+            reconcileOutput(paneId);
+          },
+          onExit: (code, reason) => {
+            if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
+            starting = false;
+            if (attachment.ready) broadcast(paneId, { type: "input-ready", pane_id: paneId, ready: false });
+            attachment.ready = false;
+            const now = Date.now();
+            const displaced = reason?.includes("terminal attach taken over") === true;
+            if (!displaced && reason && ATTACH_READ_RACE_RE.test(reason) && now - (refusedSince ??= now) < retryFor) {
+              retries += 1;
+              const takeover = mayTakeOver(takeoverWanted) ? takeoverWanted : takingOver;
+              takeoverWanted = null;
+              schedule(Math.min(ATTACH_RETRY_MS * 2 ** (retries - 1), ATTACH_RETRY_MAX_MS), takeover);
+              return;
+            }
+            if (displaced || (reason !== undefined && ATTACH_HELD_RE.test(reason))) {
+              refusedSince = null;
+              retries = 0;
+              if (!attachment.held) broadcast(paneId, { type: "error", code: "attach_held", message: ATTACH_HELD_MESSAGE, pane_id: paneId });
+              attachment.held = true;
+              const takeover = mayTakeOver(takeoverWanted) ? takeoverWanted : null;
+              takeoverWanted = null;
+              if (takeover) start(takeover);
+              else schedule(heldRetry);
+              return;
+            }
+            takeoverWanted = null;
+            relookup(code, now + relookupFor);
+          },
+        });
+        attachment.pty = session;
+        attachment.control = session;
+      };
+      attachment.takeOver = (client) => {
+        if (attachments.get(paneId) !== attachment || !attachment.held || !mayTakeOver(client)) return;
+        if (starting) { takeoverWanted = client; return; }
+        start(client);
+      };
+      try {
+        // The creating client has already recorded paneId in SocketData.attached, so wanted()
+        // is true even before attach resumes and adds it to attachment.clients.
+        start();
+      } catch (error) {
+        attachments.delete(paneId);
+        spawnFailure(paneId, error);
+        throw error;
+      }
       return attachment;
     }
 

@@ -107,7 +107,9 @@ export class TerminalControlSession {
     }
     try {
       const data = Buffer.from(frame.bytes, "base64").toString("utf8");
-      if (data) this.options.onData(data);
+      // The first full frame can be empty (a blank shell). Deliver it anyway so the
+      // attachment can become input-ready without waiting for the first visible byte.
+      this.options.onData(data);
     } catch {
       /* malformed frame bytes are ignored rather than painted into the terminal */
     }

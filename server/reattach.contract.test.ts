@@ -89,7 +89,7 @@ afterAll(async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-// a herdr that cannot `terminal attach` (Windows) has no attach to end
+// this handoff test exercises the direct-attach transport; platforms without it have no direct attach to end
 if (process.env["HERDR_TEST_MODE"] !== "unit" && process.platform !== "win32" && Bun.which(herdr)) {
   await startSession();
   const pong = await herdrRpc<{ capabilities?: { live_handoff?: boolean } }>("ping", {}, socket);

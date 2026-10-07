@@ -13,9 +13,9 @@ Browser UI for the herdr terminal multiplexer: a React 18 + xterm.js client (`sr
 
 The app is only a bridge: herdr owns every pty, scrollback and agent state.
 
-- NEVER load node-pty inside Bun; it panics the runtime (oven-sh/bun#18546). All PTY work goes through the Node sidecar `server/pty/pty-host.mjs`, and the only process it runs is `herdr terminal attach <terminal_id>`.
+- NEVER load node-pty inside Bun; it panics the runtime (oven-sh/bun#18546). Direct-attach PTY work goes through the Node sidecar `server/pty/pty-host.mjs`, and the only process it runs is `herdr terminal attach <terminal_id>`. Native Windows uses `server/terminal-control.ts` instead: `herdr terminal session control <pane_id>` is newline-JSON over ordinary pipes and needs no node-pty.
 - NEVER pass `--takeover` to `herdr terminal attach` on the server's own initiative: an attach, a retry or a reconnect waits for the holder instead. Only a user's explicit request for that pane, from an interact connection, may take it. Always set `HERDR_SOCKET_PATH` to the socket the RPCs use.
-- NEVER give xterm scrollback (keep `scrollback: 0`), and never rebuild the terminal from `pane.read`. The attach byte stream is the source of truth.
+- NEVER give xterm scrollback (keep `scrollback: 0`). The live direct-attach or terminal-controller stream is the source of truth and herdr owns scrollback; `pane.read` repainting exists only as the compatibility fallback for a bridge with neither live transport.
 - NEVER edit `shared/herdr-api.generated.ts`. Run `bun run generate:types`.
 - NEVER pool herdr RPC connections: herdr closes the socket after each response. Use one connection per call (10 s timeout). Only `events.subscribe` stays open, and a second subscribe on an open connection is silently ignored, so reopen it with the full set.
 - `pane.process_info` takes `pane_id`, not `target`. Given `target`, it silently answers for the focused pane.
@@ -24,7 +24,7 @@ The app is only a bridge: herdr owns every pty, scrollback and agent state.
 - Prompt answers are `send_keys` navigation, never digits, and go through `POST /api/pane/prompt/answer`: the key semantics per agent live on the server.
 - Web push: build requests with `generateRequestDetails` and send them with `fetch`; never call `sendNotification`.
 - The omo transcript is found through the process tree, never through `pane.agent` or file mtime.
-- Windows x64 has no PTY sidecar: herdr there cannot `terminal attach`, so the server mirrors the screen (`server/mirror.ts`). Do not assume a pty exists.
+- Windows x64 has no PTY sidecar and herdr there cannot direct `terminal attach`; use `terminal session control` (`server/terminal-control.ts`) for the live ANSI stream, semantic scroll and resize. `server/mirror.ts` is only the legacy fallback. Do not assume a node-pty exists.
 
 ## Changing a contract
 

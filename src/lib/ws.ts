@@ -234,7 +234,7 @@ export class HerdrSocket {
   /** A wheel over a terminal-session-controlled pane is routed by herdr itself:
    * host scrollback when the app is plain, mouse reporting / alternate scroll in a TUI. */
   scroll(paneId: string, direction: "up" | "down", lines: number, column?: number, row?: number, modifiers = 0): boolean {
-    if (!this.connected || this.mode !== "interact" || !this.attached.has(paneId) || !this.features.has("terminal-scroll")) return false;
+    if (!this.canInput(paneId) || !this.features.has("terminal-scroll")) return false;
     this.rawSend({
       type: "scroll", pane_id: paneId, direction, lines,
       ...(column === undefined ? {} : { column }),
