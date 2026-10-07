@@ -48,7 +48,7 @@ export interface Settings {
   palette: Palette;
   /** xterm font size in px */
   terminalFontSize: number;
-  /** mouse reports sent to herdr per wheel event in the terminal: 1 is what xterm sends by itself */
+  /** multiplier for how far one terminal wheel gesture scrolls */
   terminalWheelSpeed: number;
   /** fonts tried before the built-in terminal stack, as a CSS font-family list; "" keeps the built-in one */
   terminalFontFamily: string;

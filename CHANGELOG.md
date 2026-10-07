@@ -24,6 +24,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#521](https://github.com/devswha/herdr-web-ui/pull/521))
 
 ### Changed
+- Windows terminal-controller scrolling now normalizes browser wheel deltas to terminal rows and
+  coalesces high-resolution wheel/trackpad bursts. A normal wheel notch moves about three rows at
+  the default speed, while remote sessions send at most 25 semantic scroll commands per second,
+  avoiding the full-frame backlog that made high-latency WebSocket links feel progressively stuck.
 - The message box follows **Settings → Chat font size**, as the transcript and prompt cards
   already did: with a mouse it is typed at the transcript's size, and on a touch screen it
   grows with a size above 16px (it stays at 16px or more, so iOS still does not zoom).

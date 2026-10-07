@@ -35,6 +35,7 @@ import { isAppShortcut } from "../lib/shortcuts.ts";
 import { OpenFileContext } from "../lib/filePaths.ts";
 import { fileUriPath, terminalFileLinkProvider } from "../lib/terminalFileLinks.ts";
 import { adjustTerminalGlyphs } from "../lib/terminalGlyphs.ts";
+import { SEMANTIC_WHEEL_MIN_INTERVAL_MS, semanticWheelDeltaLines, semanticWheelIntent } from "../lib/terminalWheel.ts";
 
 /** How long a resize must rest before the grid refits and the pty follows it. */
 const RESIZE_SETTLE_MS = 120;
@@ -62,7 +63,7 @@ export interface PaneTerminalProps {
   autoSelected?: boolean;
   /** xterm font size (settings) */
   terminalFontSize: number;
-  /** mouse reports sent per wheel event (settings): 1 is xterm's own one report */
+  /** multiplier for terminal wheel distance (settings) */
   terminalWheelSpeed: number;
   /** fonts tried before the built-in stack (settings); "" keeps the built-in one */
   terminalFontFamily: string;
@@ -387,6 +388,60 @@ export function PaneTerminal({
       }
       return true;
     });
+    // A remote terminal controller redraws a full terminal frame after a scroll. Sending every
+    // high-resolution trackpad event separately makes WAN sessions queue hundreds of frames.
+    // Keep the first event immediate, then coalesce later events to at most 25 commands/sec.
+    let controlWheelPending = 0;
+    let controlWheelTimer: number | null = null;
+    let controlWheelLastSent = -Infinity;
+    let controlWheelPane: string | null = null;
+    let controlWheelColumn: number | undefined;
+    let controlWheelRow: number | undefined;
+    let controlWheelModifiers = 0;
+    const flushControlWheel = (): void => {
+      if (controlWheelTimer !== null) {
+        window.clearTimeout(controlWheelTimer);
+        controlWheelTimer = null;
+      }
+      const pane = controlWheelPane;
+      const intent = semanticWheelIntent(controlWheelPending, wheelSpeedRef.current);
+      controlWheelPending = 0;
+      if (!pane || pane !== paneRef.current || !intent) return;
+      if (socketRef.current?.scroll(
+        pane,
+        intent.direction,
+        intent.lines,
+        controlWheelColumn,
+        controlWheelRow,
+        controlWheelModifiers,
+      )) {
+        controlWheelLastSent = performance.now();
+      }
+    };
+    const queueControlWheel = (
+      pane: string,
+      deltaLines: number,
+      column: number | undefined,
+      row: number | undefined,
+      modifiers: number,
+    ): void => {
+      if (controlWheelPane !== pane) {
+        if (controlWheelTimer !== null) window.clearTimeout(controlWheelTimer);
+        controlWheelTimer = null;
+        controlWheelPending = 0;
+        controlWheelLastSent = -Infinity;
+        controlWheelPane = pane;
+      }
+      controlWheelPending += deltaLines;
+      controlWheelColumn = column;
+      controlWheelRow = row;
+      controlWheelModifiers = modifiers;
+      const wait = SEMANTIC_WHEEL_MIN_INTERVAL_MS - (performance.now() - controlWheelLastSent);
+      if (controlWheelTimer !== null) return;
+      if (wait <= 0) flushControlWheel();
+      else controlWheelTimer = window.setTimeout(flushControlWheel, wait);
+    };
+
     // herdr reads the wheel as mouse reports. Were reporting ever off, xterm would turn
     // a wheel into arrow keys, which walk an agent's prompt history instead of scrolling.
     // A selecting drag takes the wheel itself (see below); after one, a wheel scrolls the
@@ -402,8 +457,8 @@ export function PaneTerminal({
         return false;
       }
       // terminal session control has no local PTY for xterm to encode the wheel into.
-      // Send one semantic wheel command to herdr instead; herdr routes it to host scrollback,
-      // DEC mouse reporting or alternate scroll according to the pane's current terminal mode.
+      // Normalize the browser delta to terminal rows and coalesce a burst before sending it:
+      // herdr still decides host scrollback vs DEC mouse reporting / alternate scroll.
       if (controlSessionRef.current && !observeRef.current) {
         if (event.ctrlKey || event.deltaY === 0) return false;
         if (term.hasSelection()) term.clearSelection();
@@ -418,10 +473,10 @@ export function PaneTerminal({
           }
         }
         const modifiers = (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0);
-        socketRef.current?.scroll(
-          paneRef.current ?? "",
-          event.deltaY < 0 ? "up" : "down",
-          Math.max(1, wheelSpeedRef.current),
+        const pane = paneRef.current;
+        if (pane) queueControlWheel(
+          pane,
+          semanticWheelDeltaLines(event.deltaY, event.deltaMode, term.rows),
           column,
           row,
           modifiers,
@@ -1085,6 +1140,7 @@ export function PaneTerminal({
       window.clearInterval(poll);
       observer.disconnect();
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+      if (controlWheelTimer !== null) window.clearTimeout(controlWheelTimer);
       host.removeEventListener("touchstart", onTouchStart);
       host.removeEventListener("touchmove", onTouchMove);
       host.removeEventListener("touchend", onTouchEnd);
