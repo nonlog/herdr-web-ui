@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { closeSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep, toNamespacedPath } from "node:path";
 import type { ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
 import { patchFiles, patchText } from "../shared/patch.ts";
 import { processStartedAt } from "./process-start.ts";
@@ -436,7 +436,7 @@ function rolloutHeader(path: string): RecordValue | null {
 export function codexRolloutPath(path: string, codexHome: string): string | null {
   try {
     const canonical = realpathSync(path);
-    const rel = relative(realpathSync(join(codexHome, "sessions")), canonical);
+    const rel = relative(toNamespacedPath(realpathSync(join(codexHome, "sessions"))), toNamespacedPath(canonical));
     if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || !canonical.endsWith(".jsonl")) return null;
     if (!statSync(canonical).isFile()) return null;
     const metadata = rolloutHeader(canonical);
@@ -839,7 +839,15 @@ export function resumedThread(argvs: readonly (readonly string[])[]): string | n
 }
 
 /** The rollout each pane's Codex was last matched to on screen, the processes that were running it, and when. */
-const boundRollouts = new Map<string, { processes: string; path: string; at: number }>();
+const boundRollouts = new Map<string, { processes: string; path: string; at: number; cwd?: string }>();
+
+const CWD_MATCH = process.platform === "win32" ? "cwd COLLATE NOCASE IN (?, ?)" : "cwd IN (?, ?)";
+function cwdVariants(cwd: string): [string, string] {
+  if (process.platform !== "win32") return [cwd, cwd];
+  const namespaced = toNamespacedPath(cwd);
+  const plain = namespaced.startsWith("\\\\?\\UNC\\") ? `\\\\${namespaced.slice(8)}` : namespaced.startsWith("\\\\?\\") ? namespaced.slice(4) : namespaced;
+  return [plain, namespaced];
+}
 
 /**
  * Threads begun in this cwd since `since` (seconds) that this pane's Codex may have moved
@@ -849,9 +857,9 @@ const boundRollouts = new Map<string, { processes: string; path: string; at: num
  */
 function newerThreads(db: Database, cwd: string, since: number, except: string | null, paneId: string, home: string, firsts?: Map<string, string>): string[] {
   const first = db.query("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'first_user_message'").get() !== null ? ", first_user_message" : "";
-  const rows = db.query<{ id: string; rollout_path: string; first_user_message?: string | null }, [string, number]>(
-    `SELECT id, rollout_path${first} FROM threads WHERE cwd = ? AND archived = 0 AND agent_role IS NULL${interactive(db)} AND created_at >= ?`,
-  ).all(cwd, since);
+  const rows = db.query<{ id: string; rollout_path: string; first_user_message?: string | null }, [string, string, number]>(
+    `SELECT id, rollout_path${first} FROM threads WHERE ${CWD_MATCH} AND archived = 0 AND agent_role IS NULL${interactive(db)} AND created_at >= ?`,
+  ).all(...cwdVariants(cwd), since);
   return theirs(rows.flatMap((row) => {
     if (row.id === except) return [];
     const path = codexRolloutPath(row.rollout_path, home) ?? row.rollout_path;
@@ -867,6 +875,15 @@ function newerThreads(db: Database, cwd: string, since: number, except: string |
 function interactive(db: Database): string {
   return db.query("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'source'").get() !== null
     ? " AND source IN ('cli', 'vscode')" : "";
+}
+
+/** Candidate rows for transcript discovery; extracted so directory selection is testable. */
+export function codexTranscriptRows(db: Database, cwd: string, otherDirectories = false): { id: string; cwd: string; rollout_path: string }[] {
+  const rows = db.query<{ id: string; cwd: string; rollout_path: string }, string[]>(
+    `SELECT id, cwd, rollout_path FROM threads WHERE ${otherDirectories ? "1" : CWD_MATCH} AND archived = 0 AND agent_role IS NULL${interactive(db)} ORDER BY updated_at DESC LIMIT ${otherDirectories ? 257 : 33}`,
+  ).all(...(otherDirectories ? [] : cwdVariants(cwd)));
+  // ponytail: bound cross-directory discovery to 256 threads; refuse incomplete evidence rather than guess.
+  return otherDirectories && rows.length > 256 ? [] : rows;
 }
 
 /** The rollouts no other pane is bound to. */
@@ -1054,6 +1071,7 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
   let resumedNewer: string[] = [];
   /** the first message of each newer thread, when the store keeps it */
   const firsts = new Map<string, string>();
+  const directories = new Map<string, string>();
   const bound = boundRollouts.get(paneId);
   const boundHere = bound !== undefined && bound.processes === processes && processes !== "" ? bound : undefined;
   let boundNewer: string[] = [];
@@ -1070,7 +1088,7 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
       if (reported !== null && typeof row?.first_user_message === "string") firsts.set(reported, row.first_user_message);
     }
     if (resumed !== null) {
-      const row = db.query<{ rollout_path: string }, [string]>("SELECT rollout_path FROM threads WHERE id = ?").get(resumed);
+      const row = db.query<{ rollout_path: string; cwd: string }, [string]>("SELECT rollout_path, cwd FROM threads WHERE id = ?").get(resumed);
       // After /new the command line still names the resumed thread. Trust it only while
       // no other interactive thread in this cwd began after this Codex did (newerThreads;
       // one no other pane shows counts too: then the chat says it cannot tell, rather
@@ -1081,18 +1099,22 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
         ? Math.floor(startedAt / 1000)
         : (db.query<{ updated_at: number }, [string]>("SELECT updated_at FROM threads WHERE id = ?").get(resumed)?.updated_at ?? 0);
       resumedPath = row ? codexRolloutPath(row.rollout_path, home) : null;
-      resumedNewer = newerThreads(db, cwd, since, resumed, paneId, home, firsts);
+      resumedNewer = newerThreads(db, row?.cwd ?? cwd, since, resumed, paneId, home, firsts);
     }
     // the same guard for a match: after /new the process writes a thread begun since
     // (created_at has whole seconds, so one begun in the match's second counts too)
-    if (boundHere !== undefined) boundNewer = newerThreads(db, cwd, Math.floor(boundHere.at / 1000), null, paneId, home, firsts);
-    const rows = db.query<{ rollout_path: string }, [string]>(
-      // a burst of `codex exec` runs must not push the pane's own thread out of the 32
-      `SELECT rollout_path FROM threads WHERE cwd = ? AND archived = 0 AND agent_role IS NULL${interactive(db)} ORDER BY updated_at DESC LIMIT 33`,
-    ).all(cwd);
-    const rollouts = rows.slice(0, 32).map((row) => codexRolloutPath(row.rollout_path, home));
+    if (boundHere !== undefined) boundNewer = newerThreads(db, boundHere.cwd ?? cwd, Math.floor(boundHere.at / 1000), null, paneId, home, firsts);
+    // A Windows resume picker may neither report a thread id nor update herdr's cwd.
+    // Search across directories only for a substantial, unique screen match; never a short-answer guess.
+    const otherDirectories = process.platform === "win32" && !session?.value && resumed === null && boundHere === undefined && processes !== "";
+    const rows = codexTranscriptRows(db, cwd, otherDirectories);
+    const rollouts = rows.slice(0, otherDirectories ? 256 : 32).map((row) => {
+      const path = codexRolloutPath(row.rollout_path, home);
+      if (path) directories.set(path, row.cwd);
+      return path;
+    });
     // a thread whose rollout is gone or outside the store is still a conversation of this cwd
-    listed = rows.length <= 32 && !rollouts.includes(null);
+    listed = !otherDirectories && rows.length <= 32 && !rollouts.includes(null);
     paths = [...new Set([...paths, ...(reported !== null ? [reported] : []), ...rollouts.filter((path): path is string => path !== null)])];
   } catch { /* Older installations can still resolve their open descriptors. */ }
   finally { db?.close(); }
@@ -1103,7 +1125,7 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
   const matched = screen ? matchCodexTranscript(screen.text, candidates) : null;
   if (matched !== null) {
     boundRollouts.delete(paneId);
-    boundRollouts.set(paneId, { processes, path: matched, at: Date.now() });
+    boundRollouts.set(paneId, { processes, path: matched, at: Date.now(), cwd: directories.get(matched) ?? boundHere?.cwd });
     if (boundRollouts.size > 64) boundRollouts.delete(boundRollouts.keys().next().value!);
     return matched;
   }

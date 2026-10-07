@@ -61,7 +61,8 @@ try {
   const machine = (await api<{ machines: Machine[] }>("/api/machines")).machines.find((m) => m.id === machineId);
   assert.ok(machine);
   console.log("machine:", JSON.stringify({ state: machine.state, herdr: machine.herdr }));
-  assert.equal(machine.herdr?.terminal_attach, false, "a Windows herdr reports no terminal attach");
+  assert.equal(machine.herdr?.terminal_attach, false, "a Windows herdr reports no direct terminal attach");
+  assert.equal(machine.herdr?.terminal_control, true, "the Windows bridge exposes terminal session control");
   console.log("PASS Add PC with a password, dedicated key, bundle install and detached start");
 
   const path = `/api/machines/${machineId}`;

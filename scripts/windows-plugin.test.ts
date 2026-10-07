@@ -65,8 +65,8 @@ it.skipIf(process.platform !== "win32")("starts after its launcher exits, stops 
   try {
     await run("start");
     // start's process has exited, but the managed server and its children must still answer.
-    const health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json() as { herdr: { terminal_mirror: boolean } };
-    expect(health.herdr.terminal_mirror).toBe(true);
+    const health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json() as { herdr: { terminal_attach?: boolean; terminal_control?: boolean; terminal_mirror?: boolean } };
+    expect([health.herdr.terminal_attach, health.herdr.terminal_control, health.herdr.terminal_mirror]).toEqual([false, true, undefined]);
     // The "not built yet" notice is a 200 too: the page itself must come back.
     expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toContain('<div id="root"');
     const history = await (await fetch(`http://127.0.0.1:${port}/api/pane/conversation?pane_id=history`)).json() as { source: string; turns: unknown[] };

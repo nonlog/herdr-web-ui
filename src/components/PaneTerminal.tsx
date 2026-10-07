@@ -167,9 +167,12 @@ export function PaneTerminal({
   const [altArmed, setAltArmed] = useState(false);
   // observe mode: the ref is what onData and the resize listeners read mid-stream
   const observeRef = useRef(false);
-  // a mirrored pane (no terminal attach on its PC): the grid is the pane's own in herdr, adopted like an observer's
+  // a legacy pane.read mirror: the grid is the pane's own in herdr, adopted like an observer's
   const fixedGridRef = useRef(false);
-  // the pty's grid as the server last said it for this pane (pane-geometry), whoever set it
+  // herdr terminal session control is browser-sized like direct attach, but wheel events are
+  // semantic commands so herdr can choose host scrollback vs TUI mouse/alternate scrolling.
+  const controlSessionRef = useRef(false);
+  // the terminal grid as the server last said it for this pane (pane-geometry), whoever set it
   const sharedGridRef = useRef<{ cols: number; rows: number } | null>(null);
   // the modifyOtherKeys level the pane's program asked for, as this pane's stream last said it
   const modifyOtherKeysRef = useRef(0);
@@ -398,6 +401,33 @@ export function PaneTerminal({
         dragWheel(event);
         return false;
       }
+      // terminal session control has no local PTY for xterm to encode the wheel into.
+      // Send one semantic wheel command to herdr instead; herdr routes it to host scrollback,
+      // DEC mouse reporting or alternate scroll according to the pane's current terminal mode.
+      if (controlSessionRef.current) {
+        if (event.ctrlKey || event.deltaY === 0) return false;
+        if (term.hasSelection()) term.clearSelection();
+        const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+        let column: number | undefined;
+        let row: number | undefined;
+        if (screen) {
+          const rect = screen.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            column = Math.max(0, Math.min(term.cols - 1, Math.floor((event.clientX - rect.left) / (rect.width / term.cols))));
+            row = Math.max(0, Math.min(term.rows - 1, Math.floor((event.clientY - rect.top) / (rect.height / term.rows))));
+          }
+        }
+        const modifiers = (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0);
+        socketRef.current?.scroll(
+          paneRef.current ?? "",
+          event.deltaY < 0 ? "up" : "down",
+          Math.max(1, wheelSpeedRef.current),
+          column,
+          row,
+          modifiers,
+        );
+        return false;
+      }
       // an adopted grid sends herdr nothing: the wheel is the browser's, and pans the mount
       if (adopted()) return false;
       if (term.hasSelection()) term.clearSelection();
@@ -417,8 +447,8 @@ export function PaneTerminal({
     termRef.current = term;
     fitRef.current = fit;
 
-    // A grid that is not this browser's own (observing, or mirrored from a PC that cannot
-    // attach) may be larger than the mount. The mount then scrolls (PaneTerminal.css) and a
+    // A grid that is not this browser's own (observing, or the legacy pane.read mirror)
+    // may be larger than the mount. The mount then scrolls (PaneTerminal.css) and a
     // drag pans it. Until the user pans, the view keeps the cursor's row in sight: the top of
     // the grid while the row fits there, else the bottom rows, where a prompt sits. A mirror
     // has no cursor; xterm's own rests on the last row with text, which serves the same.
@@ -765,10 +795,17 @@ export function PaneTerminal({
         panned = false;
         followCursor();
       } else if (message.type === "pane-geometry") {
-        // observe clients adopt the pty's grid; interact clients drive it and ignore this,
-        // unless the grid is fixed: then nobody here drives it
+        // Observe clients adopt the shared grid. A legacy pane.read mirror is fixed to herdr's
+        // own pane size. A terminal-session controller is live and browser-sized like direct attach,
+        // but its wheel path stays semantic (controlSessionRef) instead of xterm mouse bytes.
         if (message.pane_id !== paneRef.current) return;
-        if (message.fixed) fixedGridRef.current = true;
+        if (message.fixed) {
+          fixedGridRef.current = true;
+          controlSessionRef.current = false;
+        } else if (message.control) {
+          fixedGridRef.current = false;
+          controlSessionRef.current = true;
+        }
         // kept while the terminal lens ignores it: another device may drive the grid, and the
         // chat lens entered later must draw its hidden screen for that grid, not this device's
         sharedGridRef.current = { cols: message.cols, rows: message.rows };
@@ -1158,6 +1195,7 @@ export function PaneTerminal({
     setHeld(false);
     setUnsupported(false);
     fixedGridRef.current = false;
+    controlSessionRef.current = false;
     sharedGridRef.current = null;
     // the next pane's grid is this browser's again unless it says otherwise (pane-geometry)
     hostRef.current?.toggleAttribute("data-adopted-grid", observeRef.current);

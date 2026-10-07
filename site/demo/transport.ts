@@ -676,7 +676,7 @@ class DemoSocket extends EventTarget {
           this.push({ type: "submit-result", id: message.id, pane_id: message.pane_id, ok: true });
         }
         break;
-      default: /* resize, pty-ack: nothing to do in the demo */
+      default: /* resize, scroll, pty-ack: nothing to do in the demo */
     }
   }
 

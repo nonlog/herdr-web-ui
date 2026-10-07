@@ -41,21 +41,22 @@ try {
   assert.ok(descriptor, "bundle starts a private daemon and bridge without system runtimes");
   const response = await fetch(`http://127.0.0.1:${descriptor.port}/api/bridge`, { headers: { authorization: `Bearer ${descriptor.token}` } });
   assert.equal(response.status, 200);
-  const identity = await response.json() as { socket_path: string; herdr: { terminal_attach?: boolean } };
+  const identity = await response.json() as { socket_path: string; herdr: { terminal_attach?: boolean; terminal_control?: boolean } };
   assert.equal(identity.socket_path, socket);
-  // a Windows herdr has no terminal attach (herdrdev/herdr#4821); the bridge must say so
+  // Native Windows has no direct attach, but terminal session control is portable.
   assert.equal(identity.herdr.terminal_attach, !windows);
+  assert.equal(identity.herdr.terminal_control, true);
   assert.equal((await fetch(`http://127.0.0.1:${descriptor.port}/api/session`)).status, 401);
   console.log("Remote bundle startup, isolated socket and authentication passed");
 
-  // A live terminal, not only what the bridge says of itself: herdr's own attach where the
-  // bundle carries Node, a mirror of the pane's screen on Windows. Typing reaches the shell
-  // either way, and what it prints comes back.
+  // A live terminal, not only what the bridge says of itself: direct attach where the bundle
+  // carries Node, terminal session control on Windows. Typing reaches the shell either way,
+  // and what it prints comes back.
   const headers = { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" };
   const created = await fetch(`http://127.0.0.1:${descriptor.port}/api/workspace/create`, { method: "POST", headers, body: JSON.stringify({ cwd: home, label: "herdr-web-ui-test-bundle-smoke" }) });
   assert.equal(created.status, 200, await created.clone().text());
   const paneId = (await created.json() as { pane_id: string }).pane_id;
-  const frames: { type: string; pane_id?: string; data?: string; fixed?: boolean; code?: string; message?: string }[] = [];
+  const frames: { type: string; pane_id?: string; data?: string; fixed?: boolean; control?: boolean; code?: string; message?: string }[] = [];
   const ws = new WebSocket(`ws://127.0.0.1:${descriptor.port}/ws`, { headers } as never);
   ws.onmessage = (event) => { frames.push(JSON.parse(String(event.data))); };
   await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = () => reject(new Error("bridge websocket failed")); });
@@ -67,11 +68,13 @@ try {
     ws.send(JSON.stringify({ type: "attach", pane_id: paneId, cols: 100, rows: 30 }));
     await until("the terminal paints", () => frames.some((frame) => frame.type === "pty-data" && frame.pane_id === paneId));
     const mirrored = frames.some((frame) => frame.type === "pane-geometry" && frame.pane_id === paneId && frame.fixed === true);
-    assert.equal(mirrored, windows, windows ? "a Windows bridge mirrors the pane's screen" : "the bundle's own Node runs the terminal attach: no mirror");
+    const controlled = frames.some((frame) => frame.type === "pane-geometry" && frame.pane_id === paneId && frame.control === true);
+    assert.equal(mirrored, false, "supported bundles use a live terminal transport, never pane.read mirroring");
+    assert.equal(controlled, windows, windows ? "a Windows bridge uses terminal session control" : "the bundle's Node uses direct terminal attach");
     // arithmetic, so the echo of the typed line is not the answer
     ws.send(JSON.stringify({ type: "input", pane_id: paneId, text: windows ? "echo \"smoke-$(40+2)\"\r" : "echo smoke-$((40+2))\r" }));
     await until("typing reaches the shell and its output comes back", () => frames.some((frame) => frame.type === "pty-data" && frame.pane_id === paneId && (frame.data ?? "").includes("smoke-42")));
-    console.log(`Remote bundle live terminal passed (${mirrored ? "mirror" : "attach"})`);
+    console.log(`Remote bundle live terminal passed (${controlled ? "control" : "attach"})`);
   } finally {
     ws.close();
   }

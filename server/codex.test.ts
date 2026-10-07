@@ -1,11 +1,38 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { Database } from "bun:sqlite";
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { codexCallFailed, codexHistoryTail, codexHomeInPsLine, codexRolloutPath, processCodexHome, forgetHistoryChains, matchCodexTranscript, matchShortCodexAnswers, parseCodexTranscript, resumedThread, unansweredCodexQuestions } from "./codex.ts";
+import { join, toNamespacedPath } from "node:path";
+import { codexCallFailed, codexHistoryTail, codexHomeInPsLine, codexRolloutPath, codexTranscriptRows, processCodexHome, forgetHistoryChains, matchCodexTranscript, matchShortCodexAnswers, parseCodexTranscript, resumedThread, unansweredCodexQuestions } from "./codex.ts";
 import { splitTurn } from "../src/lib/workBlocks.ts";
 
 const ts = "2026-09-22T01:00:00.000Z";
+describe("Windows Codex resume candidates", () => {
+  it.skipIf(process.platform !== "win32")("finds prefixed cwd and uniquely matches a resumed conversation from another directory", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec("CREATE TABLE threads (id TEXT, cwd TEXT, rollout_path TEXT, archived INTEGER, agent_role TEXT, source TEXT, updated_at INTEGER)");
+      const general = join(tmpdir(), "general");
+      const project = join(tmpdir(), "conduit");
+      const insert = db.query("INSERT INTO threads VALUES (?, ?, ?, 0, ?, ?, ?)");
+      insert.run("general", toNamespacedPath(general), "general.jsonl", null, "cli", 1);
+      insert.run("conduit", toNamespacedPath(project), "conduit.jsonl", null, "cli", 2);
+      insert.run("subagent", toNamespacedPath(project), "subagent.jsonl", "worker", "cli", 3);
+      insert.run("exec", toNamespacedPath(project), "exec.jsonl", null, "exec", 4);
+      expect(codexTranscriptRows(db, general).map((row) => row.id)).toEqual(["general"]);
+      expect(codexTranscriptRows(db, toNamespacedPath(general)).map((row) => row.id)).toEqual(["general"]);
+      const rows = codexTranscriptRows(db, general, true);
+      expect(rows.map((row) => row.id)).toEqual(["conduit", "general"]);
+      const answer = "The resumed project's conversation contains a sufficiently long and distinctive assistant response for reliable matching.";
+      const candidates = rows.map((row) => ({ path: row.rollout_path, text: JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: row.id === "conduit" ? answer : "Unrelated response" }] } }) }));
+      expect(matchCodexTranscript(answer, candidates)).toBe("conduit.jsonl");
+      expect(matchCodexTranscript(answer, [...candidates, { path: "duplicate.jsonl", text: candidates[0]!.text }])).toBeNull();
+      expect(matchCodexTranscript("OpenAI Codex (v0.160.1)\nAsk Codex to do anything", candidates)).toBeNull();
+      for (let i = 0; i < 255; i++) insert.run(`overflow-${i}`, toNamespacedPath(project), `${i}.jsonl`, null, "cli", i + 5);
+      expect(codexTranscriptRows(db, general, true)).toEqual([]);
+    } finally { db.close(); }
+  });
+});
 const item = (payload: unknown, timestamp = ts) => ({ type: "response_item", timestamp, payload });
 const event = (payload: unknown, timestamp = ts) => ({ type: "event_msg", timestamp, payload });
 const message = (role: string, text: string, phase?: string) => item({
@@ -363,6 +390,25 @@ describe("Codex rollout resolution", () => {
     expect(codexRolloutPath(path, home)).toBeNull();
     writeFileSync(path, JSON.stringify({ type: "session_meta", payload: { source: "cli", thread_source: "subagent" } }));
     expect(codexRolloutPath(path, home)).toBeNull();
+  });
+
+  it.skipIf(process.platform !== "win32")("accepts mixed Windows namespace paths without allowing store escapes", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-codex-namespace-"))); roots.push(root);
+    const home = join(root, "codex");
+    const sessions = join(home, "sessions");
+    mkdirSync(sessions, { recursive: true });
+    const header = JSON.stringify({ type: "session_meta", payload: { source: "cli", thread_source: "user" } });
+    const path = join(sessions, "rollout.jsonl");
+    writeFileSync(path, header);
+    const outside = join(root, "outside.jsonl");
+    writeFileSync(outside, header);
+    for (const store of [home, toNamespacedPath(home)]) {
+      for (const candidate of [path, toNamespacedPath(path)]) {
+        expect(codexRolloutPath(candidate, store)).toBe(realpathSync(candidate));
+      }
+      expect(codexRolloutPath(toNamespacedPath(outside), store)).toBeNull();
+      expect(codexRolloutPath(toNamespacedPath(join(sessions, "..", "..", "outside.jsonl")), store)).toBeNull();
+    }
   });
 
   /** Rollouts as Codex 0.156 writes them: one record per line, ordinals running on from the cut a rollout starts at. */

@@ -231,6 +231,19 @@ export class HerdrSocket {
     this.send({ type: "resize", pane_id: paneId, cols, rows });
   }
 
+  /** A wheel over a terminal-session-controlled pane is routed by herdr itself:
+   * host scrollback when the app is plain, mouse reporting / alternate scroll in a TUI. */
+  scroll(paneId: string, direction: "up" | "down", lines: number, column?: number, row?: number, modifiers = 0): boolean {
+    if (!this.connected || this.mode !== "interact" || !this.attached.has(paneId) || !this.features.has("terminal-scroll")) return false;
+    this.rawSend({
+      type: "scroll", pane_id: paneId, direction, lines,
+      ...(column === undefined ? {} : { column }),
+      ...(row === undefined ? {} : { row }),
+      ...(modifiers === 0 ? {} : { modifiers }),
+    });
+    return true;
+  }
+
   /** Whether this connection may take a held pane from another web bridge: a server that knows how, and not observing. */
   canTakeOver(): boolean {
     return this.connected && this.mode === "interact" && this.features.has("take-over");

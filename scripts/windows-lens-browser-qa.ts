@@ -1,8 +1,8 @@
-/** What a PC without terminal attach (Windows, herdrdev/herdr#4821) looks like in the browser:
- * the server answers as a Windows herdr would (`terminalAttach: false`) over a real pane of
- * the test herdr, and the terminal lens shows that pane's screen, mirrored. A grid that is not
- * the browser's own (a mirror's, an observer's) must pan to every cell on a small screen. Run after
- * `bun run build`; UI_EVIDENCE_DIR saves screenshots. */
+/** What a native-Windows PC without direct terminal attach looks like in the browser:
+ * the server answers as Windows herdr does (`terminalAttach: false`) and uses
+ * `terminal session control` for a live ANSI stream. The browser owns the controller's
+ * grid and wheel/touch scrolling goes back to herdr as semantic terminal.scroll events.
+ * Run after `bun run build`; UI_EVIDENCE_DIR saves screenshots. */
 import "./test-herdr.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
@@ -74,8 +74,8 @@ try {
   const paneId = created.root_pane.pane_id;
   server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false });
   const origin = `http://127.0.0.1:${server.port}`;
-  const health = await (await fetch(`${origin}/api/health`)).json() as { herdr: { terminal_attach?: boolean; terminal_mirror?: boolean } };
-  assert.deepEqual([health.herdr.terminal_attach, health.herdr.terminal_mirror], [false, true]);
+  const health = await (await fetch(`${origin}/api/health`)).json() as { herdr: { terminal_attach?: boolean; terminal_control?: boolean; terminal_mirror?: boolean } };
+  assert.deepEqual([health.herdr.terminal_attach, health.herdr.terminal_control, health.herdr.terminal_mirror], [false, true, undefined]);
   browser = await chromium.launch({ executablePath: process.env["CHROME_PATH"] ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await context.newPage();
@@ -92,65 +92,48 @@ try {
   await page.locator(".xterm-helper-textarea").focus();
   await page.keyboard.type("echo mirror-ok-$((40+2))");
   await page.keyboard.press("Enter");
-  await until(async () => (await screen(page)).includes("mirror-ok-42"), "the command's output reaches the mirrored terminal");
+  await until(async () => (await screen(page)).includes("mirror-ok-42"), "the command's output reaches the controlled terminal");
   // colour survives: herdr's read keeps the escape sequences
   await page.keyboard.type("printf '\\033[31mred-cell\\033[0m\\n'");
   await page.keyboard.press("Enter");
   await until(async () => await page.locator(".xterm-rows span[class*='xterm-fg-1']", { hasText: "red-cell" }).count() > 0, "a red cell is painted red");
-  if (evidence) await page.screenshot({ path: join(evidence, "windows-mirror-desktop.png") });
-  console.log("PASS the terminal lens of a PC without attach shows the pane's screen, typed input included");
+  if (evidence) await page.screenshot({ path: join(evidence, "windows-control-desktop.png") });
+  console.log("PASS the terminal lens of a PC without direct attach streams the controlled pane, typed input included");
 
-  // the chat lens and back: the mirror is still there, and the grid is the pane's own
+  // the chat lens and back: the controller is still live
   await page.getByRole("button", { name: /^Chat/ }).click();
   await terminal.click();
   await until(async () => (await screen(page)).includes("mirror-ok-42"), "the screen is back after a lens switch");
-  console.log("PASS the mirrored screen survives a lens switch");
+  console.log("PASS the controlled terminal survives a lens switch");
 
   // a screen that fills the pane: a line that ends in the grid's last column, and the prompt on its last row
   await page.locator(".xterm-helper-textarea").focus();
   await page.keyboard.type("for i in $(seq 1 60); do echo hist-$i; done; printf '%*s\\n' $COLUMNS right-edge");
   await page.keyboard.press("Enter");
   await page.keyboard.type("tail-marker");
-  await until(async () => /right-edge[\s\S]*tail-marker/.test(await screen(page)), "the full screen reaches the mirrored terminal");
+  await until(async () => /right-edge[\s\S]*tail-marker/.test(await screen(page)), "the full screen reaches the controlled terminal");
 
-  // #230: the grid is the pane's own, wider and taller than a phone. Every cell can be reached.
+  // A controller is browser-sized: a phone does not pan a desktop grid. Its wheel goes
+  // to herdr, which scrolls host history and redraws the controller stream.
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   const small = await phone.newPage();
   small.on("pageerror", (error) => errors.push(error.message));
   small.setDefaultTimeout(10_000);
   await small.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
-  await until(async () => (await screen(small)).includes("tail-marker"), "a second, phone-sized viewer gets the current screen");
-  if (evidence) await small.screenshot({ path: join(evidence, "windows-mirror-phone.png") });
-  console.log("PASS a phone-sized second viewer sees the same screen");
-  await until(async () => shown(await inset(small, "tail-marker")), "the view opens on the rows with the prompt");
-  assert.equal(shown(await inset(small, "right-edge")), false, "the grid is wider than the phone");
-  await dragUntil(small, -300, 0, async () => shown(await inset(small, "right-edge")), "a drag to the left brings the last column in");
-  assert.equal(shown(await inset(small, "tail-marker")), false, "the prompt's start went out to the left");
-  if (evidence) await small.screenshot({ path: join(evidence, "windows-mirror-phone-panned-right.png") });
-  const right = await scrollOf(small);
-  assert.equal(Math.abs(right.left - right.width) <= 1, true, "panned to the grid's right edge");
-  await dragUntil(small, 300, 300, async () => { const at = await scrollOf(small); return at.left === 0 && at.top === 0; }, "a drag back reaches the first row and column");
-  if (evidence) await small.screenshot({ path: join(evidence, "windows-mirror-phone-panned-top.png") });
-  if (right.height > 0) assert.equal(shown(await inset(small, "tail-marker")), false, "at the top the last row is below the mount");
-  await dragUntil(small, 0, -300, async () => shown(await inset(small, "tail-marker")), "a drag up brings the last row back");
+  await until(async () => (await screen(small)).includes("tail-marker"), "a phone-sized viewer gets the current controlled screen");
+  const fittedControl = await scrollOf(small);
+  assert.deepEqual([fittedControl.adopted, fittedControl.width, fittedControl.height], [false, 0, 0], "a controlled grid fits the phone");
+  assert.equal(await small.locator(".pane-terminal").evaluate((host) => getComputedStyle(host).overflow), "hidden");
+  await small.locator(".pane-terminal").hover();
+  await small.mouse.wheel(0, -1200);
+  await until(async () => !(await screen(small)).includes("tail-marker"), "wheel up scrolls herdr history through terminal.scroll");
+  if (evidence) await small.screenshot({ path: join(evidence, "windows-control-phone-history.png") });
+  await small.mouse.wheel(0, 1200);
+  await until(async () => (await screen(small)).includes("tail-marker"), "wheel down returns to the live bottom");
+  assert.deepEqual(await scrollOf(small), fittedControl, "semantic history scrolling never pans the terminal mount");
   assert.equal(await small.evaluate(() => document.documentElement.scrollWidth <= innerWidth && scrollY === 0), true, "the page itself never scrolls");
-  console.log("PASS on a phone a drag pans a mirrored grid to its last column and its last row");
+  console.log("PASS a Windows-style controller fits a phone and scrolls herdr history");
   await phone.close();
-
-  // a small desktop window: the wheel pans, and a scrollbar is there
-  const narrow = await browser.newContext({ viewport: { width: 700, height: 420 } });
-  const windowed = await narrow.newPage();
-  windowed.on("pageerror", (error) => errors.push(error.message));
-  await windowed.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
-  await until(async () => shown(await inset(windowed, "tail-marker")), "a small window opens on the prompt's row");
-  await windowed.locator(".pane-terminal").hover();
-  await windowed.mouse.wheel(4000, 0);
-  await until(async () => shown(await inset(windowed, "right-edge")), "the wheel pans to the last column");
-  if (evidence) await windowed.screenshot({ path: join(evidence, "windows-mirror-small-window.png") });
-  await windowed.mouse.wheel(-4000, -4000);
-  await until(async () => { const at = await scrollOf(windowed); return at.left === 0 && at.top === 0; }, "the wheel pans back to the first cell");
-  console.log("PASS in a small desktop window the wheel pans a mirrored grid");
-  await narrow.close();
 
   // A herdr that attaches: an interact client's grid is its own and fits, so nothing pans and a
   // vertical drag still scrolls herdr's history. An observer adopts the operator's grid and pans it.

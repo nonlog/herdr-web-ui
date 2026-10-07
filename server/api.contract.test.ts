@@ -2142,12 +2142,13 @@ describe("terminal lens of a bridge without the PTY sidecar", () => {
     } finally { bridge.stop(); rmSync(dir, { recursive: true, force: true }); }
   };
 
-  it("reports a mirror from /api/health and /api/bridge though herdr itself can attach", async () => {
+  it("reports portable terminal control from /api/health and /api/bridge when the PTY sidecar is absent", async () => {
     const herdr = await ping();
-    // the case only means something against a herdr that can attach
+    // the case only means something against a herdr that can direct-attach on this runner
     expect(herdr.terminal_attach).toBe(true);
-    const mirrored = { ...herdr, terminal_attach: false, terminal_mirror: true };
-    expect(await told(false)).toEqual({ health: mirrored, bridge: mirrored });
+    expect(herdr.terminal_control).toBe(true);
+    const controlled = { ...herdr, terminal_attach: false };
+    expect(await told(false)).toEqual({ health: controlled, bridge: controlled });
   });
 
   it("passes herdr's own answer through where the sidecar runs", async () => {

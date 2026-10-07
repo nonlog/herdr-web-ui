@@ -8,6 +8,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
 ## [Unreleased]
 
 ### Added
+- Native Windows terminals use herdr 0.9.3's `terminal session control` stream when direct
+  `terminal attach` is unavailable. The terminal now fits the browser, receives live ANSI frames,
+  and sends wheel/touch scrolling back to herdr as semantic `terminal.scroll` events, so history
+  scrollback and TUI mouse/alternate scrolling work without a Node/node-pty sidecar.
 - **Settings → Appearance → Sidebar rows** has **Two lines**: a workspace row shows what its
   agent is doing, with the workspace and folder under it, as the sidebar did before its rows
   became one line. **One line**, the workspace's name alone, stays the default.
@@ -51,6 +55,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   checkouts too. ([#521](https://github.com/devswha/herdr-web-ui/pull/521))
 
 ### Fixed
+- Codex chat on Windows can recover a resumed conversation whose stored cwd uses a Windows
+  namespace path or whose resume picker moved to a thread from another directory. Cross-directory
+  recovery requires one substantial, unique screen match and refuses ambiguous or oversized
+  candidate sets instead of guessing, fixing affected panes that showed **Chat mode unavailable**.
 - A workspace row's state rolls up as herdr's does: a workspace with one finished agent and one
   still running shows DONE, where it showed RUN.
   ([#521](https://github.com/devswha/herdr-web-ui/pull/521))

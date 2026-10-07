@@ -28,16 +28,18 @@ export interface Machine {
 }
 /**
  * The herdr behind a PC, as its bridge can serve it. terminal_attach is false on a Windows
- * host: herdr has no `terminal attach` there yet (herdrdev/herdr#4821), and it is false on
- * any bridge whose runtime cannot run the PTY sidecar (the win32 bundle ships none). Such a
- * PC's panes have the chat lens and a mirrored terminal (terminal_mirror). Absent on older
- * bridges, which are never Windows.
+ * host: herdr has no direct terminal attach there yet (herdrdev/herdr#4821), and it is false on
+ * any bridge whose runtime cannot run the PTY sidecar. Herdr 0.9.3 also exposes a
+ * terminal session control stream that needs no PTY sidecar and works on native Windows;
+ * terminal_control marks that bridge path. terminal_mirror remains the legacy fallback.
  */
 export interface HerdrIdentity {
   version: string;
   protocol: number;
   terminal_attach?: boolean;
-  /** without attach, the terminal lens shows the pane's screen repainted a few times a second (server/mirror.ts) */
+  /** herdr's newline-JSON terminal session control bridge; no Node/node-pty sidecar required. */
+  terminal_control?: boolean;
+  /** without either live stream, the terminal lens repaints pane.read as a legacy fallback. */
   terminal_mirror?: boolean;
 }
 export type MachineAction = "update_bridge" | "setup";

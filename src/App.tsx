@@ -101,12 +101,12 @@ function storeSelection(machineId: string, paneId: string | null): void {
  * conversation better than a TUI sized for a desktop. Until the snapshot says whether the
  * pane has an agent (null), a touch screen guesses chat: most panes opened there are agents,
  * and guessing terminal flashed it for the seconds before the snapshot arrived. A PC whose
- * herdr has no terminal attach and no mirror either (an older Windows bridge) always opens
- * its chat: its terminal lens is only a notice, so a remembered choice there is not worth
- * keeping. A mirrored PC counts as having a terminal.
+ * herdr has no live terminal transport (an older bridge) always opens its chat: its terminal
+ * lens is only a notice, so a remembered choice there is not worth keeping. Direct attach,
+ * terminal control and the legacy mirror all count as having a terminal.
  */
-function storedView(paneId: string, machineId: string, hasAgent: boolean | null, terminalAttach: boolean, defaultView: DefaultView): PaneView {
-  if (!terminalAttach) return "chat";
+function storedView(paneId: string, machineId: string, hasAgent: boolean | null, terminalAvailable: boolean, defaultView: DefaultView): PaneView {
+  if (!terminalAvailable) return "chat";
   try {
     const stored = window.localStorage.getItem(`herdr-web-ui:view:${paneStorageId(machineId, paneId)}`);
     if (stored === "chat" || stored === "terminal") return stored;
@@ -548,17 +548,17 @@ export function App() {
   const targetHerdr = selectedMachineId === "local" ? health?.herdr : selectedMachine?.herdr;
   const selectedTitle = selectedPane ? displayPaneTitle(selectedPane) : null;
   const selectedAgent = selectedPane?.agent ?? null;
-  // unknown herdr (offline, or a server that predates the flag) counts as attach-capable
-  // a server that repaints the pane's screen instead (terminal_mirror) has a terminal lens too
-  const terminalAttach = targetHerdr?.terminal_attach !== false || targetHerdr?.terminal_mirror === true;
+  // Unknown herdr (offline, or a server that predates the flags) counts as terminal-capable.
+  // Native Windows uses terminal_control; terminal_mirror is the legacy compatibility fallback.
+  const terminalAvailable = targetHerdr?.terminal_attach !== false || targetHerdr?.terminal_control === true || targetHerdr?.terminal_mirror === true;
 
   // the lens follows the selected pane: each pane remembers its own. It is settled in the render
   // that selects the pane, not in an effect after it: the pane's terminal attaches in that render's
   // layout effect, and an attach in the previous pane's lens resized a pane whose lens is chat
-  const lensKey = JSON.stringify([selectedPaneId, selectedMachineId, selectedPane !== null, selectedAgent !== null, terminalAttach, settings.defaultView]);
+  const lensKey = JSON.stringify([selectedPaneId, selectedMachineId, selectedPane !== null, selectedAgent !== null, terminalAvailable, settings.defaultView]);
   let view = lens.view;
   if (lens.key !== lensKey) {
-    if (selectedPaneId !== null) view = storedView(selectedPaneId, selectedMachineId, selectedPane ? selectedAgent !== null : null, terminalAttach, settings.defaultView);
+    if (selectedPaneId !== null) view = storedView(selectedPaneId, selectedMachineId, selectedPane ? selectedAgent !== null : null, terminalAvailable, settings.defaultView);
     setLens({ key: lensKey, view });
   }
 
@@ -778,10 +778,10 @@ export function App() {
               <MessageSquare />
               <span className="header-desktop-only">{t("Chat")}</span>
             </button>
-            <button type="button" aria-pressed={view === "terminal"} onClick={() => setView("terminal")} title={terminalAttach ? t("Live terminal (⌘⇧J)") : t("Live terminal: coming to Windows PCs once herdr can attach there")}>
+            <button type="button" aria-pressed={view === "terminal"} onClick={() => setView("terminal")} title={terminalAvailable ? t("Live terminal (⌘⇧J)") : t("Live terminal is unavailable on this bridge")}>
               <SquareTerminal />
               <span className="header-desktop-only">{t("Terminal")}</span>
-              {!terminalAttach && <span className="pill pill-soon">{t("soon")}</span>}
+              {!terminalAvailable && <span className="pill pill-soon">{t("soon")}</span>}
             </button>
           </div>
         )}

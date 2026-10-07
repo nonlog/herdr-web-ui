@@ -235,10 +235,12 @@ describe("terminal attach capability", () => {
     expect(terminalAttachSupported(undefined)).toBe(process.platform !== "win32");
   });
 
-  it("mirrors a PC whose bridge cannot run the PTY sidecar, whatever herdr declares", () => {
+  it("uses terminal control without a PTY sidecar and mirrors only as a legacy fallback", () => {
+    const controlled = { version: "0.9.9", protocol: 22, terminal_attach: true, terminal_control: true };
+    expect(attachableIdentity(controlled, false)).toEqual({ ...controlled, terminal_attach: false });
+    expect(attachableIdentity(controlled, true)).toEqual(controlled);
     const declared = { version: "0.9.9", protocol: 22, terminal_attach: terminalAttachSupported({ direct_terminal_attach: true }) };
     expect(attachableIdentity(declared, false)).toEqual({ version: "0.9.9", protocol: 22, terminal_attach: false, terminal_mirror: true });
-    expect(attachableIdentity(declared, true)).toEqual(declared);
     const mirrored = { version: "0.9.9", protocol: 22, terminal_attach: false, terminal_mirror: true };
     expect(attachableIdentity(mirrored, true)).toEqual(mirrored);
     expect(attachableIdentity(mirrored, false)).toEqual(mirrored);
