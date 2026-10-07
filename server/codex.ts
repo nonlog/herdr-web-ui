@@ -879,8 +879,12 @@ function interactive(db: Database): string {
 
 /** Candidate rows for transcript discovery; extracted so directory selection is testable. */
 export function codexTranscriptRows(db: Database, cwd: string, otherDirectories = false): { id: string; cwd: string; rollout_path: string }[] {
+  // Older Codex stores did not have the thread id column. Transcript discovery never
+  // needed it; keep those stores readable by giving their rows a stable local stand-in.
+  const id = db.query("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'id'").get() !== null
+    ? "id" : "CAST(rowid AS TEXT) AS id";
   const rows = db.query<{ id: string; cwd: string; rollout_path: string }, string[]>(
-    `SELECT id, cwd, rollout_path FROM threads WHERE ${otherDirectories ? "1" : CWD_MATCH} AND archived = 0 AND agent_role IS NULL${interactive(db)} ORDER BY updated_at DESC LIMIT ${otherDirectories ? 257 : 33}`,
+    `SELECT ${id}, cwd, rollout_path FROM threads WHERE ${otherDirectories ? "1" : CWD_MATCH} AND archived = 0 AND agent_role IS NULL${interactive(db)} ORDER BY updated_at DESC LIMIT ${otherDirectories ? 257 : 33}`,
   ).all(...(otherDirectories ? [] : cwdVariants(cwd)));
   // ponytail: bound cross-directory discovery to 256 threads; refuse incomplete evidence rather than guess.
   return otherDirectories && rows.length > 256 ? [] : rows;

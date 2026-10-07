@@ -105,7 +105,7 @@ process.stdin.on("data", chunk => {
   return { script, resultFile };
 }
 
-/** One secret entered on a pane whose terminal is mirrored (a herdr that cannot attach), herdr behind the proxy. */
+/** One secret entered through the legacy pane.read mirror, with herdr behind the proxy. */
 async function mirroredSecret(refuse: boolean) {
   const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-secret-mirror-"));
   const { script, resultFile } = standIn(root);
@@ -113,7 +113,14 @@ async function mirroredSecret(refuse: boolean) {
   const proxy = herdrProxy(join(root, "herdr.sock"), herdr);
   // the server under test reaches herdr through the proxy; this test's own calls name herdr's socket
   process.env["HERDR_SOCKET"] = join(root, "herdr.sock");
-  const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false });
+  const server = createServer({
+    port: 0,
+    hostname: "127.0.0.1",
+    token: "",
+    stateDir: join(root, "state"),
+    terminalAttach: false,
+    terminalControl: false,
+  });
   let workspace: string | undefined;
   let socket: WebSocket | undefined;
   const seen: any[] = [];

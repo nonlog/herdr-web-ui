@@ -33,7 +33,7 @@ git --version
 - A missing tool: **Ask** the user before installing it. Bun: `curl -fsSL https://bun.sh/install | bash`.
   herdr: <https://herdr.dev>. Node: the user's usual manager (nvm, Homebrew, distro packages).
 - herdr not running: ask the user to start `herdr` in a terminal, then check again.
-- Supported platforms: Linux x64 and arm64, macOS, Windows x64. Windows uses the [screen mirror](docs/remote-pcs.md#windows-pcs), so Node is not needed there. No compiler or Python is needed: the terminal
+- Supported platforms: Linux x64 and arm64, macOS, Windows x64. Windows uses [`terminal session control`](docs/remote-pcs.md#windows-pcs), so Node is not needed there. No compiler or Python is needed: the terminal
   addon is prebuilt for these platforms. Other platforms (Alpine, 32-bit ARM) have no build.
 
 ## 2. Choose the install method

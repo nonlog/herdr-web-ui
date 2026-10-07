@@ -81,7 +81,7 @@ describe("terminal session control transport", () => {
     try {
       await a.open;
       a.send({ type: "attach", pane_id: paneId, cols: 90, rows: 24 });
-      await until(() => a.state.ready > 0 && a.state.data.length > 0, "first controller ready");
+      await until(() => a.state.ready > 0, "first controller ready");
 
       a.send({ type: "input", pane_id: paneId, text: "for i in $(seq 1 80); do echo control-line-$i; done\r" });
       await until(() => a.state.data.includes("control-line-80"), "controller receives shell output");

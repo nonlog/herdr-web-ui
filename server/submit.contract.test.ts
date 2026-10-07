@@ -340,9 +340,16 @@ describe("WebSocket submit", () => {
   }, 30_000);
 });
 
-describe("a herdr without terminal attach (Windows)", () => {
+describe("the legacy pane.read mirror fallback", () => {
   let bare: { port: number; stop: () => void };
-  beforeAll(() => { bare = createServer({ port: 0, stateDir: join(root, "push-bare"), terminalAttach: false }); });
+  beforeAll(() => {
+    bare = createServer({
+      port: 0,
+      stateDir: join(root, "push-bare"),
+      terminalAttach: false,
+      terminalControl: false,
+    });
+  });
   afterAll(() => bare?.stop());
 
   it("mirrors the pane's screen: the pane's own grid first, then each changed screen, until the pane ends", async () => {

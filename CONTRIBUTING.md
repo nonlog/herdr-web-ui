@@ -13,7 +13,7 @@ adapted from another project, with its license.
 
 ## Set up
 
-- Linux (x64, arm64), macOS or Windows x64. Windows uses the screen mirror and needs no terminal addon; Alpine and 32-bit ARM have no addon build.
+- Linux (x64, arm64), macOS or Windows x64. Windows uses herdr `terminal session control` and needs no terminal addon; Alpine and 32-bit ARM have no addon build.
 - Bun 1.4 or newer, Node 18 or newer on Linux/macOS (it runs the terminal-attach sidecar), herdr 0.9.0 or newer for
   the integration tests. CI runs Bun 1.4.2, Node 22 and herdr 0.9.3.
 

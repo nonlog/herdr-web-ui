@@ -1955,7 +1955,7 @@ export function createServer(
               const inputFailed = () => {
                 if (clients.has(client)) send(client, { type: "error", code: "input_failed", message: "Terminal input could not be confirmed. Check the terminal before typing again.", pane_id: message.pane_id });
               };
-              // without a pty (Windows: no terminal, or a mirrored one) typing, the key bar's Enter,
+              // A legacy mirror has no live attachment stream, so typing, the key bar's Enter,
               // Stop and arrows go through herdr itself, each in its turn behind a message in flight.
               // The turn is taken before herdr is asked what it can do: a message sent while
               // that answer is on its way must not overtake the typing.

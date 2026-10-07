@@ -1,5 +1,5 @@
 /** Manual QA against a real Windows PC over SSH: the Add PC flow with a password, the chat-side
- * APIs through the bridge, and the terminal lens's mirrored screen. Needs remote-bundles/manifest-win32-x64.json
+ * APIs through the bridge, and the terminal lens's live session-controller stream. Needs remote-bundles/manifest-win32-x64.json
  * (bun run scripts/build-remote-bundle.ts win32-x64) and a herdr-free or herdr-bearing Windows host.
  *
  *   WINDOWS_QA_HOST=user@pc WINDOWS_QA_PASSWORD=... bun scripts/windows-host-qa.ts
@@ -83,10 +83,10 @@ try {
   ws.send(JSON.stringify({ type: "attach", pane_id: paneId, cols: 80, rows: 24, flow_control: "ack" }));
   const grid = (await until(async () => frames, (list) => list.some((m) => m.type === "pane-geometry" && m.pane_id === paneId), "the pane's grid")).find((m) => m.type === "pane-geometry");
   console.log("attach ->", JSON.stringify(grid));
-  assert.ok(grid?.type === "pane-geometry" && grid.fixed === true, "a mirrored pane keeps its own grid");
+  assert.ok(grid?.type === "pane-geometry" && grid.control === true && grid.fixed !== true, "Windows uses the resizable terminal session controller");
   ws.send(JSON.stringify({ type: "input", pane_id: paneId, text: "echo ws-input-ok\r" }));
-  await until(async () => frames, (list) => list.some((m) => m.type === "pty-data" && m.data.includes("ws-input-ok")), "typing shows in the mirrored terminal");
-  console.log("PASS the terminal lens mirrors the Windows pane's screen, typing included");
+  await until(async () => frames, (list) => list.some((m) => m.type === "pty-data" && m.data.includes("ws-input-ok")), "typing shows in the live Windows terminal");
+  console.log("PASS the terminal lens streams the Windows pane through terminal session control, typing included");
 
   await api(path, "PATCH", { enabled: false });
   await api(path, "PATCH", { enabled: true });

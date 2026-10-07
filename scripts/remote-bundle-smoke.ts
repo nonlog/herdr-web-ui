@@ -15,9 +15,9 @@ mkdirSync(bundle); mkdirSync(home);
 const bun = join(bundle, windows ? "bin/bun.exe" : "bin/bun");
 const herdr = windows ? process.env["HERDR_WEB_HERDR_BIN"] || join(process.env["LOCALAPPDATA"] ?? "", "Programs/Herdr/bin/herdr.exe") : join(bundle, "bin/herdr");
 if (windows) assert.ok(existsSync(herdr), `herdr is not installed at ${herdr}`);
-// The PC this stands for has no Node of its own: the terminal attach must run on the Node the
-// bundle carries (#265: looked up on the launch PATH alone, such a PC mirrored instead). So every
-// PATH entry that holds a node is left out; a Windows bundle carries none and mirrors.
+// The PC this stands for has no Node of its own: direct attach on Unix must run on the Node the
+// bundle carries (#265), while Windows deliberately carries none because terminal session control
+// needs only Bun + herdr. Remove every host Node from PATH so both cases exercise the packaged path.
 const delimiter = windows ? ";" : ":";
 const path = (process.env["PATH"] ?? "").split(delimiter).filter((dir) => dir && !existsSync(join(dir, windows ? "node.exe" : "node"))).join(delimiter);
 // the pane's shell is a plain one: a login shell with an empty HOME may stop to ask how it should be set up
