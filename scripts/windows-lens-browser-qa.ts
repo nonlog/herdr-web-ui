@@ -131,6 +131,9 @@ try {
   assert.equal((await paneScrollInfo(paneId))?.offset_from_bottom, 0);
   assert.equal(phoneWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length, 0);
   assert.ok((await screen(desktop)).includes("isolation-live-242"));
+  // xterm's DOM renderer paints on animation frames; the final wheel's viewport update is
+  // synchronous but its rows are not. Freeze only after that user gesture has been painted.
+  await phone.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   const frozen = await historyScreen(phone);
   await paneSendText(paneId, "echo still-live-$((600+7))"); await paneSendKeys(paneId, ["Enter"]);
   await until(async () => (await screen(desktop)).includes("still-live-607"), "desktop remains live while phone reads history");
