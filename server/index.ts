@@ -62,6 +62,7 @@ import { AttachOutputTail, isTakeoverExit } from "./attach-output.ts";
 import { attachableIdentity, sidecarAvailable } from "./pty/sidecar.ts";
 import { MirrorSession } from "./mirror.ts";
 import { TerminalControlSession } from "./terminal-control.ts";
+import { NativeGeometryFollower } from "./native-geometry.ts";
 import { mirrorInput } from "./mirror-input.ts";
 import { PendingInputs, PendingInputError, type PendingIdentity, type PendingRecord } from "./pending-input.ts";
 import { PendingRequestBook } from "./pending-requests.ts";
@@ -275,6 +276,7 @@ interface PaneAttachment {
   pty: PtySession | MirrorSession | TerminalControlSession;
   /** portable herdr controller (native Windows / a runtime without the PTY sidecar) */
   control?: TerminalControlSession;
+  unfollowGeometry?: () => void;
   /** legacy fallback: repaints the pane's screen (server/mirror.ts), on the pane's own grid */
   mirror?: MirrorSession;
   clients: Set<Client>;
@@ -365,6 +367,11 @@ export function createServer(
   } = {},
 ): { port: number; hostname: string; stop: () => void } {
   const attachments = new Map<string, PaneAttachment>();
+  const nativeGeometry = new NativeGeometryFollower(async () => {
+    const snapshot = await sessionSnapshot(undefined, 1000);
+    return new Map(snapshot.layouts.flatMap((layout) => layout.panes).map((pane) =>
+      [pane.pane_id, { cols: pane.rect.width, rows: pane.rect.height }]));
+  });
   /** whether the sidecar can run, settled as the server starts so attach and identity agree */
   const sidecar = options.sidecar ?? (options.terminalAttach === undefined ? sidecarAvailable() : options.terminalAttach !== false);
   let terminalAttachKnown: boolean | null = typeof options.terminalAttach === "boolean" ? options.terminalAttach : null;
@@ -743,6 +750,7 @@ export function createServer(
     if (!attachment) return;
     for (const member of attachment.clients) holdPending(member, paneId);
     attachments.delete(paneId);
+    attachment.unfollowGeometry?.();
     clearTimeout(attachment.retry);
     clearTimeout(attachment.relookup);
     // its members hold nothing on this pane any more (a pty that exited leaves them on
@@ -768,9 +776,9 @@ export function createServer(
 
   function resizePty(paneId: string, cols: number, rows: number): void {
     const attachment = attachments.get(paneId);
-    // a mirrored pane's grid is herdr's own: no browser resizes it. Direct attach and
-    // terminal-session control are browser-sized.
-    if (!attachment || attachment.mirror || (attachment.cols === cols && attachment.rows === rows)) return;
+    // Windows control locks the native PTY size in Herdr. Browser dimensions must
+    // never enter that lock, including from tabs opened before this fix.
+    if (!attachment || attachment.mirror || attachment.control || (attachment.cols === cols && attachment.rows === rows)) return;
     attachment.cols = cols;
     attachment.rows = rows;
     attachment.pty.resize(cols, rows);
@@ -803,8 +811,8 @@ export function createServer(
     // an observer-first attachment spawns at the pane's own grid (fallback 80x24 when
     // the layout has no rect for it): the attach must not seed the shared pty with a
     // watching phone's viewport
-    const spawnCols = forObserver || mirrored ? (rect?.width ?? 80) : cols;
-    const spawnRows = forObserver || mirrored ? (rect?.height ?? 24) : rows;
+    const spawnCols = forObserver || mirrored || controlled ? (rect?.width ?? 80) : cols;
+    const spawnRows = forObserver || mirrored || controlled ? (rect?.height ?? 24) : rows;
     const attachment: PaneAttachment = {
       ready: mirrored || controlled,
       pty: undefined as unknown as PtySession,
@@ -910,6 +918,18 @@ export function createServer(
           rows: attachment.rows,
           takeover: takingOver !== null,
           env: { HERDR_SOCKET_PATH: herdrSocketPath() },
+          onFrame: (frame) => {
+            if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
+            const geometry = validGeometry(frame.width, frame.height);
+            if (geometry && (geometry.cols !== attachment.cols || geometry.rows !== attachment.rows)) {
+              attachment.cols = geometry.cols;
+              attachment.rows = geometry.rows;
+              broadcast(paneId, { type: "pane-geometry", pane_id: paneId, ...geometry, control: true });
+            }
+            // A full frame replaces the replay baseline. Replaying an older grid
+            // at the new size clips cells and can hide the bottom input row again.
+            if (frame.full) attachment.replay = new ReplayBuffer(MAX_REPLAY_BYTES);
+          },
           onData: (data) => {
             if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
             if (!seenFrame) {
@@ -932,6 +952,7 @@ export function createServer(
           },
           onExit: (code, reason) => {
             if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
+            attachment.unfollowGeometry?.();
             starting = false;
             if (attachment.ready) broadcast(paneId, { type: "input-ready", pane_id: paneId, ready: false });
             attachment.ready = false;
@@ -961,6 +982,11 @@ export function createServer(
         });
         attachment.pty = session;
         attachment.control = session;
+        attachment.unfollowGeometry?.();
+        attachment.unfollowGeometry = nativeGeometry.watch(paneId,
+          { cols: attachment.cols, rows: attachment.rows }, ({ cols, rows }) => {
+            if (attachments.get(paneId) === attachment && attachment.control === session) session.resize(cols, rows);
+          });
       };
       attachment.takeOver = (client) => {
         if (attachments.get(paneId) !== attachment || !attachment.held || !mayTakeOver(client)) return;
@@ -2512,6 +2538,7 @@ export function createServer(
     hostname,
     stop: () => {
       clearInterval(outputTimer);
+      nativeGeometry.stop();
       collector.stop();
       omo.stop();
       machines?.stop();

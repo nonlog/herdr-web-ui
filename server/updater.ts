@@ -182,7 +182,6 @@ export class Updater {
   }
 
   private async sourceBlock(): Promise<string | null> {
-    if (existsSync(join(this.options.root, "ci-runtime.json"))) return "This CI-built installation only accepts GitHub Actions runtime artifacts; local builds are disabled.";
     const branch = await this.git("branch", "--show-current");
     if (branch !== "main" && !(branch === "" && this.options.pluginCheckout)) return "Switch the source checkout to main to update.";
     if (await this.git("status", "--porcelain", "--untracked-files=all")) return "The source checkout has local changes. Commit or move them before updating.";

@@ -1,9 +1,10 @@
 ## nonlog fork requirements
 
 - Preserve the fork features and upstream-merge checklist in `docs/fork-features.md`.
-- Builds and packaging MUST use GitHub Actions. Do not run local/VPS project builds. Use CI runtime artifacts for installation; the normal plugin installer builds locally.
+- Development build verification, packaging and release artifacts MUST use GitHub Actions; never fall back to a local/VPS development build after CI fails. Normal plugin installation and updates MAY run their required dependency installation and build steps. Do not block those supported installation steps or treat CI provenance as a permanent update restriction.
 - Push only nonlog/herdr-web-ui; no upstream PRs. Assistant-created commits use Codex <codex@openai.com> as both author and committer.
 - Touch attachments use keep_size. Local history is a separate passive ANSI renderer, not a rebuild of the live xterm. Never infer application mouse/alternate mode from Herdr 0.9.3's outer transport; use the explicit scroll target.
+- Windows terminal controllers use native pane geometry on desktop and touch. Never feed browser resize into the controller's native PTY lock. Follow native layout changes with the shared, bounded NativeGeometryFollower; deliver frame geometry before its ANSI bytes.
 
 # herdr-web-ui
 

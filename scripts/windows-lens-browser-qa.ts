@@ -1,12 +1,13 @@
 /** Real Herdr, two browsers: passive history must not mutate the shared pane. Run only after a CI build. */
-import "./test-herdr.ts";
+import { TEST_SESSION } from "./test-herdr.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 import { createServer } from "../server/index.ts";
-import { paneRead, paneScrollInfo, paneSendKeys, paneSendText, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
+import { herdrRpc, sessionSnapshot, paneRead, paneScrollInfo, paneSendKeys, paneSendText, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
+import { PtySession } from "../server/pty/session.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-winlens-"));
 const evidence = process.env["UI_EVIDENCE_DIR"];
@@ -16,6 +17,7 @@ const servers: Array<ReturnType<typeof createServer>> = [];
 const pages: Page[] = [];
 const errors: string[] = [];
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+let native: PtySession | undefined;
 type Frame = { type?: string; pane_id?: string; keep_size?: boolean; data?: string };
 
 async function until(done: () => Promise<boolean>, label: string, timeout = 15_000): Promise<void> {
@@ -75,12 +77,34 @@ try {
   const created = await workspaceCreate({ cwd, label: "herdr-web-ui-test-winlens" });
   workspaces.push(created.workspace.workspace_id);
   const paneId = created.root_pane.pane_id;
+  // A real native Herdr frontend in the isolated CI session, not another web
+  // controller. Its window is deliberately smaller than the desktop browser.
+  assert.ok(TEST_SESSION.includes("test") || process.env["CHECK_DIR"], "native frontend must use an isolated test session");
+  let nativeOutput = "";
+  native = new PtySession({ command: process.env["HERDR_WEB_HERDR_BIN"] || "herdr", args: ["--session", TEST_SESSION],
+    cols: 110, rows: 34, env: { HERDR_SOCKET_PATH: process.env["HERDR_SOCKET"]!, TERM: "xterm-256color" },
+    onData: data => { nativeOutput = (nativeOutput + data).slice(-262144); }, onExit: () => {} });
+  await until(async () => nativeOutput.length > 0, "native frontend connected");
+  await herdrRpc("workspace.focus", { target: created.workspace.workspace_id });
+  const nativeRect = async () => (await sessionSnapshot()).layouts.flatMap(layout => layout.panes).find(p => p.pane_id === paneId)!.rect;
+  await until(async () => { const rect = await nativeRect(); return rect.height > 0 && rect.height < 34 && rect.width <= 110; }, "native window lays out its pane");
+  const beforeBrowser = await nativeRect();
   const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false }); servers.push(server);
   const origin = `http://127.0.0.1:${server.port}`;
   browser = await chromium.launch({ executablePath: process.env["CHROME_PATH"] ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
   const desktopContext = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
   const desktop = await desktopContext.newPage(); const desktopWire = record(desktop);
   await desktop.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`); await desktopWire.ready(paneId);
+  assert.equal((await paneScrollInfo(paneId))?.viewport_rows, beforeBrowser.height, "desktop browser cannot enlarge the native PTY and clip its bottom");
+  await desktop.setViewportSize({ width: 1500, height: 1000 });
+  await desktop.locator(".pane-terminal[data-adopted-grid]").waitFor();
+  await desktop.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await Bun.sleep(300);
+  assert.equal((await paneScrollInfo(paneId))?.viewport_rows, beforeBrowser.height, "browser resize/focus keeps native geometry");
+  native.resize(100, 28);
+  await until(async () => (await nativeRect()).height < beforeBrowser.height, "native window becomes shorter");
+  await until(async () => (await paneScrollInfo(paneId))?.viewport_rows === (await nativeRect()).height, "control follows native resize, without locking the previous size");
+  await desktop.setViewportSize({ width: 1280, height: 800 });
   await shell(desktop, "echo mirror-ok-$((40+2))");
   await until(async () => (await screen(desktop)).includes("mirror-ok-42"), "typed input reaches Windows-style control transport");
   const desktopGrid = await size(paneId);
@@ -175,6 +199,7 @@ try {
   await paneSendText(paneId, "q");
   await phoneContext.close();
   console.log("PASS explicit application scrolling keeps mouse/alternate TUI interaction");
+  native.kill(); await native.exited; native = undefined;
 
   // Direct attach uses a transport-owned alternate buffer even for a plain shell.
   // Local history must still work, and observer two-axis panning must stay intact.
@@ -232,6 +257,8 @@ try {
   throw error;
 } finally {
   await browser?.close();
+  native?.kill();
+  await native?.exited;
   for (const server of servers) server.stop();
   for (const id of workspaces) await workspaceClose(id).catch(() => undefined);
   rmSync(root, { recursive: true, force: true });

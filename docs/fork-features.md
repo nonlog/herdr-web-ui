@@ -53,11 +53,19 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 
 ## 构建、验证与部署
 
-**正式构建、打包和可下载产物只允许在 GitHub Actions 完成。不得在 Windows 或 VPS 运行项目 build，不能在 CI 失败时私自回退本机构建。** 允许源码检查、git diff 以及不构建项目的小单元测试。
+**开发过程中的构建验证、发布打包和可下载产物使用 GitHub Actions，不能在 CI 失败时私自回退本机或 VPS 开发构建。正常插件安装、更新所必需的依赖安装和构建允许在目标机器执行。** 这两类操作必须区分，不得把开发构建约束扩大成禁止正常安装。源码检查、git diff 以及不构建项目的小单元测试也允许在本机执行。
 
 CI `Native Windows install` 任务生成 `windows-runtime-<commit SHA>`，内含已经构建的 `dist`、Windows 依赖及同一提交的源码，并带 `ci-runtime.json`。产物保留 3 天。必须等同一提交的 fast、Windows 和 integration/browser 全部成功后才能部署，不能仅凭产物存在判断可上线。
 
-注意：普通 `herdr plugin install` 会执行 manifest 的 `bun install` 和 `bun run build`，不符合本项目限制。更新现有安装时使用 CI 产物，在停止 Web UI 服务后替换经过核验的版本，保留配置和状态，再启动服务。`scripts/plugin.ts start` 本身只启动 managed server。带 CI 标记的安装禁用应用内源码构建更新，后续更新继续走 CI 产物。
+普通 `herdr plugin install` 会执行 manifest 声明的 `bun install` 和 `bun run build`；这是本插件正常安装流程，允许执行。应用内正常版本更新所需的构建也允许，不再因为存在 `ci-runtime.json` 而拒绝更新。来源、分支、未提交改动及版本祖先关系等原有安全检查仍保留。CI 预构建包仍是可选的部署方式；更新时保留配置和状态。`scripts/plugin.ts start` 本身只启动 managed server。
+
+### 原生终端底部截断修复
+
+此前只让手机采用原生网格，电脑浏览器仍把自己的尺寸传入 `terminal session control`。Herdr 0.9.3 的控制连接会设置 `direct_attach_resize_locks` 并重设真实 PTY；当网页比原生窗口高，输入框就可能被画到原生窗口底部之外。原生窗口后续调整尺寸也受该锁影响，不能仅靠刷新网页处理。
+
+现在 Windows control 始终使用原生 pane 的布局尺寸，电脑和手机网页都只是采用该网格。服务端拒绝把旧网页发来的 resize 应用于控制连接，避免未刷新的标签页再次破坏布局。一个共享的 `NativeGeometryFollower` 每 500 ms 串行读取布局，只在原生尺寸变化时更新控制连接；无连接时不读取，失败不猜测，过期请求不能改动已更换的控制连接。画面尺寸在对应 ANSI 帧之前发送，完整帧更新回放基线。
+
+浏览器窗口、页面缩放及网页字体只改变本地视口；显示不下时在网页内查看完整网格，不改变原生输入框的位置。Unix direct attach 的既有尺寸规则不在本次改动范围内。回归测试额外启动真实原生 Herdr 前端，与更大的电脑网页同时打开，再缩小原生窗口，验证真实 PTY 行数始终跟随原生布局。
 
 发布前至少核对：
 

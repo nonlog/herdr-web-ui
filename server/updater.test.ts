@@ -46,6 +46,18 @@ beforeEach(async () => {
   await updater.initialize();
 });
 
+it("allows normal installation updates on a checkout with CI provenance", async () => {
+  appendFileSync(join(root, ".git", "info", "exclude"), "\nci-runtime.json\n");
+  writeFileSync(join(root, "ci-runtime.json"), JSON.stringify({ producer: "github-actions" }));
+  const revision = await release("installation update", "v1.0.1");
+  await updater.request("check");
+  expect(updater.status.blocked_reason).toBeNull();
+  expect(updater.status.available).toBe(true);
+  await updater.request("install");
+  expect(updater.status.current_revision).toBe(revision);
+  expect(steps).toContain("build");
+});
+
 afterEach(() => {
   updater?.stop();
   rmSync(directory, { recursive: true, force: true });

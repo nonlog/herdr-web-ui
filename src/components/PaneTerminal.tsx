@@ -1123,6 +1123,10 @@ export function PaneTerminal({
         } else if (message.control) {
           fixedGridRef.current = false;
           controlSessionRef.current = true;
+          // Herdr's Windows controller locks the shared native PTY. Desktop and
+          // touch browsers both adopt it; only the native layout owns this size.
+          localGridRef.current = true;
+          socket.keepSize(message.pane_id);
         }
         // kept while the terminal lens ignores it: another device may drive the grid, and the
         // chat lens entered later must draw its hidden screen for that grid, not this device's

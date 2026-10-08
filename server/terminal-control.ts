@@ -10,6 +10,8 @@ export interface TerminalControlOptions {
   rows: number;
   env?: Record<string, string>;
   takeover?: boolean;
+  /** Called before ANSI bytes so consumers adopt the frame's actual grid before parsing. */
+  onFrame?: (frame: { width?: number; height?: number; full?: boolean }) => void;
   onData: (data: string) => void;
   onExit: (code: number | null, reason?: string) => void;
 }
@@ -107,6 +109,7 @@ export class TerminalControlSession {
     }
     try {
       const data = Buffer.from(frame.bytes, "base64").toString("utf8");
+      this.options.onFrame?.(frame);
       // The first full frame can be empty (a blank shell). Deliver it anyway so the
       // attachment can become input-ready without waiting for the first visible byte.
       this.options.onData(data);

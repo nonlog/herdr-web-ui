@@ -80,8 +80,13 @@ describe("terminal session control transport", () => {
     const b = connect(second.port, paneId);
     try {
       await a.open;
+      const nativeRows = (await paneScrollInfo(paneId))?.viewport_rows;
       a.send({ type: "attach", pane_id: paneId, cols: 90, rows: 24 });
       await until(() => a.state.ready > 0, "first controller ready");
+      expect((await paneScrollInfo(paneId))?.viewport_rows).toBe(nativeRows);
+      a.send({ type: "resize", pane_id: paneId, cols: 180, rows: 70 });
+      await Bun.sleep(200);
+      expect((await paneScrollInfo(paneId))?.viewport_rows).toBe(nativeRows);
 
       a.send({ type: "input", pane_id: paneId, text: "for i in $(seq 1 80); do echo control-line-$i; done\r" });
       await until(() => a.state.data.includes("control-line-80"), "controller receives shell output");
