@@ -27,6 +27,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun test ./scripts/windows-plugin.test.ts ./scripts/plugin-runtime.test.ts ./scripts/phone-setup.test.ts
+      - name: Windows Codex namespace and resumed-session regressions
+        run: bun test ./server/codex.test.ts ./server/windows-native.test.ts --test-name-pattern "Windows Codex resume candidates|Codex rollout resolution"
       - name: Package the prebuilt Windows runtime
         shell: pwsh
         run: |

@@ -73,3 +73,11 @@ CI `Native Windows install` 任务生成 `windows-runtime-<commit SHA>`，内含
 此次从 Windows 主机对 `/api/health` 进行两次 HTTP 首包测量：本地约 1.8 / 27.2 ms，公网 `herdr.414222.xyz` 约 1,314 / 2,415 ms，Tailscale 私网路径约 32.3 / 90.1 ms。它们包含建连/首包过程，不是手机实测，也不是 WebSocket 滚动 RTT。
 
 这些结果支持在客户端消除逐次滚动等待的必要性，但不能证明 Cloudflare 线路问题已经修复。此次未切换 DNS、Cloudflare Tunnel 或 Tailscale 配置。实际 CI 回归结果、上线 SHA 和部署后测量应在交付时补充；不得把尚未运行的测试写为已通过。
+
+
+### 已有验证证据
+
+- CI `37757112276` 的 Integration and browser 任务通过：双客户端独立历史、ANSI 颜色、冻结阅读位置、输入恢复、共享尺寸保持、TUI 鼠标/备用屏幕操作、direct attach 和 observer 平移；该次历史接口额外延迟 800 ms，热缓存滚动响应 16.5 ms。此 run 的 fast 任务另有路径/翻译失败，不能将其当作整包发布验收。
+- 真实 Windows 暂存服务（不是公网生产入口）通过双浏览器模拟：共享 viewport 保持 47 行，没有手机 scroll/resize 消息，输入正常，页面错误为零；三次缓存滚动约 51.1 / 3.7 / 3.6 ms。
+- 新增 Windows Codex 路径和恢复回归至 CI 的 Windows 任务。26 项定向测试通过，包含跨目录恢复、混合 namespaced/plain 路径、目录穿越与外部符号链接拒绝。上游规范化为 plain 路径，测试比较同一规范形式，不放松真实路径包含关系。
+- 公网生产效果与最终发布提交以交付时的完整 CI 结果和安装后实测为准，不能用暂存服务数值替代公网数值。

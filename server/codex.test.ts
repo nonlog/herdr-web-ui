@@ -404,7 +404,9 @@ describe("Codex rollout resolution", () => {
     writeFileSync(outside, header);
     for (const store of [home, toNamespacedPath(home)]) {
       for (const candidate of [path, toNamespacedPath(path)]) {
-        expect(codexRolloutPath(candidate, store)).toBe(realpathSync(candidate));
+        // The upstream resolver returns a stable plain path for either Windows spelling.
+        // Containment checks below must still reject files outside the same real store.
+        expect(codexRolloutPath(candidate, store)).toBe(withoutVerbatimPrefix(realpathSync(candidate)));
       }
       expect(codexRolloutPath(toNamespacedPath(outside), store)).toBeNull();
       expect(codexRolloutPath(toNamespacedPath(join(sessions, "..", "..", "outside.jsonl")), store)).toBeNull();
