@@ -879,7 +879,7 @@ const boundRollouts = new Map<string, { processes: string; path: string; at: num
 
 const CWD_MATCH = process.platform === "win32" ? "cwd COLLATE NOCASE IN (?, ?)" : "cwd IN (?, ?)";
 function cwdVariants(cwd: string): [string, string] {
-  if (process.platform !== "win32") return [cwd, cwd];
+  if (process.platform !== "win32") return storedCwds(cwd);
   const namespaced = toNamespacedPath(cwd);
   const plain = namespaced.startsWith("\\\\?\\UNC\\") ? `\\\\${namespaced.slice(8)}` : namespaced.startsWith("\\\\?\\") ? namespaced.slice(4) : namespaced;
   return [plain, namespaced];

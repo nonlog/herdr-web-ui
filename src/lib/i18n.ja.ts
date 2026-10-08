@@ -8,6 +8,7 @@
  * in English. Placeholders in braces keep their English names.
  */
 export const JA: Record<string, string> = {
+  "Live": "ライブ",
   "Instant local history": "ローカル履歴の即時スクロール",
   "Application scroll": "アプリ内スクロール",
   "Loading history...": "履歴を読み込み中…",

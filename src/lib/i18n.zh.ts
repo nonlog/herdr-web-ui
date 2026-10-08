@@ -10,6 +10,7 @@
  * Placeholders in braces keep their English names.
  */
 export const ZH: Record<string, string> = {
+  "Live": "实时",
   "Instant local history": "本地即时滚动",
   "Application scroll": "应用内滚动",
   "Loading history...": "正在加载历史…",

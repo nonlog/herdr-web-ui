@@ -6,6 +6,7 @@
  * braces keep their English names.
  */
 export const KO: Record<string, string> = {
+  "Live": "실시간",
   "Instant local history": "로컬 기록 즉시 스크롤",
   "Application scroll": "앱 내부 스크롤",
   "Loading history...": "기록을 불러오는 중…",
