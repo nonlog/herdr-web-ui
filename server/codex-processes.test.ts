@@ -118,6 +118,18 @@ it.skipIf(process.platform !== "linux")("drops the recovered binding when its pr
   expect(await resolve()).toBeNull();
 });
 
+it("finds the threads of a Windows cwd that Codex stored with the \\\\?\\ prefix (#518)", async () => {
+  const cwd = "D:\\work\\app";
+  const db = new Database(join(home, "state_5.sqlite"));
+  db.query("UPDATE threads SET cwd = ?").run(`\\\\?\\${cwd}`);
+  db.close();
+  screen = answer;
+  expect(await codexTranscriptPath(root, cwd, home, [{
+    pane_id: root, workspace_id: root, tab_id: root, terminal_id: root,
+    agent: "codex", agent_status: "working", cwd, focused: false, revision: 0,
+  }])).toBe(path);
+});
+
 it("does not guess a session when argv and proc data are unavailable", async () => {
   foreground = [{ pid: 2147483647, name: "codex" }];
   expect(await resolve()).toBeNull();

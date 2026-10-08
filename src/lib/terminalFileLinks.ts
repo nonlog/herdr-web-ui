@@ -16,6 +16,15 @@ const FILE_URI = /file:\/\/\/[^\s<>"`]+/gi;
 /** A logical line longer than this is not prose with paths in it (a minified bundle, a blob): it is left alone. */
 const MAX_LINE_CHARS = 8192;
 
+/**
+ * A URI this app opens in a new tab: an http(s) address and nothing else. Both link paths in
+ * PaneTerminal answer to it, so a line crafted to look like a link cannot hand the browser a
+ * scheme of its own choosing (`javascript:`, `data:`, an OS handler).
+ */
+export function isWebLink(uri: string): boolean {
+  return /^https?:\/\//i.test(uri);
+}
+
 /** Local file URIs are read by the existing server-side file viewer. */
 export function fileUriPath(uri: string): string | null {
   // a control character belongs to no path, and URL drops a trailing one before it can be seen

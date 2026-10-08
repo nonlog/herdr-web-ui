@@ -8,6 +8,7 @@ import { chromium } from "playwright-core";
 import { runCommand } from "../server/updater.ts";
 import { workspaceCreate, workspaceClose, sessionSnapshot } from "../server/herdr/client.ts";
 import type { UpdateStatus } from "../shared/update.ts";
+import { openSettingsPage } from "./settings-page.ts";
 
 const source = resolve(import.meta.dir, "..");
 const temp = mkdtempSync(join(tmpdir(), "herdr-update-browser-"));
@@ -66,15 +67,51 @@ try {
   const draft = page.getByRole("textbox", { name: "Message", exact: true });
   await draft.fill("Unsent draft preserved across update");
   await page.locator(".sidebar-footer").getByRole("button", { name: "Settings", exact: true }).click();
+  await openSettingsPage(page, "About");
   await page.getByRole("heading", { name: "Updates", exact: true }).scrollIntoViewIfNeeded();
 
   writeFileSync(join(upstream, "qa-revision.txt"), "second build\n");
+  // as a release does: what was unreleased becomes the release's section of the changelog, the
+  // version moves, and the release is told as patch notes (here one line, in one language)
+  const cut = (version: string, body = "", summary?: string) => {
+    writeFileSync(join(upstream, "CHANGELOG.md"),
+      readFileSync(join(upstream, "CHANGELOG.md"), "utf8").replace("## [Unreleased]\n", `## [Unreleased]\n\n## [${version}] - 2099-01-01\n${body}`));
+    const manifest = JSON.parse(readFileSync(join(upstream, "package.json"), "utf8")) as Record<string, unknown>;
+    writeFileSync(join(upstream, "package.json"), `${JSON.stringify({ ...manifest, version }, null, 2)}\n`);
+    if (summary) writeFileSync(join(upstream, "release-summaries.json"), JSON.stringify({ [version]: { en: { new: [summary] } } }));
+  };
+  const told = "The QA release, in a line.";
+  cut("99.0.0", "", told);
   await git(upstream, "add", "."); await git(upstream, "commit", "-qm", "QA update"); await git(upstream, "tag", "v99.0.0");
   const next = await git(upstream, "rev-parse", "HEAD");
   await page.getByRole("button", { name: "Check for updates", exact: true }).click();
   const installButton = page.getByRole("button", { name: "Update and restart", exact: true });
   await until(() => installButton.isEnabled(), "Update never became installable");
+  // the release's notes, read from its own changelog, in a box that scrolls on its own
+  const notes = page.locator(".update-notes");
+  await notes.getByRole("heading", { name: "v99.0.0" }).waitFor();
+  // told by its highlights, under their list; the changelog section is below, folded until asked for
+  await notes.locator(".update-summary").getByRole("heading", { name: "New features", exact: true }).waitFor();
+  await notes.locator(".update-summary li").getByText(told, { exact: true }).waitFor();
+  const entries = notes.locator("details li");
+  assert.ok(await entries.count() > 0);
+  assert.equal(await entries.first().isVisible(), false);
+  await notes.locator("details > summary").click();
+  assert.equal(await entries.first().isVisible(), true);
+  assert.equal(await notes.getByText("Unreleased").count(), 0);
+  assert.ok(await installButton.isVisible());
   await page.screenshot({ path: join(evidence, "available-desktop.png"), fullPage: true });
+  // the line under the header points at them: its button opens Settings on Updates, on the About page
+  await page.getByRole("button", { name: "Close settings", exact: true }).click();
+  await page.locator(".update-notice").getByRole("button", { name: "What's new", exact: true }).click();
+  await until(() => notes.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    return box.top >= 0 && box.bottom <= window.innerHeight;
+  }), "What's new did not open Settings on the release notes");
+  // and the focus is there with it: the next Tab must not scroll back to the top of Settings
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("settings-updates")), true);
+  await page.screenshot({ path: join(evidence, "notes-desktop.png") });
+  console.log("PASS release notes beside the offered update, and from the header line");
   await installButton.click();
   await until(async () => (await status())?.current_revision === next, "Updated process never became active");
   await page.locator(".update-notice").getByRole("button", { name: "Reload app" }).waitFor();
@@ -86,18 +123,37 @@ try {
 
   // A reload is explicit. The new frontend's build revision must match the server.
   await page.locator(".update-notice").getByRole("button", { name: "Reload app" }).click();
-  await page.locator(".sidebar-footer").getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("heading", { name: "Updates", exact: true }).scrollIntoViewIfNeeded();
+  // the new version tells of the update: its line opens Settings on what the update brought
+  await page.locator(".update-notice").getByText("herdr web ui was updated to v99.0.0.", { exact: true }).waitFor();
+  await page.screenshot({ path: join(evidence, "updated-line-desktop.png") });
+  await page.locator(".update-notice").getByRole("button", { name: "What's new", exact: true }).click();
+  await page.getByRole("region", { name: "What the last update brought", exact: true }).waitFor();
+  await notes.getByRole("heading", { name: "v99.0.0" }).waitFor();
+  await notes.locator(".update-summary li").getByText(told, { exact: true }).waitFor();
+  assert.equal(await notes.locator("details li").first().isVisible(), false);
   await page.getByText(new RegExp(`^Running (v[0-9.]+ \\()?${next.slice(0, 12)}\\)?$`)).waitFor();
+  await page.screenshot({ path: join(evidence, "updated-notes-desktop.png") });
+  // opening its notes closed the line, on this device and for this version: a reload keeps it closed
   assert.equal(await page.locator(".update-notice").count(), 0);
+  await page.reload();
+  await page.locator(".sidebar-footer").getByRole("button", { name: "Settings", exact: true }).click();
+  await openSettingsPage(page, "About");
+  await page.getByRole("heading", { name: "Updates", exact: true }).scrollIntoViewIfNeeded();
+  await page.getByRole("region", { name: "What the last update brought", exact: true }).waitFor();
+  assert.equal(await page.locator(".update-notice").count(), 0);
+  console.log("PASS the update told after the reload, its summary in Settings, and the line closed for good");
 
   writeFileSync(join(upstream, "server/index.ts"), `throw new Error('QA startup failure');\n${readFileSync(join(upstream, "server/index.ts"), "utf8")}`);
+  // its notes hold a line no one wrote by hand: they are text from a Git remote, and must not take the app down
+  cut("99.0.1", `\n### Fixed\n- A release that fails to start.\n\n${">".repeat(30_000)} quoted beyond reason\n`);
   await git(upstream, "add", "."); await git(upstream, "commit", "-qm", "QA failed startup"); await git(upstream, "tag", "v99.0.1");
   await page.getByRole("button", { name: "Check for updates", exact: true }).click();
   await until(() => installButton.isEnabled(), "Rollback candidate never became available");
   await installButton.click();
   await page.getByText(/Previous version restored/).waitFor();
   assert.equal((await status())?.current_revision, next);
+  // the release is still on offer, and so are its notes
+  await notes.getByRole("heading", { name: "v99.0.1" }).waitFor();
   await page.locator(".conn-live").waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("heading", { name: "Updates", exact: true }).scrollIntoViewIfNeeded();

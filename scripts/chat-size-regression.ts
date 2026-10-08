@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import type { Machine } from "../shared/machines.ts";
 import { herdrRpc, paneRead, paneSendKeys, paneSendText, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
 
 /** how long a resize that should not happen gets to show up */
@@ -54,6 +55,21 @@ async function openRecording(browser: Browser, contexts: BrowserContext[], origi
   return page;
 }
 
+/**
+ * The roster pages are handed names the pane's agent. A page opened before that takes the pane for
+ * a shell: with chat as its lens for every pane it still opens the terminal there, and attaching in
+ * the terminal lens fits the shared grid to that page, which is what these checks say does not happen.
+ */
+async function agentListed(origin: string, paneId: string): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const roster = await (await fetch(`${origin}/api/machines`)).json() as { machines: Machine[] };
+    if (roster.machines.some((machine) => machine.snapshot?.panes.some((pane) => pane.pane_id === paneId && pane.agent === "claude"))) return;
+    await Bun.sleep(50);
+  }
+  throw new Error(`the roster never named the agent in ${paneId}`);
+}
+
 // the server answers an attach with input-ready, and resizes in the same step: once the
 // `nth` one is in, that attach has done whatever it does to the grid
 const attached = (page: Page, nth = 1) => page.waitForFunction((count) => (window as unknown as { frames_: { dir: string; type: string }[] }).frames_.filter((f) => f.dir === "in" && f.type === "input-ready").length >= count, nth, { timeout: 15_000 });
@@ -75,6 +91,7 @@ export async function checkChatKeepsTerminalSize(browser: Browser, origin: strin
   try {
     // an agent pane opens in the chat lens on a phone; the shell under it answers `stty size`
     await herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "claude", state: "idle" });
+    await agentListed(origin, paneId);
     const size = shellSize(paneId);
     const open = (options: Parameters<Browser["newContext"]>[0], settings: object) => openRecording(browser, contexts, origin, paneId, options, settings);
     const sent = (page: Page) => page.evaluate(() => (window as unknown as { frames_: { dir: string; type: string; keep_size?: boolean }[] }).frames_.filter((f) => f.dir === "out" && (f.type === "attach" || f.type === "resize")));
@@ -142,6 +159,7 @@ export async function checkPaneSwitchKeepsTerminalSize(browser: Browser, origin:
     }
     const [agentPane, shellPane] = panes as [string, string];
     await herdrRpc("pane.report_agent", { pane_id: agentPane, source: "manual", agent: "claude", state: "idle" });
+    await agentListed(origin, agentPane);
     const size = shellSize(agentPane);
 
     const desktop = await openRecording(browser, contexts, origin, agentPane, { viewport: { width: 1280, height: 800 } }, { language: "en", defaultView: "terminal" });

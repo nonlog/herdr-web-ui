@@ -1,5 +1,6 @@
 import type { AgentStatus } from "../../shared/protocol.ts";
-import type { AlertPrefs } from "../../shared/notify-policy.ts";
+import { shouldNotifyStatus, type AlertPrefs } from "../../shared/notify-policy.ts";
+import { paneStorageId } from "../../shared/machines.ts";
 
 /**
  * In-app alerts: a notice that drops from the top edge while the app is on screen.
@@ -43,6 +44,34 @@ export function dropletAllows(prefs: AlertPrefs, status: AgentStatus, worked: nu
   if (status !== "done" || prefs.done === "off") return false;
   if (prefs.done === "always") return true;
   return worked === null || worked >= LONG_TURN_MS;
+}
+
+/**
+ * What a roster does to the statuses this page remembers (by paneStorageId). The server reads
+ * the roster from herdr on its own, so a roster can show a change before the event that tells
+ * of it arrives. A change that is news (shouldNotifyStatus) is therefore left to its event:
+ * taken from the roster, the event would be no change and the alert would be lost. Any other
+ * change is taken, with the turn's clock kept as an event would keep it: that is how the page
+ * catches up after status events were lost, and a wait that follows is news again. A pane
+ * first seen is taken as it is, and one no PC lists any more is forgotten.
+ */
+export function seedStatuses(
+  known: Map<string, AgentStatus>,
+  machines: readonly { id: string; snapshot?: { panes: readonly { pane_id: string; agent_status: AgentStatus }[] } | null }[],
+  turns: { started: Map<string, number>; lasted: Map<string, number> } = { started: new Map(), lasted: new Map() },
+  now = Date.now(),
+): void {
+  const listed = new Set<string>();
+  for (const machine of machines) for (const pane of machine.snapshot?.panes ?? []) {
+    const key = paneStorageId(machine.id, pane.pane_id);
+    listed.add(key);
+    const previous = known.get(key);
+    if (previous === pane.agent_status || shouldNotifyStatus(previous, pane.agent_status)) continue;
+    known.set(key, pane.agent_status);
+    const worked = trackTurn(turns.started, key, previous, pane.agent_status, now);
+    if (worked !== null) turns.lasted.set(key, worked);
+  }
+  for (const key of [...known.keys()]) if (!listed.has(key)) known.delete(key);
 }
 
 /**

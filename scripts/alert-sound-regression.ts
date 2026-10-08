@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Browser, Page } from "playwright-core";
 import { herdrRpc, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
+import { openSettingsPage } from "./settings-page.ts";
 
 /**
  * The alert sound: real herdr status changes make the open tab chime, once a tap let the page
@@ -57,12 +58,28 @@ export async function checkAlertSound(browser: Browser, origin: string): Promise
       // subscribed to these newly created panes. Observe a real status event before testing alerts.
       const statuses: Record<string, string> = {};
       const NativeEvents = window.EventSource;
+      type Roster = { type: string; machines: { id: string; snapshot: { panes: { pane_id: string; agent_status: string }[] } | null }[] };
       class ObservedEvents extends NativeEvents {
         constructor(url: string | URL, init?: EventSourceInit) {
           super(url, init);
+          // the app's handler is called from here, so a frame can be put in front of another
+          let handler: ((event: MessageEvent) => void) | null = null;
+          Object.defineProperty(this, "onmessage", { get: () => handler, set: (next) => { handler = next; } });
+          let roster: Roster | null = null;
           this.addEventListener("message", (event) => {
-            const message = JSON.parse(event.data)?.message;
-            if (message?.type === "pane-status") statuses[message.pane_id] = message.agent_status;
+            const payload = JSON.parse(event.data);
+            if (payload.type === "machines") roster = payload;
+            const message = payload.message;
+            if (message?.type === "pane-status") {
+              statuses[message.pane_id] = message.agent_status;
+              // The server reads the roster from herdr on its own, and now and then one shows a
+              // status before the event that tells of it arrives. `rosterFirst` makes it every time.
+              if ((window as unknown as { rosterFirst?: boolean }).rosterFirst && roster) {
+                const ahead: Roster = { ...roster, machines: roster.machines.map((machine) => machine.id !== payload.machine_id || !machine.snapshot ? machine : { ...machine, snapshot: { ...machine.snapshot, panes: machine.snapshot.panes.map((pane) => pane.pane_id === message.pane_id ? { ...pane, agent_status: message.agent_status } : pane) } }) };
+                handler?.call(this, new MessageEvent("message", { data: JSON.stringify(ahead) }));
+              }
+            }
+            handler?.call(this, event);
           });
         }
       }
@@ -118,6 +135,7 @@ export async function checkAlertSound(browser: Browser, origin: string): Promise
     console.log("PASS a pane that waits chimes, the one in front does not");
 
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await openSettingsPage(page, "Alerts");
     const sound = page.getByRole("switch", { name: "Sound", exact: true });
     await sound.click();
     assert.equal(await sound.getAttribute("aria-checked"), "false");
@@ -147,6 +165,19 @@ export async function checkAlertSound(browser: Browser, origin: string): Promise
     await quiet(page);
     assert.deepEqual((await chimes()).slice(before), [660, 880], "one chime for two panes that wait together");
     console.log("PASS two panes that wait together chime once");
+
+    // the roster shows each status before its event does: the wait is still news
+    await quiet(page);
+    await report(thirdPane, "idle");
+    // at rest again, as the app heard it (a finish after work is told as `done`)
+    await page.waitForFunction((pane) => !["working", "blocked"].includes((window as unknown as { soundStatuses: Record<string, string> }).soundStatuses[pane]!), thirdPane);
+    const told = (await chimes()).length;
+    await page.evaluate(() => { (window as unknown as { rosterFirst: boolean }).rosterFirst = true; });
+    await block(thirdPane);
+    await page.waitForFunction((count) => (window as unknown as { chimes: number[] }).chimes.length >= count + 2, told);
+    assert.deepEqual((await chimes()).slice(told), [660, 880], "a wait the roster showed first still chimes");
+    await page.evaluate(() => { (window as unknown as { rosterFirst: boolean }).rosterFirst = false; });
+    console.log("PASS a wait the roster showed before its event still chimes");
 
     assert.deepEqual(errors, []);
   } finally {

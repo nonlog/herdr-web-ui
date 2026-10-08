@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { agentDisplayLabel, composerMessage, terminalOnlyCommand, composerPayload, composerModelDraw, composerQueueShown, composerStatusCompact, composerStatusHint, composerStatusWord, composerStatusWordDrawn, COMPOSER_STATUS_COMPACT_BELOW, contextLeftPercent, formatTokens, imageMention, insertMention, MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, rankSlashCommands, submitNote, submitNotTyped } from "./compose.ts";
+import { agentDisplayLabel, composerDelivery, composerMessage, terminalOnlyCommand, composerSendShown, composerPayload, composerModelDraw, composerStatusCompact, composerStatusHint, composerStatusWord, COMPOSER_STATUS_COMPACT_BELOW, contextLeftPercent, formatTokens, imageMention, insertMention, MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, rankSlashCommands, submitNote, submitNotTyped } from "./compose.ts";
 
 describe("composerMessage and submitNote", () => {
   it("keeps the message as written for agent.prompt: inner newlines stay, the composer's own trailing ones go", () => {
@@ -18,6 +18,11 @@ describe("composerMessage and submitNote", () => {
   it("knows a refusal that typed nothing from a message that may have reached the pane", () => {
     expect(["submit_timeout", "agent_blocked", "read_only"].map(submitNotTyped)).toEqual([true, true, true]);
     expect(["disconnected", "timeout", "submit_failed"].map(submitNotTyped)).toEqual([false, false, false]);
+    expect(["pending_input_unsupported", "invalid_delivery", "invalid_submit_text", "agent_not_ready", "pending_limit"].map(submitNotTyped)).toEqual([true, true, true, true, true]);
+    expect(["pane_not_found", "retired_submit_id"].map(submitNotTyped)).toEqual([true, true]);
+    expect(submitNote("pending_input_unsupported", "x")).toBe("Update this PC to send messages in the next turn. Your draft stayed here.");
+    expect(submitNotTyped("submit_changed")).toBe(false);
+    expect(submitNotTyped("pending_uncertain")).toBe(false);
   });
 });
 
@@ -108,14 +113,6 @@ describe("composer presentation helpers", () => {
     expect(composerStatusWord("done")).toBe("DONE");
     expect(composerStatusWord("paused")).toBe("READY");
   });
-  it("draws only the DONE word in the composer", () => {
-    expect(composerStatusWordDrawn("done")).toBe(true);
-    expect(composerStatusWordDrawn("idle")).toBe(false);
-    expect(composerStatusWordDrawn("working")).toBe(false);
-    expect(composerStatusWordDrawn("blocked")).toBe(false);
-    expect(composerStatusWordDrawn("paused")).toBe(false);
-    expect(composerStatusWordDrawn(undefined)).toBe(false);
-  });
 
   it("makes the status row compact by the card's width, not the window's", () => {
     // a phone's card, and a laptop's with the sidebar open in a 940px window
@@ -130,21 +127,16 @@ describe("composer presentation helpers", () => {
     expect(composerStatusCompact(0)).toBe(false);
   });
 
-  it("draws Queue only while the agent works, the bridge is live and there is something to hold", () => {
-    const working = { queueMode: true, connected: true, text: "", uploading: false };
-    // an empty box: Stop is the one resting control
-    expect(composerQueueShown(working)).toBe(false);
-    expect(composerQueueShown({ ...working, text: "  \n" })).toBe(false);
-    expect(composerQueueShown({ ...working, text: "also check the tests" })).toBe(true);
-    // a file on its way: its mention is about to land, so the pill is already in place
-    expect(composerQueueShown({ ...working, uploading: true })).toBe(true);
-    // an uploaded tile whose mention was deleted, or a failed one, is not uploading: the box is
-    // empty and only text is sent, so nothing offers to queue
-    expect(composerQueueShown({ ...working, uploading: false })).toBe(false);
-    // not connected: nothing can be queued, so nothing offers to
-    expect(composerQueueShown({ ...working, connected: false, text: "also check the tests" })).toBe(false);
-    // the agent is not working: the round button is Send
-    expect(composerQueueShown({ ...working, queueMode: false, text: "also check the tests" })).toBe(false);
+  it("uses one Stop or Send control and queues all agents' working-turn messages", () => {
+    expect(composerSendShown({ working: true, text: "" })).toBe(false);
+    expect(composerSendShown({ working: true, text: " \n" })).toBe(false);
+    expect(composerSendShown({ working: true, text: "check the tests" })).toBe(true);
+    expect(composerSendShown({ working: false, text: "" })).toBe(true);
+    for (const agent of ["codex", "claude", "pi", "omo"]) {
+      expect(composerDelivery(agent, "working")).toBe("queue");
+      for (const state of ["idle", "blocked", "done", "unknown"] as const) expect(composerDelivery(agent, state)).toBe("immediate");
+    }
+    expect(composerDelivery(null, "working")).toBe("immediate");
   });
 
   it("says the reconnecting sentence in the status content only once there is a draft", () => {
@@ -160,19 +152,11 @@ describe("composer presentation helpers", () => {
     expect(composerStatusHint({ uploading: true, connected: false, text: "draft" })).toBe("offline");
   });
 
-  it("steps the model label out whole while Queue shows, and only the effort word without it", () => {
-    const fits = { modelClipped: false, effortClipped: false };
-    expect(composerModelDraw({ queueShown: true, ...fits })).toBe("full");
-    expect(composerModelDraw({ queueShown: false, ...fits })).toBe("full");
-    // Queue is showing and the label does not fit, at any card width (a phone with the mic, a
-    // long model id beside an open sidebar): it steps out whole, never cut mid-word
-    expect(composerModelDraw({ queueShown: true, modelClipped: false, effortClipped: true })).toBe("out");
-    expect(composerModelDraw({ queueShown: true, modelClipped: true, effortClipped: true })).toBe("out");
-    expect(composerModelDraw({ queueShown: true, modelClipped: true, effortClipped: false })).toBe("out");
-    // no Queue: the effort word goes whole, so no sliver of it is drawn; the name stays
-    expect(composerModelDraw({ queueShown: false, modelClipped: false, effortClipped: true })).toBe("no-effort");
-    expect(composerModelDraw({ queueShown: false, modelClipped: true, effortClipped: true })).toBe("no-effort");
-    expect(composerModelDraw({ queueShown: false, modelClipped: true, effortClipped: false })).toBe("no-effort");
+  it("removes the effort word before shortening the model", () => {
+    expect(composerModelDraw({ modelClipped: false, effortClipped: false })).toBe("full");
+    expect(composerModelDraw({ modelClipped: false, effortClipped: true })).toBe("no-effort");
+    expect(composerModelDraw({ modelClipped: true, effortClipped: true })).toBe("no-effort");
+    expect(composerModelDraw({ modelClipped: true, effortClipped: false })).toBe("no-effort");
   });
 
   it("turns machine agent ids into labels", () => {

@@ -136,10 +136,16 @@ function recorder() {
     resyncs: [] as { panes: string[]; newer: string[] }[],
     structure: 0,
     statuses: [] as string[],
+    /** statuses and reconciled snapshots, in the order they were told */
+    order: [] as string[],
   };
   const handlers: StatusCollectorHandlers = {
-    onStatus: (paneId, status, _agent, replay) => log.statuses.push(`${paneId}:${status}${replay ? ` (was ${replay.before})` : ""}`),
+    onStatus: (paneId, status, _agent, replay) => {
+      log.statuses.push(`${paneId}:${status}${replay ? ` (was ${replay.before})` : ""}`);
+      log.order.push(`${paneId}:${status}`);
+    },
     onBaseline: () => { log.baselines += 1; },
+    onReconciled: (panes) => log.order.push(`reconciled ${panes.map((p) => `${p.pane_id}:${p.agent_status}`).join(" ")}`),
     onResync: (panes, newer) => log.resyncs.push({ panes: panes.map((p) => p.pane_id), newer: [...newer].sort() }),
     onPaneEnded: () => {},
     onStructureChange: () => { log.structure += 1; },
@@ -180,19 +186,25 @@ describe("startStatusCollector recovery", () => {
     expect(second.paneIds).toEqual(["w1:p1", "w2:p1"]);
     herdr.setPanes([paneOf("w1:p1", "idle"), paneOf("w2:p1", "idle")]);
     expect(log.statuses).toEqual([]);
+    log.order.length = 0;
     second.start();
     await tick(20);
     // once, as the event would have been; a pane first seen is no change; nothing was "lost"
     expect(log.statuses).toEqual(["w1:p1:idle (was working)"]);
     expect(log.resyncs).toEqual([]);
+    // the snapshot is handed on as reconciled only after what it replays has been told
+    expect(log.order).toEqual(["w1:p1:idle", "reconciled w1:p1:idle w2:p1:idle"]);
     // the same snapshot again tells nothing more, and an event since outranks an older snapshot
     herdr.hold();
     herdr.lifecycle().emit({ event: "pane_closed", data: { type: "pane_closed" } });
     await tick(20);
+    log.order.length = 0;
     second.emit(statusFrame("w1:p1", "working"));
     herdr.answerAll();
     await tick();
     expect(log.statuses).toEqual(["w1:p1:idle (was working)", "w1:p1:working"]);
+    // and that snapshot is not handed on for the pane the event spoke of
+    expect(log.order).toEqual(["w1:p1:working", "reconciled w2:p1:idle"]);
     collector.stop();
   });
 

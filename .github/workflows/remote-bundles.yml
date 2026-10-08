@@ -95,7 +95,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - run: sudo apt-get update && sudo apt-get install -y openssh-server && sudo mkdir -p /run/sshd
+      - run: sudo bash scripts/ci-bounded-retry.sh 300 bash -c 'apt-get update && apt-get install -y openssh-server' && sudo mkdir -p /run/sshd
       - run: bun install --frozen-lockfile && bun run build && bun run scripts/build-remote-bundle.ts
       - run: bun run scripts/ssh-integration.ts
         env:

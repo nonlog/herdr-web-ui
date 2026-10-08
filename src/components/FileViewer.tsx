@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Download, ExternalLink, X } from "lucide-react";
-
 import "./FileViewer.css";
 import { DirectoryBrowser } from "./DirectoryBrowser.tsx";
 
@@ -10,6 +9,7 @@ import { formatBytes } from "../lib/bridgeProgress.ts";
 import { LOCAL_MACHINE } from "../../shared/machines.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { useT } from "../lib/i18n.ts";
+import { nativeModalOver, useFocusTrap } from "../lib/useFocusTrap.ts";
 
 /** Bigger images are offered as a download: a phone decodes an image whole. */
 const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -21,6 +21,8 @@ export interface FileViewerProps {
   path: string;
   paneId: string | null;
   onClose: () => void;
+  /** Settings can open above this preview; its Escape must not also close the file. */
+  keyboardActive?: boolean;
   /** a file chosen in a folder's listing: opened as the preview, so history and a reload keep it */
   onOpen?: (path: string) => void;
 }
@@ -29,7 +31,7 @@ export interface FileViewerProps {
  * A file an agent wrote, opened in the browser: images, video and audio (streamed, so they
  * play and seek at once), PDFs, and the start of a text file. Anything can be downloaded.
  */
-export function FileViewer({ path: asked, paneId, onClose, onOpen }: FileViewerProps) {
+export function FileViewer({ path: asked, paneId, onClose, onOpen, keyboardActive = true }: FileViewerProps) {
   const t = useT();
   const { fetchFileInfo, fileUrl, fetchDirectories } = useMachineApi();
   // a remote PC's bridge reads a relative folder from the pane's folder only from its next bundle
@@ -42,7 +44,8 @@ export function FileViewer({ path: asked, paneId, onClose, onOpen }: FileViewerP
   const [candidates, setCandidates] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState<string | null>(null);
-
+  // Escape closes it, Tab stays in it, and the focus goes back to the row that opened it
+  const surface = useFocusTrap<HTMLElement>(true);
   useEffect(() => setPath(asked), [asked]);
 
   useEffect(() => {
@@ -74,12 +77,13 @@ export function FileViewer({ path: asked, paneId, onClose, onOpen }: FileViewerP
   }, [path, paneId, fetchFileInfo, fileUrl, fetchDirectories, remote]);
 
   useEffect(() => {
+    if (!keyboardActive) return;
     // the FilesDialog beneath listens on window too (and stands down while this is open); this
-    // one is the topmost overlay, so it takes the key
-    const onKey = (event: KeyboardEvent): void => { if (event.key === "Escape") onClose(); };
+    // one is the topmost overlay, so it takes the key, unless a native modal (Add PC) is over it
+    const onKey = (event: KeyboardEvent): void => { if (event.key === "Escape" && !nativeModalOver(surface.current)) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, keyboardActive]);
 
   // the file found (a bare name may have been found deeper in the folder), else as asked
   const url = fileUrl(info?.path ?? path, paneId);
@@ -114,7 +118,7 @@ export function FileViewer({ path: asked, paneId, onClose, onOpen }: FileViewerP
 
   return (
     <div className="modal-scrim file-viewer-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="modal file-viewer" role="dialog" aria-modal="true" aria-label={info?.name ?? path}>
+      <section ref={surface} className="modal file-viewer" role="dialog" aria-modal="true" aria-label={info?.name ?? path} tabIndex={-1}>
         <header className="modal-header file-viewer-header">
           <div className="file-viewer-title">
             <h2 className="modal-title">{info?.name ?? path.split("/").pop()}</h2>

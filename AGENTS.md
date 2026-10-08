@@ -1,12 +1,19 @@
+## nonlog fork requirements
+
+- Preserve the fork features and upstream-merge checklist in `docs/fork-features.md`.
+- Builds and packaging MUST use GitHub Actions. Do not run local/VPS project builds. Use CI runtime artifacts for installation; the normal plugin installer builds locally.
+- Push only nonlog/herdr-web-ui; no upstream PRs. Assistant-created commits use Codex <codex@openai.com> as both author and committer.
+- Touch attachments use keep_size. Local history is a separate passive ANSI renderer, not a rebuild of the live xterm. Never infer application mouse/alternate mode from Herdr 0.9.3's outer transport; use the explicit scroll target.
+
 # herdr-web-ui
 
 Browser UI for the herdr terminal multiplexer: a React 18 + xterm.js client (`src/`) and a Bun.serve backend (`server/`) that bridges herdr's newline-JSON unix-socket API. `shared/` is the wire contract both sides import.
 
 ## Scope
 
-- This file, `server/AGENTS.md` and `src/AGENTS.md` are committed and apply to every agent working on the project, forks included. A PR is checked against them together with `CONTRIBUTING.md`, `.github/REVIEW.md`, `docs/development.md` and `DESIGN.md`.
+- This file, `server/AGENTS.md`, `src/AGENTS.md`, `scripts/AGENTS.md` and `shared/AGENTS.md` are committed and apply to every agent working on the project, forks included. A PR is checked against them together with `CONTRIBUTING.md`, `.github/REVIEW.md`, `docs/development.md` and `DESIGN.md`.
 - They hold only what the code and those documents do not show. Commands, layout, environment variables and release steps are in `docs/development.md` and `package.json`; do not copy them here.
-- Read `server/AGENTS.md` before editing `server/` and `src/AGENTS.md` before editing `src/`.
+- Read `server/AGENTS.md` before editing `server/` and `src/AGENTS.md` before editing `src/`; likewise `scripts/AGENTS.md` for `scripts/` and `shared/AGENTS.md` for `shared/`.
 - "Maintainer workflow" applies only to the maintainer. Everyone else follows `CONTRIBUTING.md` for branches, PRs and the changelog.
 
 ## Bridge invariants
@@ -20,7 +27,7 @@ The app is only a bridge: herdr owns every pty, scrollback and agent state.
 - NEVER pool herdr RPC connections: herdr closes the socket after each response. Use one connection per call (10 s timeout). Only `events.subscribe` stays open, and a second subscribe on an open connection is silently ignored, so reopen it with the full set.
 - `pane.process_info` takes `pane_id`, not `target`. Given `target`, it silently answers for the focused pane.
 - `server/collector.ts` is the only status subscription source. Do not subscribe to status anywhere else.
-- Nothing the user typed is ever queued or sent automatically while offline. Keystrokes go to a draft the user sends or discards; messages sent while the agent works wait for an explicit "Send now".
+- Nothing the user typed is ever queued or sent automatically while offline. Keystrokes go to a draft the user sends or discards. An explicit chat Send while an agent works can enter the bridge's pending list on `pending-input` bridges: the next turn and its explicit Send now action claim the same server ID. Automatic delivery requires the original live connection and pane lease; disconnect/reload never resumes it. Existing browser-held messages still require "Send now".
 - Prompt answers are `send_keys` navigation, never digits, and go through `POST /api/pane/prompt/answer`: the key semantics per agent live on the server.
 - Web push: build requests with `generateRequestDetails` and send them with `fetch`; never call `sendNotification`.
 - The omo transcript is found through the process tree, never through `pane.agent` or file mtime.
@@ -30,6 +37,8 @@ The app is only a bridge: herdr owns every pty, scrollback and agent state.
 
 - HTTP and WS shapes live in `shared/protocol.ts`; change both sides through it and add a contract test (`server/api.contract.test.ts` for endpoints).
 - Every push to `main` redeploys the site and the demo. A new endpoint or WS frame needs an answer in `site/demo/transport.ts`, or the demo gets a 404.
+- The demo is the client itself: `site/demo/transport.ts` also imports `shared/` and `rollupStatus` from `src/lib/status.ts`, so a change there changes the demo.
+- `site/demo/fixtures.ts` is bundled into the browser and reused by `scripts/readme-media/stage.ts`: keep it fictional and free of server imports.
 - Every error body is `{ error: { code, message } }`, built only with the helpers in `server/http.ts`.
 - Mutating machine, device and update POSTs require same-origin plus the `x-herdr-machine: 1` or `x-herdr-update: 1` header.
 - Route order in `createServer().fetch` matters: bridge, then machines, then `/ws`, then the `/api/*` handlers, then a 404 for the rest of `/api/*`, then static files.
@@ -48,12 +57,14 @@ The app is only a bridge: herdr owns every pty, scrollback and agent state.
 - Shortcuts are Mod+Shift+key so the pty keeps Ctrl+key. To add one, update `SHORTCUTS`, `KEY_TO_ID` and the switch in `src/lib/shortcuts.ts`.
 - Icons come from lucide-react only; brand marks live in `AgentMark.tsx`. When icon files change, bump the `?v=` query in `index.html` and `CACHE_NAME` in `public/sw.js` together.
 - UI wording: "New workspace", not "New session". "Session" means the herdr server session or an agent's history.
-- There is no linter or formatter. `scripts/` and `site/` are not typechecked, so run what you change there.
+- There is no linter or formatter. `scripts/` and `site/` are not typechecked (only `scripts/build-xterm.ts`, through `vite.config.ts`), so run what you change there.
+- `vite.config.ts` reads `THIRD_PARTY_NOTICES.md` at build time and ships it in `dist/`.
 
 ## Testing
 
 - `bun:test` only, with no DOM. `src/` tests cover pure logic in `lib/*.test.ts`; component behavior is covered by the Playwright scripts. A `.test.tsx` file is not discovered.
-- A test that needs a live herdr is named `*.contract.test.ts`. Unit tests run with `HERDR_TEST_MODE=unit` and never touch herdr.
+- A test that needs a live herdr is named `*.contract.test.ts`; without that name it runs in the unit suite, except the paths `scripts/ci-tests.ts` lists. Unit tests run with `HERDR_TEST_MODE=unit` and never touch herdr.
+- `bun run check fast` is CI's Fast checks and `bun run check full` adds its two lanes, on a herdr of the run's own that reads nothing from the user's config. Only one run with a lane at a time on a PC: a second one exits and names the first. `bun run check run <command…>` gives one test file or browser script the same herdr.
 - Single file: `HERDR_TEST_MODE=unit bun test ./server/prompt.test.ts`. The `./` is required.
 - The unit suite is `bun run test:unit`. A bare `bun test` also loads every `*.contract.test.ts`; under `HERDR_TEST_MODE=unit` those fail, since unit mode points `HERDR_SOCKET` at a socket that does not exist.
 - `bun run test:ui` does not run `scripts/file-viewer-regression.ts`; CI does.
@@ -63,7 +74,7 @@ The app is only a bridge: herdr owns every pty, scrollback and agent state.
 - Transcript caches are module-global; tests call `forgetTranscriptState()`.
 - NEVER run the real `herdr update` in a test: it replaces the herdr on PATH.
 - `scripts/generate-protocol-types.test.ts` rewrites the generated file while it runs; do not edit that file during a test run.
-- Two servers cannot attach the same pane: the second gets `attach_conflict`. For QA, use a pane the live server does not hold.
+- Two servers cannot attach the same pane: the second gets `attach_held` and waits for the holder. For QA, use a pane the live server does not hold.
 - Screenshots and recordings come from the `herdr-web-ui-demo` or a test session, never the user's live session. Playwright scripts serve `dist/`, so build first.
 
 ## Maintainer workflow

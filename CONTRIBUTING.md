@@ -37,7 +37,11 @@ Neither command updates itself; only `bun run start` and the plugin run the upda
 
 ## Checks
 
-The **Fast checks** CI job runs these; none needs herdr:
+`bun run check fast` runs the **Fast checks** CI job, and `bun run check full` adds the
+**Integration and browser** job, on a herdr of its own apart from the one you work in
+([docs/development.md](docs/development.md#checks)).
+
+**Fast checks** is these, one by one; none needs herdr:
 
 ```bash
 bun run generate:types --check   # shared/herdr-api.generated.ts matches scripts/herdr-schema.json

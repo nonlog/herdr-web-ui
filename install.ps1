@@ -69,6 +69,7 @@ function Test-WindowsPlugin($Plugin) {
     $Plugin.plugin_root -and (Test-Path -LiteralPath (Join-Path $Plugin.plugin_root 'scripts\plugin.ps1'))
 }
 $plugin = Find-Plugin
+$newInstall = $false
 if ($plugin -and -not (Test-WindowsPlugin $plugin)) {
     # A copy from a release older than Windows support never starts here, so no in-app update reaches it.
     Write-Host 'herdr web ui: replacing an installed copy that has no Windows support'
@@ -84,6 +85,7 @@ if (-not $plugin) {
     if (-not $Ref) { throw 'Could not find the latest app release on GitHub. Check your connection and run this again.' }
     Write-Host "herdr web ui: installing the plugin at $Ref"
     Run-Tool herdr @('plugin', 'install', 'devswha/herdr-web-ui', '--ref', $Ref, '--yes')
+    $newInstall = $true
     $plugin = Find-Plugin
     if (-not $plugin.plugin_root) { throw 'herdr does not list the plugin after installing it. See: herdr plugin list' }
     # herdr installs a release without Windows build steps as a success that cannot start.
@@ -113,4 +115,84 @@ if ($server.running) {
     Write-Host ($status | Where-Object { $_ -match '^running ' })
 } else { Write-Host 'herdr web ui: starts with herdr. Open a new terminal and run: herdr' }
 Write-Host 'herdr web ui: open Phone setup in herdr for phone access.'
+
+# One gh api call: gh's exit code and the HTTP status GitHub answered with, or nothing when gh is
+# not there or does not answer in 10 seconds. A gh that hangs must not hold up an install that is done:
+# the deadline covers its exit and its output both (a child it handed the output to could live on),
+# and what outlasts it is killed with its children.
+function Invoke-GhApi([string]$Arguments) {
+    $gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $gh) { return }
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $ghArguments = "api --hostname github.com --include $Arguments"
+    if ($gh.Path -match '\.(cmd|bat)$') {
+        # a shim: the command interpreter runs it, with the path and the arguments as one quoted command
+        $start.FileName = $env:ComSpec
+        $start.Arguments = "/d /c """"$($gh.Path)"" $ghArguments"""
+    } else {
+        $start.FileName = $gh.Path
+        $start.Arguments = $ghArguments
+    }
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = $null
+    try {
+        $process = [Diagnostics.Process]::Start($start)
+        $process.StandardInput.Close()
+        $said = $process.StandardOutput.ReadToEndAsync()
+        $null = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(10000) -or -not $said.Wait(2000)) {
+            try { & $env:ComSpec /d /c "taskkill /T /F /PID $($process.Id) >nul 2>&1" } catch { }
+            return
+        }
+        $status = ''
+        if ($said.Result -match '^HTTP\S* (\d{3})') { $status = $Matches[1] }
+        @{ code = $process.ExitCode; status = $status }
+    } finally { if ($process) { $process.Dispose() } }
+}
+# A script that runs this has nobody to answer. A terminal can have nobody at it either (an agent's),
+# so the answer is read key by key within 20 seconds in all: what was typed before the question is
+# discarded, and a line left unfinished when the time is up is no answer.
+function Test-Terminal { -not ($env:CI -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected) }
+function Read-Answer {
+    $Host.UI.RawUI.FlushInputBuffer()
+    $until = (Get-Date).AddSeconds(20)
+    $answer = ''
+    while ((Get-Date) -lt $until) {
+        if (-not [Console]::KeyAvailable) { Start-Sleep -Milliseconds 100; continue }
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq [ConsoleKey]::Enter) { Write-Host ''; return $answer }
+        if ($key.Key -eq [ConsoleKey]::Backspace) {
+            if ($answer.Length -gt 0) { $answer = $answer.Substring(0, $answer.Length - 1); Write-Host -NoNewline "`b `b" }
+        } elseif (-not [char]::IsControl($key.KeyChar)) {
+            $answer += $key.KeyChar
+            Write-Host -NoNewline $key.KeyChar
+        }
+    }
+    Write-Host ''
+    return $null
+}
+# Once, on the first install, and not to an account that already starred (204). It asks only when
+# GitHub says the account has not (404), only at a terminal, and stars only on "y".
+if ($newInstall) {
+    try {
+        $starred = Invoke-GhApi 'user/starred/devswha/herdr-web-ui'
+        if (-not $starred -or $starred.status -ne '204') {
+            Write-Host ''
+            Write-Host 'herdr web ui: if it helps you, a GitHub star helps other herdr users find it: https://github.com/devswha/herdr-web-ui'
+            if ($starred -and $starred.status -eq '404' -and (Test-Terminal)) {
+                Write-Host -NoNewline 'herdr web ui: star it now with the GitHub account gh is signed in to? [y/N] '
+                $answer = Read-Answer
+                if ("$answer".Trim() -match '^(y|yes)$') {
+                    $given = Invoke-GhApi '--method PUT user/starred/devswha/herdr-web-ui'
+                    if ($given -and $given.code -eq 0) { Write-Host 'herdr web ui: starred. Thank you!' }
+                    else { Write-Host 'herdr web ui: gh could not star it; the page above can' }
+                }
+            }
+        }
+    } catch { } # the install is done by now: a question that cannot be asked must not fail it
+}
 }

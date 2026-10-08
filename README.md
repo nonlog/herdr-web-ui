@@ -1,3 +1,5 @@
+> **nonlog fork:** [Fork 功能、修复与同步记录](docs/fork-features.md) — Windows live control, isolated mobile history, CI-only deployment.
+
 # herdr web ui
 
 <p align="center">
@@ -91,7 +93,7 @@ A browser and phone client for [herdr](https://github.com/herdrdev/herdr). Read 
 curl -fsSL https://devswha.github.io/herdr-web-ui/install.sh | sh
 ```
 
-Linux (x64, arm64) or macOS. Installs missing herdr 0.9.0+, Bun 1.4+ and Node 18+ prerequisites for your user, then installs the app as a herdr plugin. If an existing herdr installation is older than 0.9.0, update and restart herdr yourself before rerunning the installer. With the default listen address and Tailscale running, successful HTTPS setup provides a tailnet address and QR code.
+Linux (x64, arm64) or macOS. Installs missing herdr 0.9.0+, Bun 1.4+ and Node 18+ prerequisites for your user, then installs the app as a herdr plugin. If an existing herdr installation is older than 0.9.0, update and restart herdr yourself before rerunning the installer. With the default listen address and Tailscale running, successful HTTPS setup provides a tailnet address and QR code. Your own devices get in without a code as it is: `tailscale serve` states your login. If your own phone is asked to pair anyway, `HERDR_WEB_TAILSCALE_SERVE_ONLY=1` lets it in without a code on a tailnet one login owns, but only when nothing else, such as a public proxy or tunnel, reaches this port ([Access and safety](docs/guide.md#access-and-safety)).
 
 Windows x64, in PowerShell:
 

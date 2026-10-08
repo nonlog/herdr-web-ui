@@ -77,6 +77,12 @@ export interface StatusCollectorHandlers {
    * truth for every pane but the `newer` ones, which had an event since it was asked for.
    */
   onResync?: (panes: readonly HerdrPane[], newer: ReadonlySet<string>) => void;
+  /**
+   * The panes of a reconcile's snapshot, once what that snapshot replays has been told: for a
+   * consumer whose own reading of herdr must not run ahead of those status events. A pane with
+   * an event, an end or a focus since the snapshot was asked for is left out: it is newer.
+   */
+  onReconciled?: (panes: readonly HerdrPane[]) => void;
   onPaneEnded: (paneId: string) => void;
   onStructureChange: () => void;
   /** herdr's focus moved onto this pane: whoever is at its terminal has it in front */
@@ -368,6 +374,8 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
           handlers.onStatus(pane.pane_id, pane.agent_status, agent, { before: before.status, agent: before.agent });
         }
       }
+      // a pane heard of since the snapshot was asked for is newer than what it shows of it
+      handlers.onReconciled?.(snapshot.panes.filter((pane) => !newerThan(pane.pane_id, askedAt)));
       // gone before this snapshot; a pane heard of since may be too new for it
       for (const [paneId, seq] of lastEventOf) if (seq <= askedAt && !paneIds.includes(paneId)) lastEventOf.delete(paneId);
       for (const paneId of [...heard.keys()]) if (!paneIds.includes(paneId) && (lastEventOf.get(paneId) ?? 0) <= askedAt) heard.delete(paneId);

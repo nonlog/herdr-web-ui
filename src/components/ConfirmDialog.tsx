@@ -6,13 +6,14 @@
  * A refusal the owner named (git refusing a dirty checkout) turns the action into its escalation
  * (Delete anyway), with the refusal's own words above it.
  */
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import "./ConfirmDialog.css";
 
 import { ApiError } from "../lib/api.ts";
 import { useT } from "../lib/i18n.ts";
+import { nativeModalOver, useFocusTrap } from "../lib/useFocusTrap.ts";
 
 interface Props {
   title: string;
@@ -28,27 +29,23 @@ interface Props {
 export function ConfirmDialog({ title, body, confirmLabel, onConfirm, escalation, onClose }: Props) {
   const t = useT();
   const id = useId();
-  const surface = useRef<HTMLDivElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const action = useRef<HTMLButtonElement>(null);
-  const opener = useRef<HTMLElement | null>(null);
   const done = useRef(false);
+  // the trap and the hand-back, which every aria-modal surface now shares
+  const surface = useFocusTrap<HTMLDivElement>(true, { initialFocus: cancel, shouldRestore: () => !done.current });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [escalated, setEscalated] = useState(false);
 
-  useLayoutEffect(() => {
-    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    return () => { if (!done.current && opener.current?.isConnected) opener.current.focus({ preventScroll: true }); };
-  }, []);
-  useEffect(() => { window.requestAnimationFrame(() => cancel.current?.focus()); }, []);
   // both buttons disable while the deed runs, which would drop the focus into the page: the
   // dialog itself holds it, and Tab stays put until the dialog goes
   useEffect(() => { if (pending) surface.current?.focus(); }, [pending]);
   // Escape is this dialog's while it is up, even while the deed runs and cannot be undone
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
+      // a native modal over it (Add PC, from the palette) takes its own Escape
+      if (event.key !== "Escape" || nativeModalOver(surface.current)) return;
       event.stopPropagation();
       event.preventDefault();
       if (!pending) onClose();
@@ -56,13 +53,6 @@ export function ConfirmDialog({ title, body, confirmLabel, onConfirm, escalation
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose, pending]);
-
-  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
-    if (event.key !== "Tab") return;
-    event.preventDefault();
-    if (pending) return;
-    (document.activeElement === cancel.current ? action.current : cancel.current)?.focus();
-  };
 
   const confirm = async (): Promise<void> => {
     setPending(true);
@@ -78,7 +68,7 @@ export function ConfirmDialog({ title, body, confirmLabel, onConfirm, escalation
 
   return createPortal(
     <div className="modal-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose(); }}>
-      <div ref={surface} className="modal confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-body`} tabIndex={-1} onKeyDown={onKeyDown}>
+      <div ref={surface} className="modal confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-body`} tabIndex={-1}>
         <header className="modal-header"><h2 className="modal-title" id={`${id}-title`}>{title}</h2></header>
         <div className="modal-body">
           <p className="confirm-body" id={`${id}-body`}>{body}</p>

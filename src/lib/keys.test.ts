@@ -1,5 +1,87 @@
 import { describe, expect, it } from "bun:test";
-import { altSequence, controlCode, ctrlEnterSequence, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras } from "./keys.ts";
+import { altSequence, clipboardKey, physicalKey, controlCode, ctrlEnterSequence, isPrintable, keySequence, modifyOtherKeysLevel, sanitizeKeyBarExtras, navigationSequence, terminalChord, keyFromData } from "./keys.ts";
+
+describe("clipboardKey", () => {
+  it("recognizes native Ctrl+C/V on Korean and Russian layouts without replacing Latin layout letters", () => {
+    expect(clipboardKey("ㅍ", "KeyV")).toBe("v");
+    expect(clipboardKey("м", "KeyV")).toBe("v");
+    expect(clipboardKey("ㅊ", "KeyC")).toBe("c");
+    expect(clipboardKey("с", "KeyC")).toBe("c");
+    expect(clipboardKey("c", "KeyJ")).toBe("c");
+    expect(clipboardKey("j", "KeyC")).toBe("j");
+    expect(clipboardKey("V", "KeyV")).toBe("v");
+    expect(clipboardKey("ArrowLeft", "ArrowLeft")).toBe("arrowleft");
+  });
+});
+
+describe("physicalKey", () => {
+  it("names a non-Latin layout's letter by its position and keeps a Latin layout's own", () => {
+    expect(physicalKey("ㅊ", "KeyC")).toBe("c");
+    expect(physicalKey("с", "KeyC")).toBe("c");
+    expect(physicalKey("ㅉ", "KeyC")).toBe("c");
+    expect(physicalKey("j", "KeyC")).toBe("j");
+    expect(physicalKey("C", "KeyC")).toBe("C");
+    expect(physicalKey("!", "Digit1")).toBe("!");
+    expect(physicalKey("ArrowLeft", "ArrowLeft")).toBe("ArrowLeft");
+    expect(physicalKey("한", "KeyG")).toBe("g");
+  });
+});
+
+describe("terminalChord", () => {
+  it("combines held modifiers with optional navigation and symbol keys", () => {
+    const held = { ctrl: true, alt: true, shift: true };
+    for (const [key, name] of [["pipe", "|"], ["tilde", "~"], ["slash", "/"], ["BackTab", "tab"]]) {
+      expect(terminalChord(key!, held)).toBe(`ctrl+alt+shift+${name}`);
+    }
+    for (const [key, sequence] of [["Home", "\x1b[1;8H"], ["End", "\x1b[1;8F"], ["PageUp", "\x1b[5;8~"], ["PageDown", "\x1b[6;8~"]]) {
+      expect(terminalChord(key!, held)).toBeNull();
+      expect(navigationSequence(key!, held)).toBe(sequence!);
+    }
+    expect(terminalChord("BackTab", { ctrl: true, alt: false, shift: false })).toBe("ctrl+shift+tab");
+  });
+  it("preserves every combination for cursor keys, letters and symbols", () => {
+    for (let mask = 0; mask < 8; mask++) {
+      const modifiers = { ctrl: !!(mask & 4), alt: !!(mask & 2), shift: !!(mask & 1) };
+      const prefix = [modifiers.ctrl && "ctrl", modifiers.alt && "alt", modifiers.shift && "shift"].filter(Boolean).join("+");
+      for (const [key, name] of [["ArrowLeft", "left"], ["a", "a"], ["я", "я"], ["!", "!"], ["+", "plus"], [" ", "space"], ["Enter", "enter"], ["Tab", "tab"]]) {
+        expect(terminalChord(key!, modifiers)).toBe((prefix ? prefix + "+" : "") + name);
+      }
+    }
+  });
+  it("rejects text blocks and unidentified hardware keys", () => {
+    for (const key of ["Dead", "Unidentified", "paste me", "constructor", "toString", "__proto__", "\x03", ""]) {
+      expect(terminalChord(key, { ctrl: true, alt: true, shift: true })).toBeNull();
+    }
+  });
+  it("combines intrinsic control buttons with held Alt and Shift", () => {
+    const alt = { ctrl: false, alt: true, shift: false };
+    expect(terminalChord("ctrl-d", alt)).toBe("ctrl+alt+d");
+    expect(terminalChord("ctrl-z", { ...alt, shift: true })).toBe("ctrl+alt+shift+z");
+    expect(terminalChord("ctrl-c", { ctrl: false, alt: false, shift: false })).toBe("ctrl+c");
+    expect(altSequence(keySequence("ctrl-d", false))).toBe("\x1b\x04");
+    expect(altSequence(keySequence("ctrl-z", false))).toBe("\x1b\x1a");
+  });
+  it("keeps the existing Alt editing sequences and supports combined attach navigation", () => {
+    const alt = { ctrl: false, alt: true, shift: false };
+    for (const key of ["Delete", "Insert"] as const) {
+      expect(terminalChord(key, alt)).toBeNull();
+      expect(navigationSequence(key, alt)).toBe(altSequence(keySequence(key, false)));
+    }
+    expect(navigationSequence("Delete", { ctrl: true, alt: true, shift: true })).toBe("\x1b[3;8~");
+    expect(navigationSequence("Insert", { ctrl: true, alt: false, shift: false })).toBe("\x1b[2;5~");
+  });
+});
+
+describe("keyFromData", () => {
+  it("identifies single committed keys without guessing inside paste or encoded chords", () => {
+    expect(keyFromData("\x1bOA")).toBe("ArrowUp");
+    expect(keyFromData("\x1b[D")).toBe("ArrowLeft");
+    expect(keyFromData("\r")).toBe("Enter");
+    expect(keyFromData("я")).toBe("я");
+    expect(keyFromData("😀")).toBe("😀");
+    for (const data of ["paste me", "한글", "constructor", "toString", "__proto__", "\x1b[1;5A", "\x1b[200~a\x1b[201~", ""]) expect(keyFromData(data)).toBeNull();
+  });
+});
 
 describe("controlCode", () => {
   it("maps letters to their control code regardless of case", () => {

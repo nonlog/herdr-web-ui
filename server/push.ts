@@ -39,6 +39,7 @@ import {
   statusNotificationBody,
 } from "../shared/notify-policy.ts";
 import { badRequest, jsonResponse } from "./http.ts";
+import { isLoopbackHost } from "./access.ts";
 
 /** A blocked agent is still blocked when the phone gets signal back; a newer push for the pane replaces it anyway. */
 const PUSH_TTL_SECONDS = 12 * 60 * 60;
@@ -70,6 +71,8 @@ export type PushDelivery = { ok: true } | { ok: false; status: number | null; go
 
 export interface PushService {
   publicKey(): string;
+  /** `parseSubscription` with this service's endpoint rule: what POST /api/push/subscribe accepts */
+  parse(value: unknown): PushSubscriptionRecord | null;
   /** `alerts` absent keeps what the device chose before (a re-registration on load) */
   subscribe(subscription: PushSubscriptionRecord, alerts?: AlertPrefs, deviceId?: string | null): void;
   revokeDevice(id: string): void;
@@ -100,6 +103,8 @@ export interface PushServiceOptions {
   timing?: Partial<AlertTiming>;
   now?: () => number;
   canDeliver?: (deviceId: string | null | undefined) => boolean;
+  /** accept plain-http loopback endpoints: only for the tests' fake push service (push.fake.ts) */
+  loopbackHttp?: boolean;
 }
 
 export { defaultStateDir } from "./update-state.ts";
@@ -127,13 +132,21 @@ function decodedLength(value: unknown): number {
 }
 
 /** The PushSubscription JSON a browser produces, checked before anything is stored. */
-export function parseSubscription(value: unknown): PushSubscriptionRecord | null {
+export function parseSubscription(value: unknown, options: { loopbackHttp?: boolean } = {}): PushSubscriptionRecord | null {
   if (typeof value !== "object" || value === null) return null;
   const { endpoint, keys } = value as { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } };
   if (typeof endpoint !== "string") return null;
   try {
     const url = new URL(endpoint);
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    // https only. A browser never hands over an http: endpoint (push is https by
+    // definition), so one is never a subscription: it is only the shape that turns this
+    // server into a POST from inside the user's network at a host no browser page could
+    // reach — a link-local metadata address, a router admin page, another VLAN.
+    // Loopback is no exception: a watch device would make every agent alert a POST to a
+    // local service. Only a push service made for the tests' fake (push.fake.ts, which runs
+    // on loopback http) passes `loopbackHttp`, through createServer's `pushLoopbackHttp`.
+    const loopbackHttp = options.loopbackHttp === true && url.protocol === "http:" && isLoopbackHost(url.hostname);
+    if (url.protocol !== "https:" && !loopbackHttp) return null;
   } catch {
     return null;
   }
@@ -181,7 +194,7 @@ export function createPushService(options: PushServiceOptions): PushService {
     subscriptions = new Map();
     if (Array.isArray(stored)) {
       for (const entry of stored) {
-        const parsed = parseSubscription(entry);
+        const parsed = parseSubscription(entry, options);
         const alerts = (entry as { alerts?: unknown } | null)?.alerts;
         if (parsed) {
           const owner = (entry as PushSubscriptionRecord).device_id;
@@ -214,6 +227,9 @@ export function createPushService(options: PushServiceOptions): PushService {
         method: details.method,
         headers,
         body: new Uint8Array(details.body),
+        // a push service answers, it never redirects: following one would send the alert to
+        // wherever the endpoint points, past the https-only check (a local service, over http)
+        redirect: "error",
         signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
       });
       if (response.ok) return { ok: true };
@@ -302,6 +318,7 @@ export function createPushService(options: PushServiceOptions): PushService {
 
   return {
     publicKey: () => keys().publicKey,
+    parse: (value) => parseSubscription(value, options),
 
     subscribe(subscription, alerts, deviceId) {
       const kept = alerts ?? store().get(subscription.endpoint)?.alerts;
@@ -442,8 +459,8 @@ export async function handlePushRequest(request: Request, pathname: string, push
   const body = (typeof payload === "object" && payload !== null ? payload : {}) as { subscription?: unknown; endpoint?: unknown; alerts?: unknown };
 
   if (route === "POST /api/push/subscribe") {
-    const subscription = parseSubscription(body.subscription);
-    if (!subscription) return badRequest("invalid_subscription", "subscription needs an http(s) endpoint and p256dh/auth keys");
+    const subscription = push.parse(body.subscription);
+    if (!subscription) return badRequest("invalid_subscription", "subscription needs an https endpoint and p256dh/auth keys");
     push.subscribe(subscription, body.alerts === undefined ? undefined : parseAlerts(body.alerts), deviceId);
     return new Response(null, { status: 204 });
   }

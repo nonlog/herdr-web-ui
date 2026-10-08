@@ -10,6 +10,9 @@
 #    current, and starts it now when herdr is running.
 # 3. When Tailscale runs on this PC, serves the app to your tailnet (`tailscale serve`, on the first
 #    free HTTPS port) and prints the address a phone opens as a QR code (scripts/plugin.ts phone).
+# 4. On a first install, mentions a GitHub star once. When the gh CLI is signed in and has not
+#    starred the repository, it asks at the terminal, for 20 seconds, and stars only on "y"; it
+#    never stars by itself.
 #
 # Run it again at any time: what is already there is kept, and step 3 is repeated.
 #   HERDR_WEB_UI_REF=<branch or tag>   install that ref instead of the latest release
@@ -41,6 +44,75 @@ at_least() {
     for (i = 1; i <= 3; i++) { if (h[i] + 0 > w[i] + 0) exit 0; if (h[i] + 0 < w[i] + 0) exit 1 } exit 0 }'
 }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{ print $1 }'; }
+
+# gh api, given 10 seconds: a gh that does not answer must not hold up an install that is done.
+# The watcher looks once a second, so it is gone soon after gh is; a gh that ignores TERM is killed.
+gh_api() {
+  gh api --hostname github.com "$@" </dev/null &
+  gh_pid=$!
+  (
+    waited=0
+    while [ "$waited" -lt 10 ]; do sleep 1; kill -0 "$gh_pid" 2>/dev/null || exit 0; waited=$((waited + 1)); done
+    kill -TERM "$gh_pid" 2>/dev/null || exit 0
+    sleep 2
+    kill -KILL "$gh_pid" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+  watch_pid=$!
+  gh_status=0
+  wait "$gh_pid" || gh_status=$?
+  kill "$watch_pid" 2>/dev/null || true
+  wait "$watch_pid" 2>/dev/null || true
+  return "$gh_status"
+}
+# Whether the account the gh CLI is signed in to has starred the repository, by the status GitHub
+# answers with: yes (204), no (404), or unknown (no gh, no sign-in, no answer, or any other status).
+starred() {
+  command -v gh >/dev/null 2>&1 || { echo unknown; return 0; }
+  # into a file, not a pipe: a gh that left a child holding its output would hold a pipe's reader
+  # past the deadline, where a file is read once gh_api has returned
+  answer=$(mktemp 2>/dev/null) || { echo unknown; return 0; }
+  gh_api --include "user/starred/$REPO" >"$answer" 2>/dev/null || true
+  status=$(sed -n '1s/^HTTP[^ ]* \([0-9][0-9][0-9]\).*/\1/p' "$answer" 2>/dev/null || true)
+  rm -f "$answer"
+  case "$status" in
+    204) echo yes ;;
+    404) echo no ;;
+    *) echo unknown ;;
+  esac
+}
+# Asks once, and stars only on "y". Only at a terminal: a script that runs this has nobody to
+# answer. A terminal can have nobody at it either (an agent's), so the question waits 20 seconds
+# and then goes on; POSIX read cannot give up, bash's can. Under `curl | sh` stdin is the script,
+# so the answer is read from the terminal itself.
+offer_star() {
+  [ "$terminal" = 1 ] && [ -z "${CI:-}" ] || return 0
+  command -v bash >/dev/null 2>&1 || return 0
+  # perl is what checks the terminal is this install's to ask at, and empties what was typed before
+  command -v perl >/dev/null 2>&1 || return 0
+  (exec </dev/tty) 2>/dev/null || return 0
+  # Only in the foreground: a background job that reached for the terminal would be stopped, with no
+  # 20 seconds to end that. Then what was typed before the question is not an answer to it: it is
+  # discarded, and when it cannot be, there is no question (tcflush is "0 but true", undef on failure).
+  perl -MPOSIX -e 'exit 1 unless POSIX::tcgetpgrp(0) == POSIX::getpgrp(); POSIX::tcflush(0, POSIX::TCIFLUSH) or exit 1' </dev/tty >/dev/null 2>&1 || return 0
+  # the question and its answer go through the terminal itself, not stdout: under `curl | sh` stdin
+  # is the script, and a stdout sent elsewhere must not leave the question unseen where it is read
+  # the install is done: leaving the question with Ctrl-C is an answer, not a failure. The trap
+  # comes before the question: a Ctrl-C the moment it shows must not end the script with 130
+  trap 'echo; exit 0' INT
+  printf '%s' "herdr web ui: star it now with the GitHub account gh is signed in to? [y/N] " >/dev/tty 2>/dev/null || { trap - INT; return 0; }
+  # shellcheck disable=SC2016 # bash's variable, not this shell's
+  answer=$(bash -c 'read -r -t 20 answer </dev/tty && printf %s "$answer"' 2>/dev/null) || { answer=""; echo; }
+  trap - INT
+  case "$answer" in
+    y | Y | yes | Yes | YES) ;;
+    *) return 0 ;;
+  esac
+  if gh_api --method PUT "user/starred/$REPO" >/dev/null 2>&1; then
+    say "starred. Thank you!"
+  else
+    say "gh could not star it; the page above can"
+  fi
+}
 
 install_node() {
   case "$platform" in
@@ -208,12 +280,6 @@ main() {
     fi
   fi
 
-  # once, on the first install; a rerun for the phone address stays quiet
-  if [ "$new_install" = 1 ]; then
-    echo
-    say "if it helps you, a GitHub star helps other herdr users find it: $(link "https://github.com/$REPO")"
-  fi
-
   case ":$original_path:" in
     *":$BIN_DIR:"*) ;;
     *)
@@ -231,6 +297,17 @@ main() {
       fi
       ;;
   esac
+
+  # once, on the first install, and not to someone who already starred it; a rerun for the phone
+  # address stays quiet. Last, so that leaving the question unanswered loses nothing above it.
+  if [ "$new_install" = 1 ]; then
+    star=$(starred)
+    if [ "$star" != yes ]; then
+      echo
+      say "if it helps you, a GitHub star helps other herdr users find it: $(link "https://github.com/$REPO")"
+      [ "$star" != no ] || offer_star
+    fi
+  fi
 }
 
 # the whole script is read before anything runs: under `curl | sh`, a command that reads stdin

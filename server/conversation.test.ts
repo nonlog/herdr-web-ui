@@ -59,6 +59,100 @@ describe("parseClaudeTranscript", () => {
     expect(turns.some((turn) => turn.parts.some((part) => part.kind === "text" && part.text.includes("/clear")))).toBe(false);
   });
 
+  it("shows what a slash command answered, and leaves its echo and an empty answer out", () => {
+    const local = (content: string, ts: string) => JSON.stringify({ type: "system", subtype: "local_command", isMeta: false, timestamp: ts, content });
+    const refusal = "/goal can't run while hooks are restricted (disableAllHooks or allowManagedHooksOnly is set in settings or by policy).";
+    const turns = parseClaudeTranscript([
+      local("<command-name>/goal</command-name>\n<command-message>goal</command-message>\n<command-args>test</command-args>", "2026-10-07T19:00:00.000Z"),
+      local(`<local-command-stdout>${refusal}</local-command-stdout>`, "2026-10-07T19:00:01.000Z"),
+      local("<local-command-stdout></local-command-stdout>", "2026-10-07T19:00:02.000Z"),
+      local("<local-command-stderr>\u001b[31mUnknown command: /gaol\u001b[39m</local-command-stderr>", "2026-10-07T19:00:03.000Z"),
+      JSON.stringify({ type: "system", subtype: "turn_duration", content: "<local-command-stdout>not a command's answer</local-command-stdout>" }),
+    ].join("\n"));
+    expect(turns).toEqual([
+      { role: "user", ts: "2026-10-07T19:00:01.000Z", parts: [{ kind: "notice", text: refusal, source: "local-command" }] },
+      { role: "user", ts: "2026-10-07T19:00:03.000Z", parts: [{ kind: "notice", text: "Unknown command: /gaol", source: "local-command" }] },
+    ]);
+  });
+
+  it("shows a slash command's answer only as the whole entry, as text, and not past its length", () => {
+    const local = (content: string) => JSON.stringify({ type: "system", subtype: "local_command", timestamp: "2026-10-07T19:00:00.000Z", content });
+    const notices = (lines: string[]) => parseClaudeTranscript(lines.join("\n")).flatMap((turn) => turn.parts).filter((part) => part.kind === "notice").map((part) => (part as { text: string }).text);
+    // an echo whose arguments quote the tag is still an echo
+    expect(notices([local("<command-name>/goal</command-name>\n<command-args>x <local-command-stdout>quoted</local-command-stdout></command-args>")])).toEqual([]);
+    // a link keeps its text and drops its hidden address; cursor moves and backspaces go too
+    expect(notices([local("<local-command-stdout>\u001b]8;;https://example.test/?token=hidden\u0007open\u001b]8;;\u0007 done\u001b[2K\b</local-command-stdout>")])).toEqual(["open done"]);
+    const long = notices([local(`<local-command-stdout>${"x".repeat(10_000)}</local-command-stdout>`)])[0]!;
+    expect(long.length).toBe(4001);
+    expect(long.endsWith("\u2026")).toBe(true);
+  });
+
+  it("strips an unterminated link, a charset switch, and shows both streams of one entry", () => {
+    const local = (content: string) => JSON.stringify({ type: "system", subtype: "local_command", timestamp: "2026-10-07T19:00:00.000Z", content });
+    const notices = (lines: string[]) => parseClaudeTranscript(lines.join("\n")).flatMap((turn) => turn.parts).filter((part) => part.kind === "notice").map((part) => (part as { text: string }).text);
+    // an OSC cut off before its BEL or ST still hides its address
+    expect(notices([local("<local-command-stdout>done \u001b]8;;https://example.test/?token=hidden</local-command-stdout>")])).toEqual(["done"]);
+    // ESC ( B is one sequence: no stray B
+    expect(notices([local("<local-command-stdout>\u001b(Bplain\u001b[m text</local-command-stdout>")])).toEqual(["plain text"]);
+    expect(notices([local("<local-command-stdout>out</local-command-stdout>\n<local-command-stderr>err</local-command-stderr>")])).toEqual(["out\nerr"]);
+    // a closing tag the output itself prints ends nothing: only one at the end, or before the next stream, does
+    expect(notices([local("<local-command-stdout>Use </local-command-stdout> in this example.</local-command-stdout>")])).toEqual(["Use </local-command-stdout> in this example."]);
+    expect(notices([local("<local-command-stdout>a </local-command-stdout> b</local-command-stdout>\n<local-command-stderr>err</local-command-stderr>")])).toEqual(["a </local-command-stdout> b\nerr"]);
+  });
+
+  it("strips escapes in work linear in a malformed answer's length", () => {
+    const local = (n: number, unit: string) => JSON.stringify({ type: "system", subtype: "local_command", timestamp: "2026-10-07T19:00:00.000Z", content: `<local-command-stdout>${unit.repeat(n)}</local-command-stdout>` });
+    // Counted, not timed: the parse takes well under a millisecond, and two such timings divide
+    // into noise. It reads the answer through these primitives, each charged the characters it
+    // touches. A regex's backtracking cannot be counted, so a run is charged its worst case, the
+    // square of its input: a regex over one character costs one step, one over the answer fails.
+    const work = (line: string): number => {
+      let steps = 0;
+      const text = String.prototype;
+      const { charCodeAt, indexOf, startsWith, slice } = text;
+      const { exec } = RegExp.prototype;
+      text.charCodeAt = function (this: string, index: number) {
+        steps++;
+        return charCodeAt.call(this, index);
+      };
+      text.indexOf = function (this: string, search: string, from = 0) {
+        const found = indexOf.call(this, search, from);
+        steps += (found === -1 ? this.length : found) - from + search.length;
+        return found;
+      };
+      text.startsWith = function (this: string, search: string, from?: number) {
+        steps += search.length;
+        return startsWith.call(this, search, from);
+      };
+      text.slice = function (this: string, start?: number, end?: number) {
+        const part = slice.call(this, start, end);
+        steps += part.length;
+        return part;
+      };
+      RegExp.prototype.exec = function (this: RegExp, input: string) {
+        steps += input.length ** 2;
+        return exec.call(this, input);
+      };
+      try {
+        parseClaudeTranscript(line);
+      } finally {
+        text.charCodeAt = charCodeAt;
+        text.indexOf = indexOf;
+        text.startsWith = startsWith;
+        text.slice = slice;
+        RegExp.prototype.exec = exec;
+      }
+      return steps;
+    };
+    // unterminated escapes, and closing tags the output prints itself
+    for (const unit of ["\u001b]x", "</local-command-stdout> x"]) {
+      // doubling the input doubles the work (2.00 measured for both); a rescan from every
+      // unterminated opener, or from every closing tag, quadruples it. No work counted at all
+      // is NaN here and fails too.
+      expect(work(local(40_000, unit)) / work(local(20_000, unit))).toBeLessThan(2.5);
+    }
+  });
+
   it("keeps thinking blocks in transcript order", () => {
     const assistant = parseClaudeTranscript(lines)[1];
     expect(assistant?.parts.map((part) => part.kind)).toEqual(["text", "tool", "thinking", "text"]);

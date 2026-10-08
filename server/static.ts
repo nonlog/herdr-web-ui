@@ -46,6 +46,80 @@ function cacheControlFor(pathname: string): string {
   return SHORT_CACHE;
 }
 
+/**
+ * The app's own Content-Security-Policy, sent with the shell and every static file. The file
+ * viewer's own answers (`/api/fs/*`, a PDF in a frame, images in an <img>) do not pass through
+ * here: `fileResponse` (file-view.ts) sends them its own, stricter `sandbox; default-src 'none'`.
+ * Every directive is here for a reason, and none of them is a guess:
+ *
+ * - `default-src 'self'`: the fallback for anything not named below. Nothing is fetched
+ *   from another host: the API, the terminal socket, the machines event stream, the
+ *   fonts (bundled woff2, `src/fonts/`), the PC bundle and the push endpoints are all
+ *   same-origin, and the remote PCs are reached through this server's own /api/machines
+ *   proxy rather than from the browser.
+ * - `script-src 'self'`: both entry points are Vite modules (index.html), nothing in the
+ *   app evaluates a string, and there is no inline handler attribute. This is the
+ *   directive that matters: KaTeX output and the agent marks are the two places that put
+ *   third-party HTML into the page.
+ * - `style-src 'self' 'unsafe-inline'`: inline style attributes are how measured layout
+ *   reaches the DOM (AgentPicker, RowMenu, Droplet, UsageMeters), and KaTeX writes one on
+ *   every expression it cannot render. It is also load-bearing for the terminal itself:
+ *   xterm.js builds its layers by appending a <style> element to the DOM, and a
+ *   DOM-inserted <style> is subject to style-src, so without 'unsafe-inline' the pane
+ *   loses its cursor and its layers. The unsafe part is styles, not script.
+ * - `img-src 'self' data: blob:`: same-origin icons, pane images and file-viewer images;
+ *   `blob:` for a pasted image previewed before it is uploaded; `data:` for the inline
+ *   agent marks.
+ * - `font-src 'self' data:`: every face is bundled (the app's own and KaTeX's, both
+ *   through Vite). No font CDN. The `data:` is Vite's own inlining: an asset under ~4 KB
+ *   is emitted as a data: URL inside the CSS rather than as a file, and KaTeX_Size3's
+ *   3 KB woff2 is one of them. That data: is app-bundled bytes, never anything an agent
+ *   or a transcript can reach. Measured in Chromium: without it the load reports one
+ *   `font-src` violation per maths-bearing page, and the browser falls through to the
+ *   same-origin .woff of the same face, so the maths still draws.
+ * - `connect-src 'self'`: every fetch is a relative /api path, the terminal socket is
+ *   window.location.host over ws:/wss: (which 'self' matches — confirmed in Chromium:
+ *   an explicit `new WebSocket("ws://<same host>/ws")` and the machines event stream both
+ *   connect under the enforcing header).
+ * - `media-src 'self'`: the file viewer's <video>/<audio>, same-origin.
+ * - `frame-src 'self'`: the PDF viewer frames /api/fs/file, same-origin.
+ * - `worker-src 'self'`: the service worker is /sw.js, same-origin.
+ * - `object-src 'none'`: no <object>/<embed> in the app, and none may appear.
+ * - `base-uri 'self'`: no <base>, and a tag that adds one changes what every relative URL
+ *   in the page means.
+ * - `form-action 'self'`: every form is submitted by script, but a form that ever grows
+ *   an action must not post this PC's credentials somewhere else.
+ * - `frame-ancestors 'none'`: nothing frames the app itself.
+ */
+const CSP_DIRECTIVES = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "media-src 'self'",
+  "frame-src 'self'",
+  "worker-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+];
+
+/**
+ * HERDR_WEB_CSP=report-only measures the policy above without enforcing it: the browser
+ *   logs what the policy would have blocked and the app keeps working. `report-only` is the
+ *   measurement mode; anything else enforces.
+ */
+function cspHeader(): Record<string, string> {
+  const mode = process.env["HERDR_WEB_CSP"];
+  const policy = CSP_DIRECTIVES.join("; ");
+  return mode === "report-only"
+    ? { "content-security-policy-report-only": policy }
+    : { "content-security-policy": policy };
+}
+
 export async function serveStatic(pathname: string): Promise<Response> {
   const indexPath = join(DIST_DIR, "index.html");
   if (!existsSync(indexPath)) {
@@ -60,11 +134,11 @@ export async function serveStatic(pathname: string): Promise<Response> {
     const file = Bun.file(candidate);
     if ((await file.exists()) && !(await file.stat()).isDirectory()) {
       return new Response(file, {
-        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname) },
+        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname), ...cspHeader() },
       });
     }
   }
   return new Response(Bun.file(indexPath), {
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE, ...cspHeader() },
   });
 }

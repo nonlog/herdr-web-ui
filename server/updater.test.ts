@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Updater, runCommand, type Release } from "./updater.ts";
+import { NOTES_FILE_LIMIT, readNotesFile, Updater, runCommand, type Release } from "./updater.ts";
+import { spawnSync } from "node:child_process";
+import { symlinkSync } from "node:fs";
 import { HERDR_SOCKET_PATH } from "../shared/protocol.ts";
 
 let directory: string, upstream: string, root: string, stateDir: string;
@@ -130,9 +132,11 @@ const liveHerdr = existsSync(process.env["HERDR_SOCKET"] || HERDR_SOCKET_PATH);
 describe("managed source updates with real Git repositories and builds", () => {
   it("checks without installing, then builds an exact revision without changing the source", async () => {
     const original = await git(root, "rev-parse", "HEAD");
+    writeFileSync(join(upstream, "CHANGELOG.md"), "# Changelog\n\n## [0.2.0] - 2026-10-07\n\n### Added\n- Second.\n");
     const target = await release("second", "v0.2.0");
     await updater.request("check");
     expect(updater.status.available).toBe(true);
+    expect(updater.notes).toEqual({ revision: target, releases: [{ version: "0.2.0", date: "2026-10-07", notes: "### Added\n- Second." }], omitted: 0 });
     expect(updater.status.current_revision).toBe(original);
     expect(readdirSync(stateDir).filter(name => name.startsWith("release-"))).toHaveLength(0);
     expect(steps).toEqual([null]);
@@ -140,12 +144,130 @@ describe("managed source updates with real Git repositories and builds", () => {
     expect(updater.status.error).toBeNull();
     expect(steps).toEqual([null, "download", "dependencies", "typecheck", "build", "restart", null]);
     expect(updater.status.current_revision).toBe(target);
+    expect(updater.notes).toEqual({ revision: null, releases: [], omitted: 0 });
     expect(readFileSync(join(updater.release!.directory, "dist/index.html"), "utf8")).toBe("second");
     expect(await git(root, "rev-parse", "HEAD")).toBe(original);
     expect(await git(root, "status", "--porcelain")).toBe("");
     const resumed = new Updater(updater.options);
     expect((await resumed.initialize())?.revision).toBe(target);
     resumed.stop();
+  });
+
+  it("tells what an update brings from the release's own changelog, every release since the running one", async () => {
+    const manifest = JSON.parse(readFileSync(join(upstream, "package.json"), "utf8")) as Record<string, unknown>;
+    writeFileSync(join(upstream, "package.json"), JSON.stringify({ ...manifest, version: "0.1.0" }));
+    await commit("versioned");
+    await git(root, "pull", "--ff-only", "--quiet");
+    // the notes are there when the status that offers the update is published, not after it
+    let offered: unknown = null;
+    const versioned = new Updater({ ...updater.options, publish(status) { if (status.available) offered = versioned.notes; } });
+    await versioned.initialize();
+    expect(versioned.status.current_version).toBe("0.1.0");
+
+    const section = (version: string) => `## [${version}] - 2026-10-07\n\n### Added\n- Release ${version}.\n`;
+    writeFileSync(join(upstream, "CHANGELOG.md"), `# Changelog\n\n${section("0.2.0")}`);
+    await release("second", "v0.2.0");
+    writeFileSync(join(upstream, "CHANGELOG.md"), `# Changelog\n\n${section("0.3.0")}\n${section("0.2.0")}`);
+    const third = await release("third", "v0.3.0");
+    // main moves on after the release: an entry the install does not bring
+    writeFileSync(join(upstream, "CHANGELOG.md"), `# Changelog\n\n## [Unreleased]\n- Later.\n\n${section("0.4.0")}\n${section("0.3.0")}\n${section("0.2.0")}`);
+    await commit("unreleased work");
+    await versioned.request("check");
+    expect(versioned.status.available).toBe(true);
+    expect(versioned.notes.releases.map((entry) => [entry.version, entry.notes])).toEqual([
+      ["0.3.0", "### Added\n- Release 0.3.0."], ["0.2.0", "### Added\n- Release 0.2.0."],
+    ]);
+    // the notes name the commit they were read from: the one the status offers
+    expect(versioned.notes.revision).toBe(third);
+    expect(versioned.status.latest_revision).toBe(third);
+    expect(offered).toEqual(versioned.notes);
+
+    // a release that ships no changelog is offered all the same, without notes
+    await release("fourth", "v0.5.0");
+    await git(upstream, "rm", "-q", "CHANGELOG.md");
+    const fifth = await release("fifth", "v0.6.0");
+    await versioned.request("check");
+    expect(versioned.status.error).toBeNull();
+    expect(versioned.status.latest_version).toBe("0.6.0");
+    expect(versioned.status.available).toBe(true);
+    expect(versioned.notes).toEqual({ revision: fifth, releases: [], omitted: 0 });
+    versioned.stop();
+  });
+
+  it("tells a release by its summary, and what the update brought once it runs", async () => {
+    const manifest = JSON.parse(readFileSync(join(upstream, "package.json"), "utf8")) as Record<string, unknown>;
+    const cut = (version: string, sections: string[], summaries: Record<string, Record<string, Record<string, string[]>>> | null) => {
+      writeFileSync(join(upstream, "package.json"), JSON.stringify({ ...manifest, version }));
+      writeFileSync(join(upstream, "CHANGELOG.md"), `# Changelog\n\n${sections.map((entry) => `## [${entry}] - 2026-10-07\n\n### Added\n- Release ${entry}.\n`).join("\n")}`);
+      if (summaries) writeFileSync(join(upstream, "release-summaries.json"), JSON.stringify(summaries));
+      else rmSync(join(upstream, "release-summaries.json"), { force: true });
+    };
+    cut("0.1.0", ["0.1.0"], null);
+    await commit("versioned");
+    await git(root, "pull", "--ff-only", "--quiet");
+    // what the last update brought is there when the status that names the new revision is published
+    let told: unknown = null;
+    const versioned = new Updater({ ...updater.options, publish(status) { if (status.current_version === "0.2.0" && told === null) told = versioned.installed; } });
+    await versioned.initialize();
+    // the source checkout: for its commit, the answer is that no update installed it
+    const none = { revision: await git(root, "rev-parse", "HEAD"), version: null, previous_version: null, installed_at: null, releases: [], omitted: 0 };
+    expect(versioned.installed).toEqual(none);
+
+    const summary = { en: { new: ["A second release."], fixed: ["The first one."] }, ko: { new: ["두 번째 릴리스."], fixed: ["첫 번째 릴리스."] } };
+    cut("0.2.0", ["0.2.0", "0.1.0"], { "0.2.0": summary, "0.1.0": { en: { new: ["The first."] } } });
+    const second = await release("second", "v0.2.0");
+    await versioned.request("check");
+    const brought = [{ version: "0.2.0", date: "2026-10-07", notes: "### Added\n- Release 0.2.0.", summary }];
+    expect(versioned.notes).toEqual({ revision: second, releases: brought, omitted: 0 });
+    expect(versioned.installed).toEqual(none);
+
+    const before = Date.now();
+    await versioned.request("install");
+    expect(versioned.status.error).toBeNull();
+    expect(versioned.installed).toMatchObject({ revision: second, version: "0.2.0", previous_version: "0.1.0", releases: brought, omitted: 0 });
+    expect(Date.parse(versioned.installed.installed_at!)).toBeGreaterThanOrEqual(before);
+    expect(told).toEqual(versioned.installed);
+    // the supervisor the release starts was not there for the install: it reads what that one wrote down
+    const resumed = new Updater({ ...versioned.options, publish() {} });
+    await resumed.initialize();
+    expect(resumed.installed).toEqual(versioned.installed);
+
+    // a build left behind by an install that was cut short is a later version, and no release that ran
+    const stray = join(stateDir, "release-stray");
+    mkdirSync(stray);
+    writeFileSync(join(stray, "package.json"), JSON.stringify({ version: "0.2.5" }));
+    // the next update replaces the release that runs, not that build and not the source checkout,
+    // and one that wrote no summary is told by its section
+    cut("0.3.0", ["0.3.0", "0.2.0", "0.1.0"], null);
+    const third = await release("third", "v0.3.0");
+    await resumed.request("install");
+    expect(resumed.status.error).toBeNull();
+    expect(resumed.installed).toMatchObject({ revision: third, version: "0.3.0", previous_version: "0.2.0",
+      releases: [{ version: "0.3.0", date: "2026-10-07", notes: "### Added\n- Release 0.3.0." }], omitted: 0 });
+    const later = new Updater({ ...versioned.options, publish() {} });
+    await later.initialize();
+    expect(later.installed).toEqual(resumed.installed);
+
+    // a release installed by a supervisor older than that record: the version it replaced is the
+    // newest older build still here, and the time is the record's own
+    const record = join(stateDir, "current.json");
+    const { previous_version: _previous, installed_at: _at, ...legacy } = JSON.parse(readFileSync(record, "utf8")) as Record<string, unknown>;
+    writeFileSync(record, JSON.stringify(legacy));
+    const inferred = new Updater({ ...versioned.options, publish() {} });
+    await inferred.initialize();
+    expect(inferred.installed).toMatchObject({ revision: third, version: "0.3.0", previous_version: "0.2.0" });
+    expect(Number.isFinite(Date.parse(inferred.installed.installed_at!))).toBe(true);
+
+    // a file too large to be notes is not read: summaries of that size leave the changelog, a changelog of that size leaves the update
+    writeFileSync(join(inferred.release!.directory, "release-summaries.json"), JSON.stringify({ "0.3.0": { en: { new: ["x".repeat(2_100_000)] } } }));
+    const unsummarized = new Updater({ ...versioned.options, publish() {} });
+    await unsummarized.initialize();
+    expect(unsummarized.installed.releases).toEqual([{ version: "0.3.0", date: "2026-10-07", notes: "### Added\n- Release 0.3.0." }]);
+    writeFileSync(join(inferred.release!.directory, "CHANGELOG.md"), `## [0.3.0]\n${"- x\n".repeat(600_000)}`);
+    const untold = new Updater({ ...versioned.options, publish() {} });
+    await untold.initialize();
+    expect(untold.installed).toMatchObject({ version: "0.3.0", previous_version: "0.2.0", releases: [], omitted: 0 });
+    for (const each of [versioned, resumed, later, inferred, unsummarized, untold]) each.stop();
   });
 
   it("refuses local changes, detached branches, and an ahead/diverged history", async () => {
@@ -404,4 +526,22 @@ describe("managed source updates with real Git repositories and builds", () => {
       await handle.exited;
     }
   }, 30_000);
+});
+
+describe("a release's notes file", () => {
+  it("is read whole within its limit, from one descriptor, and only as a regular file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "herdr-notes-file-"));
+    try {
+      writeFileSync(join(dir, "small.md"), "## [0.1.0]\n- one\n");
+      expect(readNotesFile(join(dir, "small.md"))).toBe("## [0.1.0]\n- one\n");
+      writeFileSync(join(dir, "large.md"), Buffer.alloc(NOTES_FILE_LIMIT + 1, 0x78));
+      expect(() => readNotesFile(join(dir, "large.md"))).toThrow(/not notes|too large/);
+      // a symlink is not followed: the release's own file is what is read, not where a link points
+      symlinkSync(join(dir, "small.md"), join(dir, "link.md"));
+      expect(() => readNotesFile(join(dir, "link.md"))).toThrow();
+      // a FIFO would hold the supervisor's synchronous read for a writer that never comes
+      if (spawnSync("mkfifo", [join(dir, "fifo.md")]).status === 0) expect(() => readNotesFile(join(dir, "fifo.md"))).toThrow(/not notes/);
+      expect(() => readNotesFile(join(dir, "missing.md"))).toThrow();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });

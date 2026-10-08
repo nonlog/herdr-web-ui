@@ -31,9 +31,9 @@ export function taskRowLines({ paneTitle, labelled, folder, workspace, alias }: 
   labelled: boolean;
   /** the last folder of the pane's working directory */
   folder: string;
-  /** the workspace's row name: a linked worktree's branch, else its label */
+  /** the workspace's row name: its label, which herdr makes from the branch until its owner names it */
   workspace: string;
-  /** a linked worktree's own workspace name, when it differs from its branch */
+  /** a linked worktree's branch, when the label does not already say it */
   alias?: string | null;
 }): { title: string; place: string } {
   const title = !labelled && paneTitle === folder ? workspace : paneTitle;

@@ -257,15 +257,6 @@
   border: 0;
 }
 
-/* the one state word the row draws: a turn that ended and was not seen yet */
-.composer-status[data-status="done"] strong {
-  flex: none;
-  margin-right: var(--space-1);
-  color: var(--status-done);
-  font-size: var(--fs-xs);
-  letter-spacing: var(--tracking-caps);
-}
-
 .composer-status:not([data-model="out"]) .composer-model-info {
   /* no box of its own: the name and the level sit in the pill itself, so the name can give way
      before anything else does and the level never overlaps what follows */
@@ -321,7 +312,7 @@
 }
 
 /* what is left of the context: plain until a compaction is near */
-/* the context left: a ring filled by what is used, its number on hover or a tap */
+/* Context left: desktop can reveal its number; mobile keeps an inert ring. */
 .composer-context {
   display: inline-flex;
   flex: 0 1 auto;
@@ -374,6 +365,24 @@
   color: var(--status-blocked);
 }
 
+.composer-context-readonly {
+  cursor: default;
+}
+
+.composer-usage {
+  flex: none;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.composer-usage.is-high {
+  color: var(--status-blocked);
+}
+
+.composer-usage.has-problem {
+  color: var(--text-dim);
+}
+
 .composer-status .agent-mark {
   display: inline-flex;
   flex: none;
@@ -403,7 +412,7 @@
 }
 
 /* the message is the card's first row at its full width; under it one row: add and the task
-   chip | the status content | Queue and the one round button. The attachment strip is its own
+   chip | the status content | the one round Send/Stop button. The attachment strip is its own
    row above both. The three cells of the last row stretch and centre what they hold, so the
    controls and the model share one centre line */
 .composer-surface {
@@ -508,7 +517,12 @@
   max-height: 10lh;
   padding: var(--space-4) var(--space-5) var(--space-1);
   resize: none;
+  overflow-x: hidden;
   overflow-y: auto;
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
   background: transparent;
   border: 0;
   outline: 0;
@@ -527,6 +541,19 @@
     font-size: calc(var(--fs-chat) * var(--chat-scale, 1));
     line-height: var(--lh-code);
   }
+}
+
+.composer-text::-webkit-scrollbar {
+  width: var(--space-2);
+}
+
+.composer-text::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.composer-text::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-pill);
 }
 
 .composer-text:focus-visible {
@@ -579,77 +606,73 @@
 }
 
 .composer-action {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--touch-target);
-  height: var(--touch-target);
+  width: var(--space-8);
+  height: var(--space-8);
   padding: 0;
-  border: var(--hairline) solid transparent;
+  border: 0;
   border-radius: var(--radius-pill);
+  background: transparent;
   color: var(--primary-text);
 }
 
-.composer-action svg,
-.composer-queue-button svg,
+.composer-action::before {
+  content: "";
+  box-sizing: border-box;
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: var(--space-8);
+  height: var(--space-8);
+  transform: translate(-50%, -50%);
+  border: var(--hairline) solid var(--composer-action-fill);
+  border-radius: inherit;
+  background: var(--composer-action-fill);
+  pointer-events: none;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.composer-action svg {
+  position: relative;
+  width: var(--space-4);
+  height: var(--space-4);
+}
+
 .composer-attachment button svg {
   width: var(--icon-size);
   height: var(--icon-size);
 }
 
 .composer-send {
-  background: var(--primary);
-  border-color: var(--primary);
+  --composer-action-fill: var(--primary);
 }
 
 /* the one round button: Stop is Send's circle in the text colour, in the same place at the same
    size, so only the glyph changes when the agent starts and ends a turn */
 .composer-stop {
-  background: var(--text-strong);
-  border-color: var(--text-strong);
+  --composer-action-fill: var(--text-strong);
   color: var(--bg);
-  transition:
-    background-color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
 }
 
 .composer-stop:focus-visible:not(:disabled) {
-  background: var(--status-blocked);
-  border-color: var(--status-blocked);
+  --composer-action-fill: var(--status-blocked);
 }
 
 /* not connected, it stops nothing: it must not read as live */
 .composer-stop:disabled {
-  background: transparent;
-  border-color: var(--border-strong);
+  --composer-action-fill: transparent;
   color: var(--text-dim);
 }
 
-.composer-queue-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  min-height: var(--control-h);
-  padding: 0 var(--space-2);
-  background: var(--primary-tint);
-  border: var(--hairline) solid var(--primary);
-  border-radius: var(--radius-pill);
-  color: var(--text-strong);
-  font: inherit;
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-medium);
-  cursor: pointer;
-}
-
-/* one outline less beside Stop: in a dark theme the tint alone carries the pill. A light card
-   keeps the outline, where the tint alone is about 1.1:1 against it */
-[data-theme="dark"] .composer-queue-button {
-  border-color: transparent;
+.composer-stop:disabled::before {
+  border-color: var(--border-strong);
 }
 
 .composer-action:disabled,
-.composer-queue-button:disabled,
 .composer-controls .icon-button:disabled {
   opacity: 0.7;
   cursor: default;
@@ -657,16 +680,13 @@
 
 @media (hover: hover) {
   .composer-send:hover:not(:disabled) {
-    background: var(--primary-hover);
-    border-color: var(--primary-hover);
+    --composer-action-fill: var(--primary-hover);
   }
 
   .composer-stop:hover:not(:disabled) {
-    background: var(--status-blocked);
-    border-color: var(--status-blocked);
+    --composer-action-fill: var(--status-blocked);
   }
 
-  .composer-queue-button:hover:not(:disabled),
   .composer-controls .icon-button:hover:not(:disabled) {
     background: var(--bg-hover);
   }
@@ -846,16 +866,15 @@
 
 @media (pointer: coarse) {
   .composer-controls .icon-button,
-  .composer-queue-button,
   .composer-attachment button {
     min-width: var(--touch-target);
     min-height: calc(var(--touch-target) + var(--space-1));
   }
 
-  /* the round button stays a circle, as tall as the controls beside it */
+  /* Keep the compact circle, with a larger transparent target for touch. */
   .composer-action {
-    width: calc(var(--touch-target) + var(--space-1));
-    height: calc(var(--touch-target) + var(--space-1));
+    width: var(--touch-target);
+    height: var(--touch-target);
   }
 
   .composer {
@@ -869,7 +888,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .composer-surface,
-  .composer-stop,
+  .composer-action::before,
   .composer-resize::before {
     transition: none;
   }
@@ -1189,7 +1208,7 @@
   padding: 0 var(--space-3);
   overflow: hidden;
   border: var(--hairline) solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--bg-elevated);
   color: var(--text);
   font: inherit;

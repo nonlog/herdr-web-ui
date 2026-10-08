@@ -12,6 +12,7 @@ import { AgentMark } from "./AgentMark.tsx";
 import { displayPaneTitle, StatusBadge } from "./Sidebar.tsx";
 import { placeLine } from "../lib/paneName.ts";
 import { useT } from "../lib/i18n.ts";
+import { useFocusTrap } from "../lib/useFocusTrap.ts";
 
 const RECENT_KEY = "herdr-web-ui:recent-panes";
 const RECENT_LIMIT = 8;
@@ -72,13 +73,15 @@ export function CommandPalette({ open, onClose, snapshot, selectedPaneId, view, 
   const [activeIndex, setActiveIndex] = useState(0);
   const [recentPaneIds, setRecentPaneIds] = useState<string[]>(() => loadRecentPanes(machineId));
   const inputRef = useRef<HTMLInputElement>(null);
+  const surface = useFocusTrap<HTMLElement>(open, { initialFocus: inputRef });
+  const resultsRef = useRef<HTMLDivElement>(null);
 
   // Terminal attachment can move focus after the palette opens. Escape belongs to
   // this modal even then, and must not leak through to the underlying terminal.
   useLayoutEffect(() => {
     if (!open) return;
     const dismiss = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -92,7 +95,6 @@ export function CommandPalette({ open, onClose, snapshot, selectedPaneId, view, 
     setQuery("");
     setActiveIndex(0);
     setRecentPaneIds(loadRecentPanes(machineId));
-    window.requestAnimationFrame(() => inputRef.current?.focus());
   }, [open]);
 
   useEffect(() => {
@@ -135,6 +137,15 @@ export function CommandPalette({ open, onClose, snapshot, selectedPaneId, view, 
     setActiveIndex((index) => Math.min(index, Math.max(0, itemCount - 1)));
   }, [itemCount]);
 
+  // Arrow navigation keeps focus in the search field: aria-activedescendant alone does not
+  // scroll its option into view, including when an arrow wraps to the other end of the list.
+  // Rows take hover from mousemove, not mouseenter: a scroll under a resting pointer sends the
+  // row now under it a mouseenter, which would replace the option the arrow picked.
+  useLayoutEffect(() => {
+    if (!open) return;
+    resultsRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [open, activeIndex, query, itemCount]);
+
   if (!open) return null;
 
   const runPane = (pane: PaneInfo): void => {
@@ -155,7 +166,10 @@ export function CommandPalette({ open, onClose, snapshot, selectedPaneId, view, 
     const action = visibleActions[index - panes.length];
     if (action) runAction(action);
   };
-  const onKeyDown = (event: React.KeyboardEvent): void => {
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    // Candidate navigation and the committing Enter belong to the IME. WebKit can report
+    // the latter after compositionend with isComposing false and key code 229.
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     if (event.key === "ArrowDown" && itemCount > 0) {
       event.preventDefault();
       setActiveIndex((index) => (index + 1) % itemCount);
@@ -170,18 +184,18 @@ export function CommandPalette({ open, onClose, snapshot, selectedPaneId, view, 
 
   return (
     <div className="modal-scrim palette-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="menu command-palette" role="dialog" aria-modal="true" aria-label={t("Command palette")} onKeyDown={onKeyDown}>
+      <section ref={surface} className="menu command-palette" role="dialog" aria-modal="true" aria-label={t("Command palette")}>
         <div className="palette-search">
-          <input ref={inputRef} className="input" type="search" value={query} placeholder={t("Search panes and actions…")} aria-label={t("Search panes and actions")} aria-controls="palette-results" aria-activedescendant={itemCount ? `palette-item-${activeIndex}` : undefined} onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} />
+          <input ref={inputRef} className="input" type="search" value={query} placeholder={t("Search panes and actions…")} aria-label={t("Search panes and actions")} aria-controls="palette-results" aria-activedescendant={itemCount ? `palette-item-${activeIndex}` : undefined} onKeyDown={onKeyDown} onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} />
           <button type="button" className="icon-button" aria-label={t("Close command palette")} onClick={onClose}><X /></button>
         </div>
-        <div className="palette-results" id="palette-results" role="listbox">
+        <div ref={resultsRef} className="palette-results" id="palette-results" role="listbox">
           {panes.length > 0 && <div className="menu-heading">{t("Panes")}</div>}
           {panes.map((pane, index) => {
             const workspace = snapshot?.workspaces.find((item) => item.workspace_id === pane.workspace_id);
             const selected = pane.pane_id === selectedPaneId;
             return (
-              <button key={pane.pane_id} id={`palette-item-${index}`} type="button" role="option" className="menu-item palette-pane" aria-selected={activeIndex === index} onMouseEnter={() => setActiveIndex(index)} onClick={() => runPane(pane)}>
+              <button key={pane.pane_id} id={`palette-item-${index}`} type="button" role="option" className="menu-item palette-pane" aria-selected={activeIndex === index} onFocus={() => setActiveIndex(index)} onMouseMove={() => setActiveIndex(index)} onClick={() => runPane(pane)}>
                 <span className="palette-mark"><AgentMark agent={pane.agent ?? "shell"} /></span>
                 <span className="menu-item-main"><span className="palette-row-title">{displayPaneTitle(pane)}{selected && <span className="palette-selected">{t("Selected")}</span>}</span><span className="palette-row-subtitle">{placeLine(workspace?.label ?? t("Unknown workspace"), cwdBasename(pane.foreground_cwd ?? pane.cwd))}</span></span>
                 <StatusBadge status={pane.agent_status} />
@@ -192,7 +206,7 @@ export function CommandPalette({ open, onClose, snapshot, selectedPaneId, view, 
           {visibleActions.map((action, actionIndex) => {
             const index = panes.length + actionIndex;
             const Icon = action.icon;
-            return <button key={action.id} id={`palette-item-${index}`} type="button" role="option" className="menu-item" aria-selected={activeIndex === index} onMouseEnter={() => setActiveIndex(index)} onClick={() => runAction(action)}><Icon /><span className="menu-item-main">{action.label}</span><ShortcutHint shortcutId={action.shortcut} /></button>;
+            return <button key={action.id} id={`palette-item-${index}`} type="button" role="option" className="menu-item" aria-selected={activeIndex === index} onFocus={() => setActiveIndex(index)} onMouseMove={() => setActiveIndex(index)} onClick={() => runAction(action)}><Icon /><span className="menu-item-main">{action.label}</span><ShortcutHint shortcutId={action.shortcut} /></button>;
           })}
           {itemCount === 0 && <p className="palette-empty" role="status">{t("No matching panes or actions")}</p>}
         </div>

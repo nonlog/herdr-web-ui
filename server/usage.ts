@@ -308,6 +308,13 @@ const claude: UsageProvider = {
       claudeWindow(body["seven_day_opus"], "week", "Opus"),
       claudeWindow(body["seven_day_sonnet"], "week", "Sonnet"),
     ].filter((window): window is UsageWindow => window !== null);
+    // a model with a weekly limit of its own (Fable) is only in `limits`; the flat fields win
+    for (const limit of (Array.isArray(body["limits"]) ? body["limits"] : []).map(record)) {
+      const model = text(record(record(limit["scope"])["model"])["display_name"]);
+      const used = number(limit["percent"]);
+      if (limit["kind"] !== "weekly_scoped" || !model || used === null || windows.some((window) => window.scope === model)) continue;
+      windows.push({ kind: "week", scope: model, used_percent: percent(used), resets_at: isoTime(limit["resets_at"]) });
+    }
     return { plan: null, windows };
   },
 };

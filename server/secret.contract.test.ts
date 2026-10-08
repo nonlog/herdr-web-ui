@@ -20,7 +20,7 @@ interface Leg { up: Socket<undefined> | null; held: Buffer[]; entry: ProxiedRequ
  */
 function herdrProxy(path: string, upstream: string) {
   const log: ProxiedRequest[] = [];
-  const control = { refuse: false };
+  const control = { refuse: false, screens: null as { visible: string; detection: string } | null };
   // a write the kernel took only part of: the rest goes out on drain, and an end waits for it
   const backlog = new Map<object, { chunks: Buffer[]; end: boolean }>();
   const push = (to: Socket<any>, chunk: Buffer): void => {
@@ -61,6 +61,16 @@ function herdrProxy(path: string, upstream: string) {
         const entry: ProxiedRequest = { method: request.method, params: request.params, answered: false };
         leg.entry = entry;
         log.push(entry);
+        // A scrolled viewport can show a previous prompt while the live screen has moved on.
+        // Override only text reads: the mirror still draws the owned pane's real ANSI screen.
+        const params = request.params as { source?: string; format?: string } | undefined;
+        if (control.screens && request.method === "pane.read" && params?.format === "text") {
+          const text = params.source === "detection" ? control.screens.detection : control.screens.visible;
+          push(down, Buffer.from(`${JSON.stringify({ id: request.id, result: { read: { text } } })}\n`));
+          entry.answered = true;
+          end(down);
+          return;
+        }
         if (control.refuse && request.method === "pane.send_text") {
           push(down, Buffer.from(`${JSON.stringify({ id: request.id, error: { code: "proxy_refused", message: "refused by the test proxy" } })}\n`));
           entry.answered = true;
@@ -105,8 +115,8 @@ process.stdin.on("data", chunk => {
   return { script, resultFile };
 }
 
-/** One secret entered through the legacy pane.read mirror, with herdr behind the proxy. */
-async function mirroredSecret(refuse: boolean) {
+/** One secret entered on a pane whose terminal is mirrored (a herdr that cannot attach), herdr behind the proxy. */
+async function mirroredSecret(refuse: boolean, screens?: { visible: string; detection: string }) {
   const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-secret-mirror-"));
   const { script, resultFile } = standIn(root);
   const herdr = herdrSocketPath();
@@ -149,13 +159,16 @@ async function mirroredSecret(refuse: boolean) {
     socket.send(JSON.stringify({ type: "attach", pane_id: pane, cols: 80, rows: 24 }));
     await until(() => seen.some((frame) => frame.type === "pty-data"));
     proxy.control.refuse = refuse;
+    proxy.control.screens = screens ?? null;
+    const dispatchFrom = proxy.log.length;
     socket.send(JSON.stringify({ type: "secret", id: 1, pane_id: pane, prompt: "Password:", secret: "fixture-value" }));
     await until(() => seen.some((frame) => frame.type === "secret-result"));
     const result = seen.find((frame) => frame.type === "secret-result");
     // an unawaited send would still be on its way: let the pane have it before the log is read
-    if (!refuse) await until(() => existsSync(resultFile));
+    if (!refuse && result.ok) await until(() => existsSync(resultFile));
     const received = existsSync(resultFile) ? JSON.parse(readFileSync(resultFile, "utf8")) : null;
-    return { result, received, pane, answeredAtResult, sends: sends().map(({ method, params }) => ({ method, params })), frames: JSON.stringify(seen) };
+    const reads = proxy.log.slice(dispatchFrom).filter((entry) => entry.method === "pane.read" && (entry.params as { format?: string }).format === "text");
+    return { result, received, pane, answeredAtResult, reads, sends: sends().map(({ method, params }) => ({ method, params })), frames: JSON.stringify(seen) };
   } finally {
     if (process.env["SECRET_PROXY_LOG"]) {
       writeFileSync(`${process.env["SECRET_PROXY_LOG"]}.${refuse ? "refused" : "accepted"}.json`, JSON.stringify({
@@ -189,6 +202,23 @@ it("a secret herdr refused on a mirrored pane is answered as failed, with no Ent
   expect(sends).toEqual([{ method: "pane.send_text", params: { pane_id: pane, text: "fixture-value" } }]);
   expect(received).toBeNull();
   expect(frames).not.toContain("fixture-value");
+}, 15_000);
+
+it("a secret shown in scrollback is refused when the live screen is no longer asking for it", async () => {
+  const { result, received, sends, reads } = await mirroredSecret(false, { visible: "Password:", detection: "Accepted\nReady>" });
+  expect(result).toMatchObject({ ok: false, code: "prompt_changed" });
+  expect(sends).toEqual([]);
+  expect(received).toBeNull();
+  expect(reads.map((entry) => (entry.params as { source: string }).source)).toEqual(["detection"]);
+}, 15_000);
+
+it("a secret's live prompt is validated even when the viewport is scrolled away from it", async () => {
+  const { result, received, sends, reads } = await mirroredSecret(false, { visible: "Earlier output", detection: "Password:" });
+  expect(result.ok).toBe(true);
+  expect(sends.map((entry) => entry.method)).toEqual(["pane.send_text", "pane.send_keys"]);
+  const expected = "fixture-value\r";
+  expect(received).toEqual({ hash: createHash("sha256").update(expected).digest("hex"), length: expected.length });
+  expect(reads.map((entry) => (entry.params as { source: string }).source)).toEqual(["detection"]);
 }, 15_000);
 
 it("secret frames validate prompts and authority, never queue, and type one no-echo line", async () => {

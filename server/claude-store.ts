@@ -15,9 +15,22 @@
 
 import { constants } from "node:fs";
 import { open, readFile, readdir, stat } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { recentProcessTable } from "./gjc-runtime.ts";
+import type { ProcessRow } from "./windows-processes.ts";
 
 const MAX_PROJECT_NAME = 200;
+
+/** Claude's executable; a Windows one (backslashes or `.exe`) is matched without case, as Windows names files. */
+function isClaudeExecutable(text = ""): boolean {
+  return /(?:^|[\\/])claude(?:\.exe)?$/.test(/\\|\.exe$/i.test(text) ? text.toLowerCase() : text);
+}
+
+/** A Claude Code process in herdr's process info. */
+export function isClaudeProcess(entry: { name?: string; argv0?: string; argv?: readonly string[] }): boolean {
+  // macOS keeps the executable name "node" for npm installs; the process title is argv0.
+  return isClaudeExecutable(entry.name) || isClaudeExecutable(entry.argv0) || isClaudeExecutable(entry.argv?.[0]);
+}
 
 /** Java's String.hashCode, which Claude Code uses for the suffix of a long name. */
 function stringHash(text: string): number {
@@ -50,12 +63,47 @@ export function configDirInPsLine(text: string): string | null {
   return [...text.matchAll(/(?:^|\s)CLAUDE_CONFIG_DIR=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)/g)].at(-1)?.[1] || null;
 }
 
-async function readProcessConfigDir(pid: number): Promise<string | null> {
+/**
+ * The stores a Claude on Windows may use: the default one and each `~/.claude-*` beside it (the
+ * usual second account, as usage.ts finds its sign-in). One listing of home, nothing deeper.
+ */
+async function windowsClaudeStores(home: string): Promise<string[]> {
+  let siblings: string[] = [];
+  try {
+    siblings = (await readdir(home, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith(".claude-"))
+      .map((entry) => join(home, entry.name))
+      .sort();
+  } catch { /* no home to list: the default store alone */ }
+  const stores = new Map<string, string>();
+  for (const store of [defaultClaudeConfigDir(home), join(home, ".claude"), ...siblings]) {
+    // one directory spelled two ways (Windows ignores case) is one store, not two that both claim the process
+    const key = resolve(store).toLowerCase();
+    if (!stores.has(key)) stores.set(key, store);
+  }
+  return [...stores.values()];
+}
+
+/**
+ * Windows lets no other process read Claude's environment, so the store is the one holding the
+ * process's live PID record (claudeProcessSession checks its start); null unless exactly one does.
+ * A store that cannot be read is not the process's.
+ */
+async function windowsProcessStore(home: string, pid: number, table: () => Promise<ProcessRow[]>): Promise<string | null> {
+  const stores = await windowsClaudeStores(home);
+  const checks = await Promise.allSettled(stores.map((store) => claudeProcessSession(home, pid, store, "win32", table)));
+  const owners = stores.filter((_, index) => { const check = checks[index]!; return check.status === "fulfilled" && check.value !== null; });
+  return owners.length === 1 ? owners[0]! : null;
+}
+
+async function readProcessConfigDir(pid: number, home: string, platform: string, table: () => Promise<ProcessRow[]>): Promise<string | null> {
   let dir: string | null = null;
   try {
-    if (process.platform === "linux") {
+    if (platform === "win32") {
+      dir = await windowsProcessStore(home, pid, table);
+    } else if (platform === "linux") {
       dir = (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0").find((entry) => entry.startsWith("CLAUDE_CONFIG_DIR="))?.slice(18) || null;
-    } else if (process.platform === "darwin") {
+    } else if (platform === "darwin") {
       const child = Bun.spawn(["/bin/ps", "-E", "-ww", "-p", String(pid), "-o", "command="], { stdout: "pipe", stderr: "ignore" });
       const timer = setTimeout(() => child.kill(), 3000);
       try {
@@ -72,14 +120,23 @@ async function readProcessConfigDir(pid: number): Promise<string | null> {
 /**
  * The CLAUDE_CONFIG_DIR a Claude process was started with (a launcher such as cac keeps one store
  * per environment), or null when it has none. /proc on Linux, `ps -E` (same user only) on macOS,
- * kept for PROCESS_DIR_TTL_MS under the process's pid and argv.
+ * the store holding its PID record on Windows, kept for PROCESS_DIR_TTL_MS under the process's
+ * pid and argv.
  */
-export async function processClaudeConfigDir(pid: number, argv: readonly string[] = []): Promise<string | null> {
+export async function processClaudeConfigDir(
+  pid: number,
+  argv: readonly string[] = [],
+  home = process.env["HOME"] ?? "",
+  platform: string = process.platform,
+  table: () => Promise<ProcessRow[]> = recentProcessTable,
+): Promise<string | null> {
   const key = `${pid}\0${argv.join("\0")}`;
   const known = processDirs.get(key);
   if (known && Date.now() - known.at < PROCESS_DIR_TTL_MS) return known.dir;
-  const dir = await readProcessConfigDir(pid);
+  const dir = await readProcessConfigDir(pid, home, platform, table);
   processDirs.delete(key);
+  // Claude writes its PID record as it starts: on Windows a miss is asked again on the next read
+  if (dir === null && platform === "win32") return null;
   processDirs.set(key, { dir, at: Date.now() });
   if (processDirs.size > 256) processDirs.delete(processDirs.keys().next().value!);
   return dir;
@@ -114,14 +171,31 @@ async function darwinProcessStart(pid: number): Promise<string | null> {
   } finally { clearTimeout(timer); }
 }
 
+/** Drops what a project scan remembered about one transcript file: the scan runs again if it is ever asked for. */
+export function forgetClaudeSessionFile(path: string): void {
+  for (const [key, value] of found) if (value === path) found.delete(key);
+}
+
+/** Windows: Claude records the start as FILETIME (100 ns since 1601), the process table in ms since 1970. */
+function fileTimeMs(text: string): number | null {
+  return /^\d+$/.test(text) ? Number(BigInt(text) / 10_000n - 11_644_473_600_000n) : null;
+}
+
 /**
  * Claude's native PID record names the current session even without Herdr's hook.
- * The process's exact start (ticks on Linux, `ps` lstart text on macOS) rejects leftovers after a
- * PID is reused. Read again on every request: /clear and resume can change sessions in the same
- * process. Other platforms and older records without procStart keep the hook-only path.
+ * The process's exact start (ticks on Linux, `ps` lstart text on macOS, the process table's
+ * start to the millisecond on Windows) rejects leftovers after a PID is reused. Read again on
+ * every request: /clear and resume can change sessions in the same process. Other platforms and
+ * older records without procStart keep the hook-only path.
  */
-export async function claudeProcessSession(home: string, pid: number, configDir = join(home, ".claude")): Promise<string | null> {
-  if ((process.platform !== "linux" && process.platform !== "darwin") || !Number.isSafeInteger(pid) || pid <= 0) return null;
+export async function claudeProcessSession(
+  home: string,
+  pid: number,
+  configDir = join(home, ".claude"),
+  platform: string = process.platform,
+  table: () => Promise<ProcessRow[]> = recentProcessTable,
+): Promise<string | null> {
+  if ((platform !== "linux" && platform !== "darwin" && platform !== "win32") || !Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
     // Non-blocking and no symlinks: a FIFO or a link in the record's place must not hang the read.
     const file = await open(join(configDir, "sessions", `${pid}.json`), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
@@ -146,11 +220,15 @@ export async function claudeProcessSession(home: string, pid: number, configDir 
       !("sessionId" in record) || typeof record.sessionId !== "string" ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(record.sessionId) ||
       !("procStart" in record) || typeof record.procStart !== "string") return null;
-    if (process.platform === "linux") {
+    if (platform === "linux") {
       if (!/^\d+$/.test(record.procStart)) return null;
       const processStat = await readFile(`/proc/${pid}/stat`, "utf8");
       const fields = processStat.slice(processStat.lastIndexOf(") ") + 2).split(" ");
       if (fields[19] !== record.procStart) return null;
+    } else if (platform === "win32") {
+      // an unreadable table (no rows) leaves the process unknown, and so the record
+      const started = fileTimeMs(record.procStart);
+      if (started === null || (await table()).find((row) => row.pid === pid)?.started !== started) return null;
     } else if (await darwinProcessStart(pid) !== record.procStart.replace(/\s+/g, " ").trim()) return null;
     return record.sessionId;
   } catch (error) {

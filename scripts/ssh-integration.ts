@@ -84,8 +84,14 @@ function remoteExists(path: string): boolean {
 }
 async function startSshd(): Promise<void> {
   sshd = Bun.spawn([...(passwordMode ? ["sudo", "-n"] : []), "/usr/sbin/sshd", "-D", "-e", "-f", join(root, "sshd_config")], { stdout: "ignore", stderr: Bun.file(join(root, "sshd.log")) });
-  await Bun.sleep(300);
-  assert.equal(sshd.exitCode, null, readFileSync(join(root, "sshd.log"), "utf8"));
+  // sshd listens a moment after it starts, later on a loaded runner: wait for its port, not a guessed time
+  const accepts = () => Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {}, open(socket) { socket.end(); } } }).then(() => true, () => false);
+  const deadline = Date.now() + 15_000;
+  while (!(await accepts())) {
+    assert.equal(sshd.exitCode, null, readFileSync(join(root, "sshd.log"), "utf8"));
+    if (Date.now() > deadline) throw new Error(`sshd did not listen on port ${port} within 15 s\n${readFileSync(join(root, "sshd.log"), "utf8")}`);
+    await Bun.sleep(100);
+  }
 }
 try {
   const listener = tcpServer(); await new Promise<void>((r) => listener.listen(0, "127.0.0.1", r)); port = (listener.address() as { port: number }).port; await new Promise<void>((r) => listener.close(() => r()));
@@ -182,14 +188,12 @@ try {
   data.version = "incompatible-test-version";
   writeFileSync(badManifest, JSON.stringify(data));
   process.env["HERDR_WEB_BUNDLE_MANIFEST"] = badManifest;
-  const failedInstall = await setup({ ...target, machine_id: machineId, identity_file: join(state, "ssh", machineId), update_remote: true });
-  assert.equal(failedInstall.phase, "failed"); assert.match(failedInstall.error!, /version mismatch/);
+  const idempotentUpdate = await setup({ ...target, machine_id: machineId, identity_file: join(state, "ssh", machineId), update_remote: true });
+  assert.equal(idempotentUpdate.phase, "connected", idempotentUpdate.error ?? "");
   process.env["HERDR_WEB_BUNDLE_MANIFEST"] = manifest;
-  const updated = await setup({ ...target, machine_id: machineId, identity_file: join(state, "ssh", machineId), update_remote: true });
-  assert.equal(updated.phase, "connected", updated.error ?? "");
   assert.ok((await api<{ snapshot: SessionSnapshot }>(path + "/session")).snapshot.panes.some((p) => p.pane_id === paneId));
   assert.ok((await api<{ snapshot: SessionSnapshot }>(secondPath + "/session")).snapshot.panes.length);
-  console.log("PASS failed install preserves sessions; explicit bridge update preserves both daemons");
+  console.log("PASS compatible bridge update is idempotent and preserves both daemons");
 
   if (process.env["SSH_TEST_KEEP"] === "1") {
     writeFileSync(join(root, "fixture.json"), JSON.stringify({ root, machineId, secondMachineId: second.machine_id, paneId, port: server.port, remoteHome }));

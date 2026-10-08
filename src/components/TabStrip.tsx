@@ -23,6 +23,7 @@ import { focusWorkspaceListToggle } from "../lib/focus.ts";
 import { useT } from "../lib/i18n.ts";
 import { customTabLabel, tabLabel } from "../lib/tabName.ts";
 import { STRIP_AT_REST, stripPlaced, stripScrolled, stripSelected, type StripScroll } from "../lib/tabStripScroll.ts";
+import { PANE_TABPANEL_ID, paneTabPanelLabel } from "../lib/paneRegion.ts";
 import { rosterPanes } from "../lib/dagPane.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { knownStatus } from "../lib/status.ts";
@@ -253,6 +254,10 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     ];
   };
 
+  // the pane region every tab governs, as App names it. App gives that region the tabpanel role
+  // only while the pane's own tab is in this snapshot (paneTabPanelLabel); the same call answers
+  // here, so a tab never claims to control a panel that is not standing there as one.
+  const panePanel = paneTabPanelLabel(snapshot, selectedPane, t) !== null ? PANE_TABPANEL_ID : undefined;
   return (
     <>
       <div ref={strip} className="tab-strip" role="tablist" aria-label={t("Tabs of {workspace}", { workspace: workspace.label })} onKeyDown={onKeyDown} onScroll={onScroll}>
@@ -291,6 +296,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
                   className="tab-strip-tab"
                   data-tab-id={tab.tab_id}
                   aria-selected={active}
+                  aria-controls={panePanel}
                   tabIndex={active ? 0 : -1}
                   title={own.length === 1 && own[0] ? displayPaneTitle(own[0]) : t("{n} panes", { n: own.length })}
                   onClick={() => {

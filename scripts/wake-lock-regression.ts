@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Browser } from "playwright-core";
+import { openSettingsPage } from "./settings-page.ts";
 
 export async function checkWakeLock(browser: Browser, origin: string, paneId: string): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -29,6 +30,7 @@ export async function checkWakeLock(browser: Browser, origin: string, paneId: st
     await page.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
     await page.locator(".conn-live").waitFor();
     await page.keyboard.press("ControlOrMeta+Shift+Comma");
+    await openSettingsPage(page, "Phone & devices");
     const toggle = page.getByRole("switch", { name: "Keep screen on", exact: true });
     assert.equal(await toggle.getAttribute("aria-checked"), "false");
     assert.equal(await page.evaluate(() => (window as any).wakeLockStats.requests), 0);
@@ -58,6 +60,7 @@ export async function checkWakeLock(browser: Browser, origin: string, paneId: st
     await page.reload();
     await page.waitForFunction(() => (window as any).wakeLockStats.requests === 1);
     await page.keyboard.press("ControlOrMeta+Shift+Comma");
+    await openSettingsPage(page, "Phone & devices");
     assert.equal(await toggle.getAttribute("aria-checked"), "true", "setting survives a reload");
     await toggle.click();
     await page.waitForFunction(() => (window as any).wakeLockStats.releases === 1);
@@ -82,6 +85,7 @@ export async function checkWakeLock(browser: Browser, origin: string, paneId: st
     await page.reload();
     await page.locator(".conn-live").waitFor();
     await page.keyboard.press("ControlOrMeta+Shift+Comma");
+    await openSettingsPage(page, "Phone & devices");
     await toggle.waitFor();
     assert.equal(await toggle.getAttribute("aria-checked"), "true");
     assert.equal(await page.evaluate(() => (window as any).wakeLockStats.requests), 0, "no pane, no screen lock");

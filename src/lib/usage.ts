@@ -26,6 +26,24 @@ export const WINDOW_LABEL: Readonly<Record<UsageWindow["kind"], string>> = {
   month: "Monthly",
 };
 
+/** A pane's agent selects a provider, not an inferred active account. */
+export function providerForAgent(agent: string | null | undefined): UsageProviderId | null {
+  return (Object.keys(PROVIDER_MARK) as UsageProviderId[]).find((id) => PROVIDER_MARK[id] === agent) ?? null;
+}
+
+/** The first visible account in Settings order supplies the composer's compact reference. */
+export function composerUsage(providers: readonly ProviderUsage[], agent: string | null, order: readonly string[], hidden: readonly string[]): ProviderUsage | undefined {
+  const providerId = providerForAgent(agent);
+  return orderProviders(providers, order).find((usage) => usage.id === providerId && !hidden.includes(usage.key));
+}
+
+/** Plan-wide five-hour session first, then week; scoped limits do not stand in for either. */
+export function statusWindows(usage: ProviderUsage): UsageWindow[] {
+  return (["session", "week"] as const)
+    .map((kind) => usage.windows.find((window) => window.kind === kind && window.scope === null))
+    .filter((window): window is UsageWindow => window !== undefined);
+}
+
 /** The limit closest to running out: what a chip shows when the plan has no limit of the chosen kind. */
 export function tightestWindow(usage: ProviderUsage): UsageWindow | null {
   return usage.windows.reduce<UsageWindow | null>((tightest, window) => tightest === null || window.used_percent > tightest.used_percent ? window : tightest, null);

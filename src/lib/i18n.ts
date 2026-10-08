@@ -15,7 +15,8 @@ import { KO } from "./i18n.ko.ts";
 import { ZH } from "./i18n.zh.ts";
 import { useSettings } from "./settings.ts";
 
-export const LANGUAGE_SETTINGS = ["system", "en", "ko", "ja", "zh"] as const;
+// in the order the Language menu lists them
+export const LANGUAGE_SETTINGS = ["system", "en", "zh", "ja", "ko"] as const;
 export type LanguageSetting = (typeof LANGUAGE_SETTINGS)[number];
 export type Language = Exclude<LanguageSetting, "system">;
 

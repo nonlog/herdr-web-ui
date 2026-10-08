@@ -6,7 +6,10 @@ import { createContext } from "react";
  * like "and/or" or "e.g." stay text; code spans need only look like one file name.
  */
 
-const BARE_PATH = /(?<![\w/.@~-])((?:~\/|\.{1,2}\/|\/)?(?:[\w@.+-]+\/)+[\w@+-][\w@.+-]*\.[A-Za-z0-9]{1,8})(?![\w/])/g;
+// a path starts where a run of its characters starts, `+` among them: a line of plus signs is
+// otherwise tried as a path from every one of them, to its end. `~/` still starts one after a
+// plus sign (`+~/notes/a.md`, a line of a diff)
+const BARE_PATH = /(?<![\w/.@~-])(?<!\+(?!~))((?:~\/|\.{1,2}\/|\/)?(?:[\w@.+-]+\/)+[\w@+-][\w@.+-]*\.[A-Za-z0-9]{1,8})(?![\w/])/g;
 const CODE_PATH = /^(?:~\/|\.{1,2}\/|\/)?(?:[\w@.+-]+\/)*[\w@+-][\w@.+-]*\.[A-Za-z0-9]{1,8}$/;
 
 /**

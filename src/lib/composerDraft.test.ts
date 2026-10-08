@@ -1,5 +1,5 @@
-import { expect, it } from "bun:test";
-import { ComposerDraftStore } from "./composerDraft.ts";
+import { expect, it, setSystemTime } from "bun:test";
+import { ComposerDraftStore, SEND_LEASE_MS, storageEventDraft } from "./composerDraft.ts";
 function fixture() {
   const data = new Map<string, string>();
   const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); }, removeItem: (key: string) => { data.delete(key); } };
@@ -59,4 +59,84 @@ it("keeps a draft another tab cleared and retyped while this tab's send was on i
   data.set("a", "sent again"); store.refresh("a");
   expect(store.settle("a", "sent")).toEqual({ text: "sent again", edited: true });
   store.end("a");
+});
+it("refuses a second tab's send while the first is still on its way", () => {
+  const { data, store: first } = fixture();
+  const second = new ComposerDraftStore(() => ({
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => { data.set(key, value); },
+    removeItem: (key: string) => { data.delete(key); },
+  }));
+  first.set("a", "do the thing");
+  first.begin("a", "do the thing");
+  // the other tab reads the same draft and sees the send, so it cannot send it again
+  second.read("a");
+  second.refresh("a");
+  expect(second.read("a")).toEqual({ text: "do the thing", sending: true });
+  expect(second.begin("a")).toBe(false);
+  // the first tab's end is what releases it, and the draft text is still there to send
+  first.end("a");
+  second.refresh("a");
+  expect(second.read("a")).toEqual({ text: "do the thing", sending: false });
+  expect(second.begin("a")).toBe(true);
+});
+it("honours another tab's send as a lease, not forever", () => {
+  const { data, store } = fixture();
+  data.set("herdr-web-ui:composer-sending:a", JSON.stringify({ sent: "x", at: Date.now() - SEND_LEASE_MS - 1 }));
+  store.read("a");
+  store.refresh("a");
+  expect(store.read("a").sending).toBe(false);
+  expect(store.begin("a")).toBe(true);
+});
+it("ignores a hand-edited sending record instead of blocking the pane", () => {
+  const { data, store } = fixture();
+  data.set("herdr-web-ui:composer-sending:a", "not json");
+  store.read("a");
+  store.refresh("a");
+  expect(store.begin("a")).toBe(true);
+});
+it("still reconciles another tab's text when no send is in flight", () => {
+  const { data, store } = fixture();
+  store.set("a", "mine");
+  store.refresh("a");
+  data.set("a", "theirs");
+  store.refresh("a");
+  expect(store.read("a").text).toBe("theirs");
+});
+
+it("names the draft another tab's edit or send concerns, and nothing else", () => {
+  const key = "herdr-web-ui:composer-draft:local:w1:p1";
+  expect(storageEventDraft(key)).toBe(key);
+  expect(storageEventDraft(`herdr-web-ui:composer-sending:${key}`)).toBe(key);
+  expect(storageEventDraft("herdr-web-ui:settings")).toBeNull();
+  expect(storageEventDraft(null)).toBeNull();
+});
+
+it("lets a tab send again once another tab's abandoned lease runs out, and tells its composer", () => {
+  const data = new Map<string, string>();
+  const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); }, removeItem: (key: string) => { data.delete(key); } };
+  const wakeUps: Array<{ run: () => void; ms: number }> = [];
+  const closed = new ComposerDraftStore(() => storage);
+  const other = new ComposerDraftStore(() => storage, (run, ms) => { wakeUps.push({ run, ms }); return 0; });
+  const key = "herdr-web-ui:composer-draft:local:w1:p1";
+  const start = Date.now();
+  try {
+    setSystemTime(start);
+    expect(closed.begin(key, "hello")).toBe(true);
+    // the other tab hears of the lease; the sending tab then closes without ending it
+    other.refresh(key);
+    expect(other.read(key).sending).toBe(true);
+    expect(other.begin(key, "hello")).toBe(false);
+    expect(wakeUps.length).toBe(1);
+    expect(wakeUps[0]!.ms).toBeGreaterThan(SEND_LEASE_MS - 1000);
+    let told = 0;
+    other.subscribe(() => { told += 1; });
+    setSystemTime(start + SEND_LEASE_MS + 1);
+    wakeUps[0]!.run();
+    expect(other.read(key).sending).toBe(false);
+    expect(told).toBe(1);
+    expect(other.begin(key, "hello")).toBe(true);
+  } finally {
+    setSystemTime();
+  }
 });

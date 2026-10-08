@@ -27,6 +27,24 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun test ./scripts/windows-plugin.test.ts ./scripts/plugin-runtime.test.ts ./scripts/phone-setup.test.ts
+      - name: Package the prebuilt Windows runtime
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'herdr-runtime'
+          $source = Join-Path $env:RUNNER_TEMP 'herdr-source.zip'
+          git archive --format=zip --output=$source HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Expand-Archive -LiteralPath $source -DestinationPath $stage
+          Copy-Item -LiteralPath dist,node_modules -Destination $stage -Recurse
+          @{ revision = $env:GITHUB_SHA; platform = 'windows-x64'; producer = 'github-actions'; run_id = $env:GITHUB_RUN_ID } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'ci-runtime.json') -Encoding utf8
+          tar -a -c -f "$env:RUNNER_TEMP/herdr-windows-runtime.zip" -C $stage .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/herdr-windows-runtime.zip
+          retention-days: 3
+          compression-level: 0
   fast:
     name: Fast checks
     runs-on: ubuntu-24.04
@@ -40,31 +58,16 @@ jobs:
         with:
           node-version: '22'
       - run: bun install --frozen-lockfile
-      - name: Validate workflow syntax
-        run: |
-          curl --fail --location --retry 3 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tgz"
-          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum --check
-          tar xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
-          "$RUNNER_TEMP/actionlint" -shellcheck=
-      - run: bun run generate:types --check
-      - run: bun run typecheck
-      - run: bun run build
-      - name: Unit tests (no herdr required)
-        run: |
-          git config --global user.email ci@example.invalid
-          git config --global user.name CI
-          bun run test:unit
+      # scripts/check.ts is what a developer runs too: workflow syntax (checksum-pinned actionlint),
+      # generated types, typecheck, build, unit tests (no herdr required)
+      - run: bun run check fast
   integration:
     name: Integration and browser
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      HERDR_TEST_SESSION: ci-${{ github.run_id }}-${{ github.run_attempt }}
-      XDG_CONFIG_HOME: ${{ github.workspace }}/.ci-config
-      HERDR_WEB_STATE_DIR: ${{ github.workspace }}/.ci-state
-      # One integration file at a time: four at once on the runner's four cores made the
-      # timing-bound contract tests fail in turn. Raise it again once they hold under load.
-      HERDR_TEST_SHARDS: 1
+      # where the run's own herdr keeps its config and state (scripts/check.ts): kept, for the failure logs
+      CHECK_DIR: ${{ github.workspace }}/.ci
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
@@ -81,23 +84,14 @@ jobs:
           chmod +x "$RUNNER_TEMP/herdr-bin/herdr"
           echo "$RUNNER_TEMP/herdr-bin" >> "$GITHUB_PATH"
       - run: bun install --frozen-lockfile
-      - run: bun run build
-      # The two lanes share nothing: the integration files run on herdr sessions of their own.
+      # A build, then the two lanes side by side on a herdr of the run's own, which it stops when
+      # it ends. The lanes share nothing: the integration files run on herdr sessions of their own.
       - name: Integration tests (updater restart and rollback included) beside the browser regressions
-        run: |
-          git config --global user.email ci@example.invalid
-          git config --global user.name CI
-          bun scripts/ci-lanes.ts "integration=bun run test:integration" "browser=bash scripts/ci-browser.sh"
-      - name: Stop the owned test session
-        if: always()
-        run: |
-          if command -v herdr >/dev/null; then
-            herdr --session "$HERDR_TEST_SESSION" server stop || true
-          fi
+        run: bun run check integration browser
       - name: Preserve failure logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: herdr-logs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ci-config/herdr/sessions/*/test-server.log
+          path: .ci/config/herdr/sessions/*/test-server.log
           if-no-files-found: ignore

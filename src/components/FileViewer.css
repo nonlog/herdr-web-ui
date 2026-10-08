@@ -96,7 +96,7 @@
   height: 78vh;
   border: 0;
   border-radius: var(--radius-md);
-  background: #fff;
+  background: var(--pdf-page);
 }
 
 .file-viewer-text {

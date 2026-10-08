@@ -66,8 +66,8 @@
 
 .tab-strip-dot {
   flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
+  width: var(--dot-size);
+  height: var(--dot-size);
   border-radius: var(--radius-pill);
 }
 

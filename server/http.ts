@@ -6,6 +6,8 @@
  * with two error formats and a client that only handles one of them.
  */
 
+import { randomBytes } from "node:crypto";
+
 import { HerdrError } from "./herdr/client.ts";
 
 export function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -29,8 +31,13 @@ export function errorResponse(error: unknown): Response {
     const status = error.code === "connect_failed" || error.code === "timeout" ? 502 : 404;
     return jsonResponse({ error: { code: error.code, message: error.message } }, status);
   }
-  const message = error instanceof Error ? error.message : String(error);
-  return jsonResponse({ error: { code: "internal_error", message } }, 500);
+  // A system error carries absolute paths, the herdr socket and whatever a dependency
+  // throws; the client is told none of it but a handle to quote in a bug report, and the
+  // real exception is logged here beside that handle. Short enough to say out loud, long
+  // enough that nobody reads another's.
+  const id = randomBytes(6).toString("hex");
+  console.error(`internal_error ${id}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  return jsonResponse({ error: { code: "internal_error", message: `internal error (${id})` } }, 500);
 }
 
 export function badRequest(code: string, message: string): Response {

@@ -2,7 +2,7 @@ import type { HealthAuth, ServerMessage, SessionSnapshot } from "./protocol.ts";
 
 export const LOCAL_MACHINE = "local";
 export const BRIDGE_PROTOCOL = 1;
-export const REMOTE_BUNDLE_VERSION = "19";
+export const REMOTE_BUNDLE_VERSION = "21";
 export interface PaneTarget { machine_id: string; pane_id: string }
 export type MachineState = "connecting" | "connected" | "reconnecting" | "disconnected" | "error";
 export interface SshTarget {
@@ -42,7 +42,7 @@ export interface HerdrIdentity {
   /** without either live stream, the terminal lens repaints pane.read as a legacy fallback. */
   terminal_mirror?: boolean;
 }
-export type MachineAction = "update_bridge" | "setup";
+export type MachineAction = "update_bridge" | "setup" | "bridge_conflict";
 export interface MachineUpdate { job_id: string; step: string; progress: SetupProgress | null }
 /**
  * Where a bridge install is. download (the web server fetching the bundle) and upload (the

@@ -6,6 +6,21 @@ import { isJsonObject, jsonResponse } from "./http.ts";
 const fail = (code: string, message: string, status: number) => jsonResponse({ error: { code, message } }, status);
 export const MACHINE_PROXY_PATH = /^(?:session|agents|pane\/(?:read|scroll|selection|conversation(?:\/image|\/tool-output)?|commands|files|omo-tasks|prompt|prompt\/answer|input|keys|close|rename|image)|workspace\/(?:create|rename|move|close|directories)|worktree\/(?:create|list|open|remove)|tab\/(?:create|rename|close)|fs\/(?:stat|file))$/;
 
+
+/**
+ * A PC that could not be reached. A timed-out or aborted call is not a broken connection:
+ * the PC is there and the answer did not come in time (or the client gave up first), so it
+ * says so, and the cause is logged either way — the cause is the only thing that tells a
+ * slow PC from an offline one.
+ */
+function transportFailure(id: string, path: string, error: unknown): Response {
+  const timedOut = error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError");
+  console.error(`machine proxy ${id}${path}: ${timedOut ? "timed out" : "unreachable"}: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`);
+  return timedOut
+    ? fail("machine_timeout", "The PC did not answer in time; retry after reconnecting", 504)
+    : fail("machine_unavailable", "The PC connection was interrupted; retry after reconnecting", 502);
+}
+
 export async function handleMachineRequest(request: Request, manager: MachineManager, onRevoke?: (close: () => void) => () => void): Promise<Response> {
   const url = new URL(request.url);
   // A PC's file opens as this PC's /api/fs/file does, from any navigation: reading it changes
@@ -102,7 +117,7 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
             if (value) passed.set(name, value);
           }
           return new Response(response.body, { status: response.status, headers: passed });
-        } catch { return fail("machine_unavailable", "The PC connection was interrupted; retry after reconnecting", 502); }
+        } catch (error) { return transportFailure(id, path, error); }
       }
       const untrack = manager.trackTerminal(id, () => abort.abort());
       try {
@@ -111,7 +126,7 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
         return new Response(response.status === 304 ? null : await response.arrayBuffer(), { status: response.status, headers: {
           "content-type": response.headers.get("content-type") ?? "application/json", "cache-control": "no-store", ...(etag ? { etag } : {}),
         } });
-      } catch { return fail("machine_unavailable", "The PC connection was interrupted; retry after reconnecting", 502); }
+      } catch (error) { return transportFailure(id, path, error); }
       finally { untrack(); }
     }
     return fail("not_found", "Unknown PC endpoint", 404);

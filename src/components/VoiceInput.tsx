@@ -8,7 +8,7 @@ import { Check, Mic, Square, X } from "lucide-react";
 import "./VoiceInput.css";
 
 import { useT, type Translate } from "../lib/i18n.ts";
-import { useSettings } from "../lib/settings.ts";
+import { useSettings, wantsVoiceInput } from "../lib/settings.ts";
 import { isMacPlatform, isVoiceShortcut } from "../lib/shortcuts.ts";
 import { applyDictation, useVoiceInput, type InsertedSpan, type VoiceError, type VoiceInput, type VoiceText, type VoiceUnavailable } from "../lib/voice.ts";
 import { VOICE_MAX_SECONDS, type VoiceMode } from "../../shared/voice.ts";
@@ -87,6 +87,8 @@ export interface DictationOptions {
   mode: VoiceMode;
   connected: boolean;
   polish: boolean;
+  /** a phone's input, short of room: the mic is there only when Settings asks for it */
+  phone?: boolean;
   keywords?: () => string[];
   box: RefObject<HTMLTextAreaElement | null>;
   /** the input's current text */
@@ -100,7 +102,7 @@ export interface DictationOptions {
 }
 
 export interface Dictation {
-  /** settings.voiceInput: the button and pill are shown at all */
+  /** the button and pill are shown at all: settings.voiceInput, and on auto only where dictation can work */
   shown: boolean;
   connected: boolean;
   voice: VoiceInput;
@@ -119,7 +121,7 @@ export interface Dictation {
 export function useDictation(options: DictationOptions): Dictation {
   const t = useT();
   const { settings } = useSettings();
-  const shown = settings.voiceInput;
+  const wanted = wantsVoiceInput(settings.voiceInput, options.mode, options.phone === true);
   const [partial, setPartial] = useState("");
   const latest = useRef(options);
   latest.current = options;
@@ -171,7 +173,7 @@ export function useDictation(options: DictationOptions): Dictation {
 
   const voice = useVoiceInput({
     mode: options.mode,
-    enabled: shown,
+    enabled: wanted,
     polish: options.polish,
     keywords: options.keywords,
     onText,
@@ -179,6 +181,8 @@ export function useDictation(options: DictationOptions): Dictation {
   });
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
+  // nobody asked for the button on auto, so one that cannot work here is left out, not shown disabled
+  const shown = wanted && (settings.voiceInput === "on" || voice.available);
 
   // a transcript waiting for an IME composition to end is part of what the user cancels
   const engineCancel = voice.cancel;

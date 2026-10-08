@@ -7,8 +7,9 @@
 
 /** Keys a soft keyboard has no room for; ctrl-* are chords, pipe/tilde/slash the characters, the rest DOM key names. */
 export type KeyBarKey =
-  | "Escape" | "Tab" | "BackTab" | "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"
-  | "Home" | "End" | "PageUp" | "PageDown" | "ctrl-c" | "ctrl-d" | "ctrl-z" | "pipe" | "tilde" | "slash";
+  | "Escape" | "Tab" | "Enter" | "BackTab" | "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"
+  | "Home" | "End" | "PageUp" | "PageDown" | "Backspace" | "Delete" | "Insert"
+  | "ctrl-c" | "ctrl-d" | "ctrl-z" | "pipe" | "tilde" | "slash";
 
 /** The key bar's optional keys, as Settings lists them; a pair is one choice. Esc, Tab, Ctrl, the arrows and ^C are always there. */
 export type KeyBarExtra = "alt" | "shift-tab" | "home-end" | "page-up-down" | "ctrl-d" | "ctrl-z" | "pipe" | "tilde" | "slash";
@@ -20,7 +21,77 @@ export function sanitizeKeyBarExtras(value: unknown, fallback: readonly KeyBarEx
   return KEY_BAR_EXTRAS.filter((extra) => value.includes(extra));
 }
 
-/** A single printable character: what the one-shot Control modifier consumes. */
+export interface StickyModifiers { ctrl: boolean; alt: boolean; shift: boolean }
+export const NO_STICKY_MODIFIERS: StickyModifiers = { ctrl: false, alt: false, shift: false };
+
+export function hasModifiers(modifiers: StickyModifiers): boolean {
+  return modifiers.ctrl || modifiers.alt || modifiers.shift;
+}
+
+/** Ctrl+C/V remain native clipboard shortcuts on non-Latin layouts; Latin layouts keep their typed letter. */
+export function clipboardKey(key: string, code: string): string {
+  const typed = key.toLowerCase();
+  return /^[a-z]$/.test(typed) ? typed : /^Key([A-Z])$/.exec(code)?.[1]?.toLowerCase() ?? typed;
+}
+
+/** The key a physical chord names. A non-Latin layout's letter goes by its position, as the plain
+ * Ctrl path reads it: Korean ㅊ or Russian с on KeyC with a held Ctrl is Ctrl+C, which herdr's
+ * encoder knows, not ctrl+ㅊ, which it types. A Latin layout keeps its own letter (Dvorak's C is
+ * not KeyC), and anything that is not a letter position stays as typed.
+ */
+export function physicalKey(key: string, code: string): string {
+  if ([...key].length !== 1 || /^[a-zA-Z]$/.test(key)) return key;
+  const letter = /^Key([A-Z])$/.exec(code)?.[1];
+  return letter === undefined ? key : letter.toLowerCase();
+}
+
+/** Send logical chords to Herdr, which owns the target pane's keyboard protocol.
+ * A plus or space needs a name because Herdr's chord parser splits on '+' and trims.
+ * Keep the typed symbol: the phone's layout already chose it; don't assume US Shift.
+ */
+export function terminalChord(key: string, modifiers: StickyModifiers): string | null {
+  if (["Home", "End", "PageUp", "PageDown", "Delete", "Insert"].includes(key)) return null;
+  if (/^ctrl-[cdz]$/.test(key)) { key = key.slice(-1); modifiers = { ...modifiers, ctrl: true }; }
+  if (key === "BackTab") { key = "Tab"; modifiers = { ...modifiers, shift: true }; }
+  const names: Record<string, string> = {
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+    Enter: "enter", Tab: "tab", Escape: "esc", Backspace: "backspace",
+    Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown",
+    pipe: "|", tilde: "~", slash: "/",
+    " ": "space", "+": "plus",
+  };
+  const name = (Object.hasOwn(names, key) ? names[key] : undefined) ?? (/^F(?:[1-9]|1[0-2])$/.test(key) ? key.toLowerCase()
+    : [...key].length === 1 && key.codePointAt(0)! >= 0x20 && key !== "\x7f" ? key : null);
+  if (name === null) return null;
+  return [modifiers.ctrl && "ctrl", modifiers.alt && "alt", modifiers.shift && "shift", name].filter(Boolean).join("+");
+}
+
+/** Herdr's send_keys parser lacks these names; its attach input parser accepts CSI navigation. */
+export function navigationSequence(key: string, modifiers: StickyModifiers): string | null {
+  const parameter = 1 + (modifiers.shift ? 1 : 0) + (modifiers.alt ? 2 : 0) + (modifiers.ctrl ? 4 : 0);
+  switch (key) {
+    case "Home": return `\x1b[1;${parameter}H`;
+    case "End": return `\x1b[1;${parameter}F`;
+    case "PageUp": return `\x1b[5;${parameter}~`;
+    case "PageDown": return `\x1b[6;${parameter}~`;
+    case "Delete": return `\x1b[3;${parameter}~`;
+    case "Insert": return `\x1b[2;${parameter}~`;
+    default: return null;
+  }
+}
+
+/** Soft keyboards often emit input events without a DOM keydown. Only individual
+ * committed characters are keys; a multi-character composition is text.
+ */
+export function keyFromData(data: string): string | null {
+  const fixed: Record<string, string> = { "\r": "Enter", "\t": "Tab", "\x7f": "Backspace", "\x1b": "Escape" };
+  if (Object.hasOwn(fixed, data)) return fixed[data]!;
+  const arrow = /^\x1b(?:\[|O)([ABCD])$/.exec(data);
+  if (arrow) return ({ A: "ArrowUp", B: "ArrowDown", C: "ArrowRight", D: "ArrowLeft" } as Record<string, string>)[arrow[1]!]!;
+  return [...data].length === 1 && data.codePointAt(0)! >= 0x20 ? data : null;
+}
+
+/** A single printable UTF-16 character. */
 export function isPrintable(data: string): boolean {
   if (data.length !== 1) return false;
   const code = data.charCodeAt(0);
@@ -44,8 +115,16 @@ export function keySequence(key: KeyBarKey, applicationCursorKeys: boolean): str
       return "\u001b";
     case "Tab":
       return "\t";
+    case "Enter":
+      return "\r";
     case "BackTab":
       return "\u001b[Z";
+    case "Backspace":
+      return "\u007f";
+    case "Delete":
+      return "\u001b[3~";
+    case "Insert":
+      return "\u001b[2~";
     case "ctrl-c":
       return "\u0003";
     case "ctrl-d":

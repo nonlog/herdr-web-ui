@@ -102,6 +102,8 @@ describe("labels and owner", () => {
     const status = JSON.stringify({ Self: { UserID: 42 }, User: { "42": { LoginName: "me@example.com" }, "43": { LoginName: "them@example.com" } } });
     expect(parseTailscaleOwner(status)).toBe("me@example.com");
     expect(parseTailscaleOwner(JSON.stringify({ Self: { UserID: 99 }, User: {} }))).toBeNull();
+    // a real id is past 2^53: as a double it becomes ...136 and names nobody (#526)
+    expect(parseTailscaleOwner('{"Self":{"UserID":15633668397603135},"User":{"15633668397603135":{"LoginName":"me@example.com"}}}')).toBe("me@example.com");
     expect(parseTailscaleOwner(null)).toBeNull();
     expect(parseTailscaleOwner("nope")).toBeNull();
     expect(isTaggedNode(status)).toBeFalse();

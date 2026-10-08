@@ -11,7 +11,7 @@
  * type; agent panes show one notice instead of a TUI. A message sent from a chat gets a demo answer.
  * What does not: files, images, push and remote PCs, which need a real machine.
  */
-import type { AgentStatus, ConversationTurn, Machine, MachineEvent, ServerMessage, SessionSnapshot, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
+import type { AgentStatus, ConversationTurn, Machine, MachineEvent, PendingMessage, ServerMessage, SessionSnapshot, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
 import { VOICE_DEFAULTS, type VoiceStatus } from "../../shared/voice.ts";
 import { rollupStatus } from "../../src/lib/status.ts";
 import { CHATS, PROMPT, SPECS } from "./fixtures.ts";
@@ -54,6 +54,19 @@ const chats = new Map<string, { turns: ConversationTurn[]; metadata: { model: st
 let promptOpen = true;
 let promptId = PROMPT.id;
 let nextWorkspace = 100;
+let nextPending = 1;
+const replying = new Set(snapshot().panes.filter((pane) => pane.agent && pane.agent_status === "working").map((pane) => pane.pane_id));
+/** herdr's state_change_seq: one counter per session, bumped on every agent state change */
+let stateSeq = Math.max(0, ...(local.snapshot?.agents ?? []).map((agent) => agent.state_change_seq ?? 0));
+const nextStateSeq = (): number => ++stateSeq;
+/** herdr lists an agent pane under `agents` too, with the counter the sidebar's Activity order reads */
+function addAgent(pane: Pane): void {
+  const snap = snapshot();
+  const template = snap.agents[0];
+  if (!pane.agent || !template || snap.agents.some((agent) => agent.pane_id === pane.pane_id)) return;
+  snap.agents.push({ ...structuredClone(template), pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id, terminal_id: pane.terminal_id,
+    agent: pane.agent, agent_status: pane.agent_status, cwd: pane.cwd, foreground_cwd: pane.foreground_cwd, state_change_seq: nextStateSeq() });
+}
 
 /** The OmO pane's background tasks (the composer's "2 background tasks"), timed from now. */
 const OMO_TASKS_PANE = "docs";
@@ -95,6 +108,7 @@ function backfillPanes(): void {
     const id = `w${(nextWorkspace++).toString(36)}`;
     const pane: Pane = { ...structuredClone(paneTemplate), pane_id: `${id}:p1`, tab_id: `${id}:t1`, terminal_id: `${id}:term`, workspace_id: id, label: spec.title, title: spec.title, agent: spec.agent, agent_status: spec.agent ? spec.state ?? "idle" : "unknown", cwd: `/home/demo/${spec.label}`, foreground_cwd: `/home/demo/${spec.label}` };
     snap.panes.push(pane);
+    addAgent(pane);
     snap.tabs.push({ ...structuredClone(snap.tabs[0]!), tab_id: `${id}:t1`, workspace_id: id, label: spec.label, number: 1, agent_status: pane.agent_status, focused: false, pane_count: 1 });
     snap.workspaces.push({ ...structuredClone(template), workspace_id: id, label: spec.label, number: snap.workspaces.length + 1, active_tab_id: `${id}:t1`, agent_status: pane.agent_status, focused: false, pane_count: 1, tab_count: 1 });
     keyOfPane.set(pane.pane_id, spec.key);
@@ -141,18 +155,23 @@ function createDemoWorkspace(cwd: string, label: string, agent: string | null, w
   const snap = snapshot();
   const pane: Pane = { ...structuredClone(newPaneTemplate), pane_id: `${id}:p1`, tab_id: `${id}:t1`, terminal_id: `${id}:term`, workspace_id: id, label: null, title: null, agent, agent_session: null, agent_status: agent ? "working" : "unknown", cwd, foreground_cwd: cwd, focused: false, terminal_title: null, terminal_title_stripped: null, revision: 1 };
   snap.panes.push(pane);
+  addAgent(pane);
   snap.tabs.push({ ...structuredClone(newTabTemplate), tab_id: `${id}:t1`, workspace_id: id, label, number: 1, agent_status: pane.agent_status, focused: false, pane_count: 1 });
   snap.workspaces.push({ ...structuredClone(newWorkspaceTemplate), workspace_id: id, label, number: snap.workspaces.length + 1, active_tab_id: `${id}:t1`, agent_status: pane.agent_status, focused: false, pane_count: 1, tab_count: 1, worktree: worktree ?? worktreeMetadata(repositoryAt(cwd)) });
   if (agent) {
     keyOfPane.set(pane.pane_id, pane.pane_id);
     chats.set(pane.pane_id, { turns: [], metadata: { model: agent === "codex" ? "gpt-5.6-sol" : "claude-opus-5-5", reasoning_effort: "medium" } });
-    setTimeout(() => setStatus(pane.pane_id, "idle"), 1500);
+    setTimeout(() => { if (!replying.has(pane.pane_id)) finishDemoTurn(pane.pane_id, "idle"); }, 1500);
   }
   return { workspace_id: id, pane_id: pane.pane_id, agent_started: agent !== null };
 }
 
 function closeDemoWorkspaces(ids: Set<string>): void {
   const snap = snapshot();
+  for (const removed of snap.panes.filter((pane) => ids.has(pane.workspace_id))) {
+    for (const socket of sockets) socket.holdPending(removed.pane_id, "pane_not_found", "This demo pane closed. Copy the message before discarding it.");
+    replying.delete(removed.pane_id);
+  }
   snap.panes = snap.panes.filter((pane) => !ids.has(pane.workspace_id));
   snap.tabs = snap.tabs.filter((tab) => !ids.has(tab.workspace_id));
   snap.workspaces = snap.workspaces.filter((workspace) => !ids.has(workspace.workspace_id));
@@ -184,6 +203,9 @@ function setStatus(paneId: string, status: AgentStatus): void {
   const pane = paneOf(paneId);
   if (!pane) return;
   pane.agent_status = status;
+  // as herdr does, every state change bumps the session's counter on the pane's agent
+  const agent = snapshot().agents.find((entry) => entry.pane_id === paneId);
+  if (agent) Object.assign(agent, { agent_status: status, state_change_seq: nextStateSeq() });
   for (const workspace of snapshot().workspaces) if (workspace.workspace_id === pane.workspace_id) workspace.agent_status = status;
   for (const tab of snapshot().tabs) if (tab.tab_id === pane.tab_id) tab.agent_status = status;
   emitSse({ type: "machine-message", machine_id: local.id, message: { type: "pane-status", pane_id: paneId, agent_status: status } });
@@ -203,22 +225,35 @@ function agentOf(paneId: string): string {
 
 const now = () => new Date().toISOString();
 
-/** A message sent from a chat: the user's turn now, the demo's answer a moment later. */
+/** The bridge takes one accepted pending message when the current mock turn finishes. */
+function finishDemoTurn(paneId: string, status: "idle" | "done" = "done"): void {
+  replying.delete(paneId);
+  if (!paneOf(paneId)) return;
+  setStatus(paneId, status);
+  for (const socket of [...sockets].sort((a, b) => a.pendingOrder(paneId) - b.pendingOrder(paneId))) {
+    if (socket.drainPending(paneId)) break;
+  }
+}
+
+/** A sent Enter joins the conversation now; another Enter steers the current mock turn. */
 function submitToChat(paneId: string, text: string): void {
   const key = keyOfPane.get(paneId);
   const chat = key ? chats.get(key) : undefined;
   if (!chat) return;
   chat.turns.push({ role: "user", ts: now(), parts: [{ kind: "text", text }] });
-  setStatus(paneId, "working");
   const agent = agentOf(paneId);
+  if (replying.has(paneId)) return;
+  replying.add(paneId);
+  setStatus(paneId, "working");
   setTimeout(() => {
     chat.turns.push({ role: "assistant", ts: now(), end_ts: now(), parts: [{ kind: "text", text: `This is the demo, so nothing ran. In the real app that message went to ${agent} in this pane, and its answer would be written here as it arrives, with its commands and edits folded above it.` }] });
-    setStatus(paneId, "done");
+    finishDemoTurn(paneId);
   }, CHAT_ANSWER_MS);
 }
 
 function answerPrompt(paneId: string, optionIndex: number | undefined): void {
   promptOpen = false;
+  replying.add(paneId);
   setStatus(paneId, "working");
   const chat = chats.get("web");
   const declined = optionIndex === 2;
@@ -230,7 +265,7 @@ function answerPrompt(paneId: string, optionIndex: number | undefined): void {
         : [{ kind: "tool", name: "exec", summary: "git push origin feat/export-guard", input: JSON.stringify({ cmd: "git push origin feat/export-guard" }, null, 2), output: "To github.com:acme/web-dashboard.git\n * [new branch]      feat/export-guard -> feat/export-guard" },
           { kind: "text", text: "Pushed `feat/export-guard`. The export button is guarded and the branch is ready for a pull request." }],
     });
-    setStatus(paneId, "done");
+    finishDemoTurn(paneId);
   }, PROMPT_ANSWER_TURN_MS);
 }
 
@@ -296,6 +331,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   if (path === "/api/session") return json({ snapshot: snapshot() });
   if (path === "/api/agents") return json(agentsFixture);
   if (path === "/api/updates") return json({ managed: false, auto_update: false, phase: "idle", current_revision: null, latest_revision: null, current_version: __APP_VERSION__, latest_version: null, available: false, checked_at: null, blocked_reason: null, error: null }, 200, { "cache-control": "no-store" });
+  if (path === "/api/updates/notes") return json({ revision: null, releases: [], omitted: 0 }, 200, { "cache-control": "no-store" });
+  if (path === "/api/updates/installed") return json({ revision: null, version: null, previous_version: null, installed_at: null, releases: [], omitted: 0 }, 200, { "cache-control": "no-store" });
   // the demo has no herdr to update: the controls stay hidden
   if (path === "/api/herdr/update") return json({ supported: false, phase: "idle", server_version: null, binary_version: null, stale: false, output: null, finished_at: null }, 200, { "cache-control": "no-store" });
   if (path === "/api/access") return json({ port: 7317, tailscale: { state: "running", dns_name: "workstation.example.ts.net", serving_url: "https://workstation.example.ts.net", serve_command: null, serve_url: null } });
@@ -414,6 +451,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const pane = paneOf(String(body["pane_id"] ?? ""));
     if (!pane) return error("not_found", "no such pane", 404);
     const snap = snapshot();
+    for (const socket of sockets) socket.holdPending(pane.pane_id, "pane_not_found", "This demo pane closed. Copy the message before discarding it.");
+    replying.delete(pane.pane_id);
     snap.panes = snap.panes.filter((candidate) => candidate.pane_id !== pane.pane_id);
     const survivingPanes = snap.panes.filter((candidate) => candidate.workspace_id === pane.workspace_id);
     snap.tabs = snap.tabs.filter((tab) => tab.workspace_id !== pane.workspace_id || survivingPanes.some((candidate) => candidate.tab_id === tab.tab_id));
@@ -475,6 +514,10 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const snap = snapshot();
     const tab = snap.tabs.find((t) => t.tab_id === body["tab_id"]);
     if (!tab) return error("tab_not_found", "no such tab", 404);
+    for (const removed of snap.panes.filter((p) => p.tab_id === tab.tab_id)) {
+      for (const socket of sockets) socket.holdPending(removed.pane_id, "pane_not_found", "This demo pane closed. Copy the message before discarding it.");
+      replying.delete(removed.pane_id);
+    }
     snap.panes = snap.panes.filter((p) => p.tab_id !== tab.tab_id);
     snap.tabs = snap.tabs.filter((t) => t.tab_id !== tab.tab_id);
     snap.layouts = snap.layouts.filter((l) => l.tab_id !== tab.tab_id);
@@ -530,13 +573,14 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const template = snap.panes[0]!;
     const pane: Pane = { ...structuredClone(template), pane_id: `${id}:p${(nextWorkspace++).toString(36)}`, tab_id: tabId, terminal_id: `${id}:term${number}`, workspace_id: id, label: null, title: null, agent, agent_session: null, agent_status: agent ? "working" : "unknown", cwd, foreground_cwd: cwd, focused: false, terminal_title: null, terminal_title_stripped: null, revision: 1 };
     snap.panes.push(pane);
+    addAgent(pane);
     snap.tabs.push({ ...structuredClone(snap.tabs[0]!), tab_id: tabId, workspace_id: id, label: String(body["label"] ?? "") || String(number), number, agent_status: pane.agent_status, focused: false, pane_count: 1 });
     workspace.tab_count = tabs.length + 1;
     workspace.pane_count = siblings.length + 1;
     if (agent) {
       keyOfPane.set(pane.pane_id, pane.pane_id);
       chats.set(pane.pane_id, { turns: [], metadata: { model: agent === "codex" ? "gpt-5.6-sol" : "claude-opus-5-5", reasoning_effort: "medium" } });
-      setTimeout(() => setStatus(pane.pane_id, "idle"), 1500);
+      setTimeout(() => { if (!replying.has(pane.pane_id)) finishDemoTurn(pane.pane_id, "idle"); }, 1500);
     }
     structureChanged();
     return json({ workspace_id: id, pane_id: pane.pane_id, agent_started: agent !== null } satisfies WorkspaceCreated);
@@ -599,6 +643,23 @@ const NOTICE = (() => {
 })();
 
 /** what the pretend shell answers; anything else is "command not found" */
+/**
+ * What a `keys` chord types into the demo's shell. The server hands the chord to herdr, which
+ * encodes it for the pane's program; the demo has only this shell, so it takes what a plain
+ * terminal would send and the shell can use: Enter, Backspace, a character, Shift's capital
+ * and Ctrl's control code (^C). Alt, the arrows and the F keys have nothing to do here.
+ */
+const CHORD_KEYS = new Map([["enter", "\r"], ["backspace", "\x7f"], ["tab", "\t"], ["esc", "\x1b"], ["space", " "], ["plus", "+"]]);
+function chordText(chord: string): string {
+  const parts = chord.split("+");
+  const name = parts.pop() ?? "";
+  const held = new Set(parts.map((part) => part.toLowerCase()));
+  const key = CHORD_KEYS.get(name.toLowerCase()) ?? ([...name].length === 1 ? name : "");
+  if (key === "" || held.has("alt")) return "";
+  if (held.has("ctrl") && /^[a-z]$/i.test(key)) return String.fromCharCode(key.toUpperCase().charCodeAt(0) & 0x1f);
+  return held.has("shift") ? key.toUpperCase() : key;
+}
+
 const SHELL_COMMANDS: Record<string, string> = {
   "git status": "On branch main\r\nnothing to commit, working tree clean",
   "git log": "\x1b[33m*\x1b[0m \x1b[33mchore(release): 1.4.0 (HEAD -> main, tag: v1.4.0)\x1b[0m\r\n*   Merge branch feat/idempotency\r\n|\\  \r\n| * test(payments): concurrent retries\r\n| * feat(payments): replay the first response for a repeated key\r\n|/  \r\n* test: cover money helpers\r\n* feat: money helpers",
@@ -621,6 +682,11 @@ class DemoSocket extends EventTarget {
   onerror: ((event: Event) => void) | null = null;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private readonly attached = new Set<string>();
+  private mode: "interact" | "observe" = "interact";
+  /** Accepted messages belong to this live connection, never to a reconnect's empty queue. */
+  private readonly pending = new Map<string, PendingMessage[]>();
+  private readonly outcomes = new Map<string, { paneId: string; outcome: "sent" | "discarded" }>();
+  private readonly requests = new Map<number, { signature: string; reply?: ServerMessage }>();
   /** the pretend shell's current line, per shell pane */
   private readonly lines = new Map<string, string>();
 
@@ -636,7 +702,7 @@ class DemoSocket extends EventTarget {
       const open = new Event("open");
       this.onopen?.(open);
       this.dispatchEvent(open);
-      this.push({ type: "snapshot", snapshot: snapshot(), features: ["submit", "secret-input", "input-ready"] });
+      this.push({ type: "snapshot", snapshot: snapshot(), features: ["submit", "pending-input", "secret-input", "input-ready"] });
     }, 20);
     this.timers.add(opening);
   }
@@ -655,33 +721,200 @@ class DemoSocket extends EventTarget {
   }
 
   send(raw: string): void {
-    let message: { type: string; pane_id?: string; text?: string; keys?: string[]; id?: number; mode?: string };
+    if (this.readyState !== 1) return;
+    let message: { type: string; pane_id?: string; text?: string; payload?: string; keys?: string[]; id?: number; mode?: string; typed?: unknown; delivery?: unknown; pending_id?: string; action?: unknown };
     try { message = JSON.parse(raw); } catch { return; }
+    if ((message.type === "submit" || message.type === "pending-action") && Number.isSafeInteger(message.id)) {
+      const signature = JSON.stringify({ type: message.type, pane_id: message.pane_id, text: message.text, payload: message.payload, typed: message.typed, delivery: message.delivery, pending_id: message.pending_id, action: message.action });
+      const previous = this.requests.get(message.id!);
+      if (previous) {
+        if (previous.signature !== signature) {
+          if (message.type === "submit") this.push({ type: "submit-result", id: message.id!, pane_id: message.pane_id ?? "", ok: false, code: "invalid_submit_id", message: "This submit ID already belongs to another message." });
+          else this.push({ type: "pending-result", id: message.id!, pane_id: message.pane_id ?? "", pending_id: message.pending_id ?? "", ok: false, code: "invalid_pending_action", message: "This request ID already belongs to another action." });
+        }
+        else if (previous.reply) {
+          const reply = previous.reply;
+          if (reply.type === "submit-result" && reply.pending) {
+            const pendingId = reply.pending.id;
+            const pending = this.pending.get(reply.pane_id)?.find((item) => item.id === pendingId);
+            if (pending) this.push({ ...reply, pending: structuredClone(pending) });
+            else this.push({ type: "submit-result", id: reply.id, pane_id: reply.pane_id, ok: true });
+          } else {
+            if (reply.type === "pending-result" && reply.ok) {
+              const receipt = this.outcomes.get(reply.pending_id);
+              if (receipt?.paneId === reply.pane_id) this.publishPending(receipt.paneId, [{ id: reply.pending_id, outcome: receipt.outcome }]);
+            }
+            this.push(reply);
+          }
+        }
+        return;
+      }
+      this.requests.set(message.id!, { signature });
+      if (this.requests.size > 128) this.requests.delete(this.requests.keys().next().value!);
+    }
     switch (message.type) {
-      case "role": this.push({ type: "role-ack", mode: message.mode === "observe" ? "observe" : "interact" }); break;
+      case "role":
+        this.mode = message.mode === "observe" ? "observe" : "interact";
+        if (this.mode === "observe") this.holdPending(undefined, "read_only", "This connection now only watches. Pending messages will not be sent automatically.");
+        this.push({ type: "role-ack", mode: this.mode });
+        break;
       case "attach": if (message.pane_id) this.attach(message.pane_id); break;
       // The demo has no competing attach slots and does not advertise this capability.
       case "take-over":
         this.push({ type: "error", code: "unsupported", message: "The demo has no competing terminal attachments.", pane_id: message.pane_id });
         break;
-      case "detach": if (message.pane_id) this.attached.delete(message.pane_id); break;
+      case "detach":
+        if (message.pane_id) {
+          this.attached.delete(message.pane_id);
+          this.holdPending(message.pane_id, "not_attached", "This pane was detached. Pending messages will not be sent automatically.");
+        }
+        break;
       case "input": if (message.pane_id && message.text !== undefined) this.typed(message.pane_id, message.text); break;
-      case "keys": if (message.pane_id) for (const key of message.keys ?? []) this.typed(message.pane_id, key === "Enter" ? "\r" : key === "Backspace" ? "\x7f" : key.length === 1 ? key : ""); break;
+      case "keys": if (message.pane_id) for (const key of message.keys ?? []) this.typed(message.pane_id, chordText(key)); break;
       case "secret":
-        this.push({ type: "secret-result", id: message.id, pane_id: message.pane_id, ok: false, code: "prompt_changed" });
+        if (message.id !== undefined && message.pane_id) this.push({ type: "secret-result", id: message.id, pane_id: message.pane_id, ok: false, code: "prompt_changed" });
         break;
       case "submit":
+        if (!Number.isSafeInteger(message.id) || !message.pane_id || typeof message.text !== "string" || typeof message.payload !== "string") {
+          this.push({ type: "error", code: "invalid_submit", message: "id, pane_id, text and payload are required." });
+          break;
+        }
         if (message.pane_id && message.text !== undefined && message.id !== undefined) {
-          submitToChat(message.pane_id, message.text);
-          this.push({ type: "submit-result", id: message.id, pane_id: message.pane_id, ok: true });
+          const queued = message.delivery === "queue";
+          const text = queued ? message.text.replace(/[\r\n]+$/, "").replace(/\r\n?/g, "\n") : message.text;
+          let code: string | null = null;
+          if ((message.delivery !== undefined && message.delivery !== "immediate" && !queued) || (queued && message.typed !== undefined && message.typed !== false)) code = "invalid_delivery";
+          else if (this.mode === "observe") code = "read_only";
+          else if (queued && (text.trim().length === 0 || text.length > 20_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text))) code = "invalid_submit_text";
+          else if (queued) code = this.pendingTargetError(message.pane_id);
+          if (code) {
+            this.completeRequest({ type: "submit-result", id: message.id, pane_id: message.pane_id, ok: false, code, message: "The demo agent cannot take this submission." });
+            break;
+          }
+          if (queued && paneOf(message.pane_id)?.agent_status === "working") {
+            const pending: PendingMessage = { id: `demo-pending-${nextPending++}`, request_id: message.id, text, state: "queued", created_at: now() };
+            this.pending.set(message.pane_id, [...(this.pending.get(message.pane_id) ?? []), pending]);
+            const reply: ServerMessage = { type: "submit-result", id: message.id, pane_id: message.pane_id, ok: true, pending: structuredClone(pending) };
+            this.rememberRequest(reply);
+            this.publishPending(message.pane_id);
+            this.push(reply);
+          } else {
+            submitToChat(message.pane_id, text);
+            this.completeRequest({ type: "submit-result", id: message.id, pane_id: message.pane_id, ok: true });
+          }
+        }
+        break;
+      case "pending-action":
+        if (message.id !== undefined && message.pane_id && message.pending_id) {
+          const result = (ok: boolean, code?: string) => this.completeRequest({ type: "pending-result", id: message.id!, pane_id: message.pane_id!, pending_id: message.pending_id!, ok, ...(code ? { code, message: "The demo pending message was not changed." } : {}) });
+          if (message.action !== "steer" && message.action !== "discard") { result(false, "invalid_pending_action"); break; }
+          if (this.mode === "observe") { result(false, "read_only"); break; }
+          const pending = this.pending.get(message.pane_id)?.find((item) => item.id === message.pending_id);
+          if (!pending) {
+            const receipt = this.outcomes.get(message.pending_id);
+            if (receipt?.paneId === message.pane_id) {
+              this.publishPending(message.pane_id, [{ id: message.pending_id, outcome: receipt.outcome }]);
+              result(true);
+            } else result(false, "pending_not_found");
+            break;
+          }
+          if (pending.state === "sending") { result(false, "pending_busy"); break; }
+          if (message.action === "discard") {
+            this.removePending(message.pane_id, pending.id, "discarded");
+            result(true);
+          } else {
+            const code = this.pendingTargetError(message.pane_id);
+            if (code) { result(false, code); break; }
+            if (pending.state === "uncertain") { result(false, "pending_uncertain"); break; }
+            const sent = this.deliverPending(message.pane_id, pending);
+            result(sent, sent ? undefined : pending.error?.code ?? "pending_changed");
+          }
         }
         break;
       default: /* resize, scroll, pty-ack: nothing to do in the demo */
     }
   }
 
+  private rememberRequest(message: Extract<ServerMessage, { type: "submit-result" | "pending-result" }>): void {
+    const request = this.requests.get(message.id);
+    if (request) request.reply = structuredClone(message);
+  }
+
+  private completeRequest(message: Extract<ServerMessage, { type: "submit-result" | "pending-result" }>): void {
+    this.rememberRequest(message);
+    this.push(message);
+  }
+
+  private publishPending(paneId: string, removed?: { id: string; outcome: "sent" | "discarded" }[]): void {
+    this.push({ type: "pending-messages", pane_id: paneId, messages: this.pending.get(paneId) ?? [], ...(removed ? { removed } : {}) });
+  }
+
+  /** A lost claim never becomes input merely because this pane becomes ready again. */
+  holdPending(paneId?: string, code = "disconnected", message = "The connection closed. Pending messages will not be sent automatically."): void {
+    for (const [pane, pending] of this.pending) {
+      if (paneId !== undefined && pane !== paneId) continue;
+      for (const item of pending) if (item.state === "queued" || item.state === "sending") {
+        item.state = "held";
+        item.error = { code, message };
+      }
+      this.publishPending(pane);
+    }
+  }
+
+  private pendingTargetError(paneId: string): string | null {
+    if (this.readyState !== 1) return "disconnected";
+    if (this.mode === "observe") return "read_only";
+    if (!this.attached.has(paneId)) return "not_attached";
+    const pane = paneOf(paneId);
+    if (!pane) return "pane_not_found";
+    if (!(pane.agent ?? pane.agent_session?.agent)) return "agent_not_ready";
+    if (keyOfPane.get(paneId) === "web" && promptOpen) return "agent_blocked";
+    if (pane.agent_status === "blocked") return "agent_blocked";
+    if (!["working", "idle", "done"].includes(pane.agent_status)) return "agent_not_ready";
+    return null;
+  }
+
+  private removePending(paneId: string, pendingId: string, outcome: "sent" | "discarded"): void {
+    this.pending.set(paneId, (this.pending.get(paneId) ?? []).filter((item) => item.id !== pendingId));
+    this.outcomes.set(pendingId, { paneId, outcome });
+    if (this.outcomes.size > 1024) this.outcomes.delete(this.outcomes.keys().next().value!);
+    this.publishPending(paneId, [{ id: pendingId, outcome }]);
+  }
+
+  private deliverPending(paneId: string, pending: PendingMessage): boolean {
+    pending.state = "sending";
+    delete pending.error;
+    this.publishPending(paneId);
+    // A close, detach or role change can land in the sending notification itself.
+    // Revalidate the same claim before the mock turn receives any of its text.
+    if (pending.state !== "sending") return false;
+    const code = this.pendingTargetError(paneId);
+    if (code !== null) {
+      pending.state = "held";
+      pending.error = { code, message: "The pane changed before delivery. This message will not be sent automatically." };
+      this.publishPending(paneId);
+      return false;
+    }
+    submitToChat(paneId, pending.text);
+    this.removePending(paneId, pending.id, "sent");
+    return true;
+  }
+
+  pendingOrder(paneId: string): number {
+    const first = this.pending.get(paneId)?.find((item) => item.state === "queued");
+    return first ? Number(first.id.split("-").at(-1)) : Infinity;
+  }
+
+  /** Only a live owner can drain one queued item at a real completion edge. */
+  drainPending(paneId: string): boolean {
+    if (this.pendingTargetError(paneId) !== null || !["idle", "done"].includes(paneOf(paneId)?.agent_status ?? "")) return false;
+    const pending = this.pending.get(paneId)?.find((item) => item.state === "queued");
+    return pending !== undefined && this.deliverPending(paneId, pending);
+  }
+
   private attach(paneId: string): void {
     this.attached.add(paneId);
+    this.publishPending(paneId);
     this.push({ type: "input-ready", pane_id: paneId });
     const key = keyOfPane.get(paneId);
     const pane = paneOf(paneId);
@@ -731,6 +964,7 @@ class DemoSocket extends EventTarget {
   close(code = 1000, reason = ""): void {
     if (this.readyState >= 2) return;
     this.readyState = 3;
+    this.holdPending();
     for (const timer of this.timers) clearTimeout(timer);
     sockets.delete(this);
     const event = new CloseEvent("close", { code, reason, wasClean: true });
@@ -753,14 +987,14 @@ for (const name of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"] as const) Object.
 setTimeout(() => {
   const chat = chats.get("api");
   const paneId = panesFixture.api;
-  const turn = chat?.turns[chat.turns.length - 1];
+  const turn = chat?.turns.findLast((turn) => turn.role === "assistant" && !turn.end_ts);
   if (!chat || !turn || turn.role !== "assistant") return;
   turn.parts.push(
     { kind: "tool", name: "Bash", summary: "bun test metrics", input: JSON.stringify({ command: "bun test metrics" }, null, 2), output: " 6 pass\n 0 fail\nRan 6 tests across 1 file. [201ms]" },
     { kind: "text", text: "Added `payments_idempotent_replays_total`, incremented where a stored response is replayed, and exposed with the other counters on `/metrics`. 6 tests pass." },
   );
   turn.end_ts = now();
-  setStatus(paneId, "done");
+  finishDemoTurn(paneId);
 }, 4500);
 
 // ---- what the demo opens first ------------------------------------------------------------------

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describeProgress } from "../src/lib/bridgeProgress.ts";
 import type { SetupJob } from "../shared/machines.ts";
 import { paneNotificationTag } from "../shared/notify-policy.ts";
-import { machinePath, paneStorageId, REMOTE_BUNDLE_VERSION } from "../shared/machines.ts";
+import { BRIDGE_PROTOCOL, machinePath, paneStorageId, REMOTE_BUNDLE_VERSION } from "../shared/machines.ts";
 import { canSendSecret, sameOrigin, shellQuote, validateTarget } from "./machine-security.ts";
 import { handleMachineRequest, MACHINE_PROXY_PATH } from "./machine-api.ts";
 import type { BridgeDescriptor } from "./bridge.ts";
@@ -195,7 +195,7 @@ describe("SSH output during setup", () => {
 // never see the swapped PATH), so setup() fails inside its own catch — where the action is set.
 describe("a first connect that finds a bridge of another version", () => {
   const socket = "/home/u/.config/herdr/herdr.sock";
-  const descriptor = { pid: 4242, port: 29431, token: "a".repeat(64), socket_path: socket, bridge_protocol: 1, bundle_version: "999", managed_remote: true };
+  const descriptor = { pid: 4242, port: 29431, token: "a".repeat(64), socket_path: socket, bridge_protocol: 1, bundle_version: "0", managed_remote: true };
   const real = { start: SshConnection.prototype.start, run: SshConnection.prototype.run, close: SshConnection.prototype.close };
   afterEach(() => { Object.assign(SshConnection.prototype, real); });
 
@@ -223,6 +223,28 @@ describe("a first connect that finds a bridge of another version", () => {
       expect(await response.json()).toMatchObject({ phase: "failed", action_required: "update_bridge" });
       // and the PC was never registered, so the job is the dialog's only signal
       expect(manager.list().map((machine) => machine.kind)).toEqual(["local"]);
+    } finally { manager.stop(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("sends a newer bridge of an independently managed web server to that server's own Settings", async () => {
+    const independent = { ...descriptor, bridge_protocol: BRIDGE_PROTOCOL, bundle_version: String(Number(REMOTE_BUNDLE_VERSION) + 1), managed_remote: false };
+    SshConnection.prototype.start = async () => {};
+    SshConnection.prototype.run = (async (script: string) => {
+      if (script.includes("uname")) return `Linux\nx86_64\n/home/u\n/home/u/.config\n\n${JSON.stringify(independent)}\n`;
+      if (script.includes("socket=")) return socket;
+      if (script.includes("kill -0")) return "live";
+      throw new Error("Unexpected remote mutation");
+    }) as typeof real.run;
+    SshConnection.prototype.close = () => {};
+    const dir = mkdtempSync(join(tmpdir(), "herdr-independent-bridge-"));
+    const manager = new MachineManager(dir, {} as PushService, new CompletionTracker(null));
+    try {
+      const started = manager.setup({ destination: "independent-pc" });
+      for (let i = 0; i < 100 && !["failed", "connected"].includes(manager.job(started.id)?.phase ?? ""); i += 1) await Bun.sleep(25);
+      const job = manager.job(started.id)!;
+      // this app cannot update that server, so "update this app" is not the way out here
+      expect(job).toMatchObject({ phase: "failed", action_required: "setup" });
+      expect(job.error).toContain("independently managed");
     } finally { manager.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 });

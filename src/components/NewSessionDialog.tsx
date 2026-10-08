@@ -9,6 +9,7 @@ import { AgentPicker, rememberAgent, rememberedAgent } from "./AgentPicker.tsx";
 import { DirectoryBrowser } from "./DirectoryBrowser.tsx";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { useT } from "../lib/i18n.ts";
+import { nativeModalOver, useFocusTrap } from "../lib/useFocusTrap.ts";
 
 /** The dialog as New tab: the workspace the tab joins, whose folder it uses, and the number herdr will give it. */
 export interface NewTabTarget {
@@ -46,6 +47,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   const [createdPaneId, setCreatedPaneId] = useState<string | null>(null);
   const [browsing, setBrowsing] = useState(false);
   const firstFieldRef = useRef<HTMLButtonElement>(null);
+  const surface = useFocusTrap<HTMLFormElement>(open, { initialFocus: firstFieldRef });
   const defaultCwdRef = useRef(defaultCwd);
   defaultCwdRef.current = defaultCwd;
 
@@ -69,7 +71,6 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
       .catch((reason: unknown) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
       });
-    window.requestAnimationFrame(() => firstFieldRef.current?.focus());
     return () => {
       cancelled = true;
     };
@@ -78,7 +79,8 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
+      // a native modal over it (Add PC, from the palette) takes its own Escape
+      if (event.key !== "Escape" || nativeModalOver(surface.current)) return;
       event.preventDefault();
       if (!pending) onClose();
     };
@@ -128,7 +130,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onCrea
 
   return (
     <div className="modal-scrim new-session-scrim" onMouseDown={closeFromScrim}>
-      <form className="modal new-session-modal" role="dialog" aria-modal="true" aria-labelledby="new-session-title" onSubmit={(event) => void submit(event)}>
+      <form ref={surface} className="modal new-session-modal" role="dialog" aria-modal="true" aria-labelledby="new-session-title" tabIndex={-1} onSubmit={(event) => void submit(event)}>
         <header className="modal-header">
           <h2 className="modal-title" id="new-session-title">{tab ? `${t("New tab")} · ${tab.workspaceLabel}` : `${t("New workspace")} · ${machineName ?? machineId}`}</h2>
           <button type="button" className="icon-button" aria-label={t("Close dialog")} disabled={pending} onClick={onClose}>

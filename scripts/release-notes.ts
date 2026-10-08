@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
+import { releaseSummaries, SUMMARIES_FILE } from "../server/release-notes.ts";
+import { SUMMARY_LANGUAGES } from "../shared/update.ts";
 
-/** Fail before publishing a tag: all three version sources and nonempty notes must agree. */
-export function releaseNotes(version: string, packageVersion: string, manifest: string, changelog: string): string {
+/**
+ * Fail before publishing a tag: all three version sources and nonempty notes must agree, and the
+ * release must be told as patch notes in every language of the app (release-summaries.json),
+ * which is what an install shows of it.
+ */
+export function releaseNotes(version: string, packageVersion: string, manifest: string, changelog: string, summaries: string): string {
   if (version !== version.trim() || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw new Error("Expected version X.Y.Z without v");
   if (packageVersion !== version) throw new Error("package.json version does not match");
   if (!manifest.split(/\r?\n/).some((line) => line === `version = "${version}"`)) throw new Error("herdr-plugin.toml version does not match");
@@ -10,10 +16,13 @@ export function releaseNotes(version: string, packageVersion: string, manifest: 
   if (matching.length !== 1) throw new Error("CHANGELOG.md must contain exactly one heading for this version");
   const notes = matching[0]!.split("\n").slice(1).filter((line) => !/^\[[^\]]+\]: /.test(line)).join("\n").trim();
   if (!notes) throw new Error("Release notes are empty");
+  const summary = releaseSummaries(summaries).get(version);
+  const untold = SUMMARY_LANGUAGES.filter((language) => !summary?.[language]);
+  if (untold.length > 0) throw new Error(`${SUMMARIES_FILE} must tell this version in: ${untold.join(", ")}`);
   return notes;
 }
 
 if (import.meta.main) {
   console.log(releaseNotes(process.argv[2] ?? "", JSON.parse(readFileSync("package.json", "utf8")).version,
-    readFileSync("herdr-plugin.toml", "utf8"), readFileSync("CHANGELOG.md", "utf8")));
+    readFileSync("herdr-plugin.toml", "utf8"), readFileSync("CHANGELOG.md", "utf8"), readFileSync(SUMMARIES_FILE, "utf8")));
 }

@@ -14,7 +14,7 @@ beforeEach(() => {
   served = true; paired = 0;
   server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === "/api/health") return Response.json({ ok: true });
+    if (path === "/api/health") return Response.json({ ok: true, herdr: { version: "0.9.3", protocol: 1 }, auth: { required: false, authenticated: true } });
     if (request.headers.get("authorization") !== "Bearer test-token") return new Response(null, { status: 401 });
     if (path === "/api/access") return Response.json({ port: server.port, tailscale: {
       state: "running", dns_name: "demo.example.ts.net", serving_url: served ? "https://demo.example.ts.net" : null,

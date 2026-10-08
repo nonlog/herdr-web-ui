@@ -23,7 +23,7 @@ the details private until that release is out.
 
 ## Supported versions
 
-Only the latest `vX.Y.Z` release gets fixes. Installs update to it from **Settings → Updates** (or
+Only the latest `vX.Y.Z` release gets fixes. Installs update to it from **Settings → About** (or
 by themselves with `HERDR_WEB_AUTO_UPDATE=1`). A fix in the remote-PC runtime ships as a new
 `remote-vN` bundle together with the release that uses it.
 

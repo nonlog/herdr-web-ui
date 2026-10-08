@@ -33,12 +33,14 @@ export function composerPayload(text: string, bracketedPaste: boolean): string {
 /** Why a composer message did not go (SubmitResult's code): the composer keeps the text and says this. */
 /** The server refused the message before any of it reached the pane: nothing was typed. */
 export function submitNotTyped(code: string): boolean {
-  return code === "agent_blocked" || code === "read_only" || code === "submit_timeout";
+  return ["agent_blocked", "read_only", "submit_timeout", "agent_not_ready", "pending_input_unsupported", "invalid_delivery", "invalid_submit_text",
+    "invalid_submit_id", "pending_limit", "pending_not_found", "pending_busy", "invalid_pending_action", "pending_target_changed", "pending_lease_lost", "not_attached", "input_not_ready", "attach_held", "pane_not_found", "retired_submit_id"].includes(code);
 }
 
 export function submitNote(code: string, message: string): string {
   if (code === "agent_blocked") return t("Not sent: the agent is waiting for an answer in the terminal. Answer it first.");
   if (code === "read_only") return t("Not sent: this view only watches the pane.");
+  if (code === "pending_input_unsupported") return t("Update this PC to send messages in the next turn. Your draft stayed here.");
   if (code === "submit_timeout") return t("Not sent: it waited too long behind an earlier message, and nothing was typed. Send it again.");
   if (code === "disconnected" || code === "timeout") return t("Not confirmed: the pane did not confirm this message. Check the terminal before sending it again.");
   return t("Not sent: {message}", { message });
@@ -113,16 +115,6 @@ export function composerStatusWord(status?: AgentStatus): string {
 }
 
 /**
- * Whether the composer draws its status word. Only DONE is drawn: a turn that ended and was not
- * seen yet is told by nothing else in the chat (Stop and the live row say RUN, the prompt card
- * says INPUT, and READY is the resting case), and on a phone the sidebar's label is in a closed
- * drawer. The other words stay in the row for assistive tech.
- */
-export function composerStatusWordDrawn(status?: AgentStatus): boolean {
-  return knownStatus(status) === "done";
-}
-
-/**
  * Below this card width the controls row cannot hold the background-task chip's words beside the
  * model, the effort and the offline sentence, so the chip shows its icon and count instead.
  * The input card is at most 820px wide (`--content-w`); a 1024px window with the sidebar open
@@ -135,17 +127,14 @@ export function composerStatusCompact(cardWidth: number): boolean {
   return cardWidth > 0 && cardWidth < COMPOSER_STATUS_COMPACT_BELOW;
 }
 
-/**
- * Whether the Queue pill is drawn. While the agent works Stop is the one resting control: Queue
- * appears once there is something to hold (text, or a file still uploading, whose mention is
- * about to land in the text), and never while not connected, where nothing can be queued. It
- * reads the draft, not whether the button is enabled: a pill disabled while a file uploads or
- * the message is on its way stays in place. An uploaded file goes as its mention in the text,
- * so a tile left alone in an empty box (its mention deleted, or a failed upload) holds nothing
- * and offers nothing. Showing it queues nothing: the message is held only by pressing it.
- */
-export function composerQueueShown(state: { queueMode: boolean; connected: boolean; text: string; uploading: boolean }): boolean {
-  return state.queueMode && state.connected && (state.text.trim().length > 0 || state.uploading);
+/** The working agent rests with Stop; writing a message replaces it with Send. */
+export function composerSendShown(state: { working: boolean; text: string }): boolean {
+  return !state.working || state.text.trim().length > 0;
+}
+
+/** While an agent works, Send accepts a follow-up for its next turn. A shell sends immediately. */
+export function composerDelivery(agent: string | null, status?: AgentStatus): "queue" | "immediate" {
+  return agent !== null && status === "working" ? "queue" : "immediate";
 }
 
 /**
@@ -174,9 +163,9 @@ export function composerStatusHint(state: { uploading: boolean; connected: boole
  */
 export type ComposerModelDraw = "full" | "no-effort" | "out";
 
-export function composerModelDraw(state: { queueShown: boolean; modelClipped: boolean; effortClipped: boolean }): ComposerModelDraw {
+export function composerModelDraw(state: { modelClipped: boolean; effortClipped: boolean }): ComposerModelDraw {
   if (!state.modelClipped && !state.effortClipped) return "full";
-  return state.queueShown ? "out" : "no-effort";
+  return "no-effort";
 }
 
 /** Herdr agent ids are machine-friendly; the composer presents a short human label. */

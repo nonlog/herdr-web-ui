@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, toNamespacedPath } from "node:path";
-import { codexCallFailed, codexHistoryTail, codexHomeInPsLine, codexRolloutPath, codexTranscriptRows, processCodexHome, forgetHistoryChains, matchCodexTranscript, matchShortCodexAnswers, parseCodexTranscript, resumedThread, unansweredCodexQuestions } from "./codex.ts";
+import { codexCallFailed, codexHistoryTail, codexHomeInPsLine, codexRolloutPath, codexTranscriptRows, processCodexHome, forgetHistoryChains, matchCodexTranscript, matchShortCodexAnswers, parseCodexTranscript, resumedThread, storedCwds, unansweredCodexQuestions, withoutVerbatimPrefix } from "./codex.ts";
 import { splitTurn } from "../src/lib/workBlocks.ts";
 
 const ts = "2026-09-22T01:00:00.000Z";
@@ -409,6 +409,20 @@ describe("Codex rollout resolution", () => {
       expect(codexRolloutPath(toNamespacedPath(outside), store)).toBeNull();
       expect(codexRolloutPath(toNamespacedPath(join(sessions, "..", "..", "outside.jsonl")), store)).toBeNull();
     }
+  });
+
+  it("reads the Windows paths Codex stores with the \\\\?\\ prefix as the plain ones herdr reports (#518)", () => {
+    expect(withoutVerbatimPrefix("\\\\?\\D:\\work\\app")).toBe("D:\\work\\app");
+    expect(withoutVerbatimPrefix("\\\\?\\UNC\\host\\share\\app")).toBe("\\\\host\\share\\app");
+    for (const path of ["D:\\work\\app", "\\\\host\\share\\app", "/home/user/app", "relative\\\\?\\app", "", "\\\\?\\Volume{0a1b}\\codex", "\\\\?\\GLOBALROOT\\Device\\x", "\\\\?\\out.jsonl"]) {
+      expect(withoutVerbatimPrefix(path)).toBe(path);
+    }
+    expect(storedCwds("D:\\work\\app")).toEqual(["D:\\work\\app", "\\\\?\\D:\\work\\app"]);
+    expect(storedCwds("\\\\?\\D:\\work\\app")).toEqual(["D:\\work\\app", "\\\\?\\D:\\work\\app"]);
+    expect(storedCwds("\\\\host\\share\\app")).toEqual(["\\\\host\\share\\app", "\\\\?\\UNC\\host\\share\\app"]);
+    // a POSIX cwd is looked up as it is, and only so
+    expect(storedCwds("/home/user/app")).toEqual(["/home/user/app", "/home/user/app"]);
+    expect(storedCwds("\\\\.\\pipe\\x")).toEqual(["\\\\.\\pipe\\x", "\\\\.\\pipe\\x"]);
   });
 
   /** Rollouts as Codex 0.156 writes them: one record per line, ordinals running on from the cut a rollout starts at. */

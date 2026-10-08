@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InteractivePrompt } from "../shared/protocol.ts";
 
-import { answerKeys, codexQuestionsCollapsed, codexQueuedPrompt, handlePromptRequest, openOmoAsks, parseClaudeSuggestion, parseFallbackPrompt, parseInteractivePrompt, pendingOmoAsk, promptWaitEnded } from "./prompt.ts";
+import { answerKeys, codexQuestionsCollapsed, codexQueuedPrompt, handlePromptRequest, modelListWaits, openOmoAsks, parseClaudeSuggestion, parseFallbackPrompt, parseInteractivePrompt, pendingOmoAsk, promptWaitEnded } from "./prompt.ts";
 
 const labels = (prompt: InteractivePrompt | null) => prompt?.options.map((option) => option.label);
 
@@ -709,6 +709,121 @@ cancel
   });
 });
 
+describe("a question under a numbered message sent earlier", () => {
+  // live-captured from Claude Code in a 120-column herdr pane (shortened): the message sent before,
+  // "1. …", stays on screen after the prompt mark, above the panel and the session's titled rule
+  const claude = `
+❯ 1. 로그인해서 커넥트 눌럿어
+
+⏺ Tailscale 로그인은 완료됐습니다.
+
+  Ran 1 shell command
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Buzz 공개
+
+│ Buzz를 Tailscale 없이 인터넷에서 쓰도록 공개할까요?
+
+❯ 1. 공개 진행 (추천)
+     Cloudflare Tunnel로 buzz.kilpenguin.com을 엽니다. 인바운드 포트는 열지 않습니다. relay는 닫힌 모드(멤버 키 서명만
+     허용)이고 relay와 /pair만 노출합니다.
+  2. Tailscale 유지
+     지금 구성 그대로 갑니다(이미 동작 중).
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+─────────────────────────────────────────────────────────────────────────────────────────────── Buzz 슬랙 대체 AI 조사 ─
+`;
+
+  test("reads Claude's question, not the sent message, as the menu, with a description wrapped over two lines", () => {
+    const prompt = parseInteractivePrompt("claude", claude);
+    expect(prompt).toMatchObject({ kind: "question", title: "Buzz 공개", question: "Buzz를 Tailscale 없이 인터넷에서 쓰도록 공개할까요?", custom_option_index: 2 });
+    expect(labels(prompt)).toEqual(["공개 진행 (추천)", "Tailscale 유지"]);
+    expect(prompt?.options.map((option) => option.description)).toEqual([
+      "Cloudflare Tunnel로 buzz.kilpenguin.com을 엽니다. 인바운드 포트는 열지 않습니다. relay는 닫힌 모드(멤버 키 서명만 허용)이고 relay와 /pair만 노출합니다.",
+      "지금 구성 그대로 갑니다(이미 동작 중).",
+    ]);
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  test("does not start the menu at a numbered line in the first option's description", () => {
+    const prompt = parseInteractivePrompt("claude", `
+ ☐ Setup
+
+How should we set up?
+
+  1. Script
+     Runs these steps:
+     1. Install deps
+❯ 2. Manual
+     Follow the guide.
+  3. Type something.
+────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+`);
+    expect(prompt).toMatchObject({ kind: "question", question: "How should we set up?", custom_option_index: 2 });
+    expect(labels(prompt)).toEqual(["Script", "Manual"]);
+    expect(answerKeys(prompt!, { option_index: 0 })).toEqual([{ keys: ["up"] }, { keys: ["enter"] }]);
+  });
+
+  test("does not take the menu's column from a numbered line under its last option", () => {
+    const prompt = parseInteractivePrompt("codex", `
+› 1. 먼저 이것부터 해줘
+
+✨ Update available! 0.146.0 -> 0.146.1
+
+› 1. Update now
+  2. Skip
+  3. Skip until next version
+     1. Asks again at the next release.
+
+Press enter to continue
+`);
+    expect(prompt).toMatchObject({ kind: "menu", question: "Choose how to continue" });
+    expect(labels(prompt)).toEqual(["Update now", "Skip", "Skip until next version"]);
+  });
+
+  test("reads Codex's open question without the queue header under a sent message", () => {
+    const prompt = parseInteractivePrompt("codex", `
+› 1. 먼저 이것부터 해줘
+
+• 알겠습니다.
+
+Which accelerator?
+
+› 1. CUDA
+  2. CPU
+  3. Other
+
+enter submit   ctrl + ] skip
+option 1/3   shift + → main prompt
+`);
+    expect(prompt).toMatchObject({ kind: "question", question: "Which accelerator?", custom_option_index: 2 });
+    expect(labels(prompt)).toEqual(["CUDA", "CPU"]);
+  });
+
+  test("reads Codex's question under its own sent message", () => {
+    const prompt = parseInteractivePrompt("codex", `
+› 1. 먼저 이것부터 해줘
+
+• 알겠습니다.
+
+Which backend?
+
+› 1. CUDA
+  2. CPU
+  3. None of the above  Add details in notes (tab).
+
+tab to add notes | enter to submit answer | esc to interrupt
+`);
+    expect(prompt).toMatchObject({ kind: "question", question: "Which backend?", custom_option_index: 2 });
+    expect(labels(prompt)).toEqual(["CUDA", "CPU"]);
+  });
+});
+
 describe("Claude's question with option previews", () => {
   // live-captured from Claude Code 2.1.288 in a 120-column herdr pane: the selected option's
   // preview is boxed to the right of the options, and the form has no "Type something" row
@@ -760,6 +875,58 @@ Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questi
 
   test("does not take an answered form above later output for an open one", () => {
     expect(parseInteractivePrompt("claude", withPreview + "\n● Done.\n\n> ")).toBeNull();
+  });
+
+  // live-captured from Claude Code 2.1.290 in a 120-column herdr pane, asked with a long description
+  // for every option: the form draws none, so nothing under an option is joined into one
+  const described = (cursorOn: 0 | 1) => cursorOn === 0 ? `────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Layout
+
+Which layout should the report use?
+
+❯ 1. Single Column                ┌──────────────────────────────────────────┐
+  2. Two Column                   │ ┌──────────────────┐                     │
+  3. Dashboard Grid               │ │     HEADER       │                     │
+                                  │ ├──────────────────┤                     │
+                                  │ │   Content here   │                     │
+                                  │ │   More content   │                     │
+                                  │ └──────────────────┘                     │
+                                  └──────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+` : `────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Layout
+
+Which layout should the report use?
+
+  1. Single Column                ┌──────────────────────────────────────────┐
+❯ 2. Two Column                   │ ┌─────┬──────────┐                       │
+  3. Dashboard Grid               │ │ KEY │ CONTENT  │                       │
+                                  │ │ INF │ CONTENT  │                       │
+                                  │ │ O   │ CONTENT  │                       │
+                                  │ │     │ CONTENT  │                       │
+                                  │ └─────┴──────────┘                       │
+                                  └──────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+`;
+
+  test("draws no option descriptions though the question gave them, and keeps its id as the cursor moves", () => {
+    const first = parseInteractivePrompt("claude", described(0));
+    const second = parseInteractivePrompt("claude", described(1));
+    expect(labels(first)).toEqual(["Single Column", "Two Column", "Dashboard Grid"]);
+    expect(first?.options.map((option) => option.description)).toEqual([null, null, null]);
+    expect(second?.id).toBe(first!.id);
   });
 });
 
@@ -1384,6 +1551,75 @@ describe("the fallback card for a blocked pane no reader knows", () => {
     expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ text: "2" }]);
     expect(answerKeys(prompt, { option_index: 2 })).toEqual([{ keys: ["enter"] }]);
     expect(answerKeys(prompt, { option_index: 3 })).toEqual([{ keys: ["esc"] }]);
+  });
+
+  test("reads GJC's unnumbered selection rows and answers with cursor navigation", () => {
+    // gjc v0.18.7's custom-provider selector: active row uses the navigation cursor, other rows
+    // start with two spaces, and the footer names Up/Down, Enter, and Esc.
+    const compatibility = (selected: 0 | 1) => `
+Step 1: Compatibility
+
+${selected === 0 ? "❯" : " "} OpenAI-compatible
+${selected === 1 ? "❯" : " "} Anthropic-compatible
+[↑↓ to navigate, Enter to select, Esc to cancel]
+`;
+    const prompt = parseFallbackPrompt("gjc", compatibility(0));
+    expect(prompt.kind).toBe("menu");
+    expect(prompt.fallback).toBe(true);
+    expect(labels(prompt)).toEqual(["OpenAI-compatible", "Anthropic-compatible", "Esc"]);
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+    expect(answerKeys(prompt, { option_index: 2 })).toEqual([{ keys: ["esc"] }]);
+    expect(parseFallbackPrompt("gjc", compatibility(1)).id).toBe(prompt.id);
+    expect(parseFallbackPrompt("gjc", compatibility(1).replace("Anthropic-compatible", "Local endpoint")).id).not.toBe(prompt.id);
+
+    const selectedSecond = parseFallbackPrompt("gjc", `
+Step 4: Credential source
+
+  Environment variable
+❯ Paste API key
+[↑↓ to navigate, Enter to select, Esc to go back]
+`);
+    expect(labels(selectedSecond)).toEqual(["Environment variable", "Paste API key", "Esc"]);
+    expect(answerKeys(selectedSecond, { option_index: 0 })).toEqual([{ keys: ["up"] }, { keys: ["enter"] }]);
+  });
+
+  test("reads GJC's standard and outlined question selectors", () => {
+    for (const footer of [
+      "up/down navigate  enter select  esc cancel",
+      "up/down navigate  enter select  ←/→ question  esc cancel",
+      "↑/↓ select  enter  esc  PgUp/PgDn/Ctrl+u/d: question · Wheel: transcript",
+      "↑/↓ select  enter  ←/→ question  esc  PgUp/PgDn/Ctrl+u/d: question · Wheel: transcript",
+    ]) {
+      const screen = `Choose an approach\n\n──────────────\n│❯ First     │\n│  Second    │\n──────────────\n\n${footer}\n\n──────────────\n`;
+      const prompt = parseFallbackPrompt("gjc", screen);
+      expect(labels(prompt)).toEqual(["First", "Second", "Esc"]);
+      expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+      expect(labels(parseFallbackPrompt("gjc", screen.replace("│  Second    │", "│  (1/12)    │")))).not.toContain("First");
+      expect(labels(parseFallbackPrompt("gjc", `${screen}\n❯ message input\n`))).not.toContain("First");
+    }
+  });
+
+  test("does not infer GJC choices without the exact footer, a selected row, or the GJC agent", () => {
+    const footer = "[↑↓ to navigate, Enter to select, Esc to cancel]";
+    const generic = ["↑", "↓", "Enter", "Esc"];
+    expect(labels(parseFallbackPrompt("gjc", `Pick one:\n\nAlpha\nBeta\n${footer}\n`))).toEqual(generic);
+    expect(labels(parseFallbackPrompt("gjc", `Pick one:\n❯ Alpha\n  Beta\n${footer}\n`))).toEqual(generic);
+    expect(labels(parseFallbackPrompt("gjc", `Pick one:\n❯ Alpha\n  Beta\n↑/↓ to move · Enter to choose · Esc to cancel\n`))).toEqual(generic);
+    expect(labels(parseFallbackPrompt("claude", `Pick one:\n\n❯ Alpha\n  Beta\n${footer}\n`))).toEqual(generic);
+  });
+
+  test("titles a GJC selector with its own heading, not an earlier question on the screen", () => {
+    const prompt = parseFallbackPrompt("gjc", "Delete your project?\nDone, it is kept.\n\nChoose a provider\n\n❯ Alpha\n  Beta\n[↑↓ to navigate, Enter to select, Esc to cancel]\n");
+    expect(prompt.question).toBe("Choose a provider");
+    expect(labels(prompt)).toEqual(["Alpha", "Beta", "Esc"]);
+    expect(parseFallbackPrompt("gjc", "Earlier text\n\nWhich one?\nPick the safe one\n\n❯ Alpha\n  Beta\n[↑↓ to navigate, Enter to select, Esc to cancel]\n").question).toBe("Which one?");
+  });
+
+  test("answers a GJC selector whose labels start with numbers by moving, never by typing a number", () => {
+    const prompt = parseFallbackPrompt("gjc", "Choose an approach\n\n❯ 1. Keep branch\n  2. Delete branch\nup/down navigate  enter select  esc cancel\n");
+    expect(labels(prompt)).toEqual(["1. Keep branch", "2. Delete branch", "Esc"]);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
   });
 
   test("joins the lines the last row wraps onto into its label", () => {
@@ -2093,6 +2329,17 @@ ${"─".repeat(120)}
     expect(parseInteractivePrompt("claude", CLAUDE_MODEL_CLOSED)).toBeNull();
     // the list's text left above later output takes no key any more
     expect(parseInteractivePrompt("claude", `${claudeModelList(1)}Some later output\nand more\n`)).toBeNull();
+    // nor does it hold the screen for a message that waits to be typed, while an open list does, wrapped or not
+    expect(modelListWaits("claude", `${claudeModelList(1)}Some later output\nand more\n`)).toBe(false);
+    expect(modelListWaits("claude", claudeModelList(1))).toBe(true);
+    const wrapped = claudeModelList(1).replace(CLAUDE_MODEL_HINT, "  Enter to set as\n  default · s to use\n  this session\n  only · Esc to\n  cancel");
+    expect(modelListWaits("claude", wrapped)).toBe(true);
+    // Claude's own footer under the open list, the session's rule and its task list, is no later output: also under a wrapped hint
+    expect(modelListWaits("claude", `${claudeModelList(1)}──────────── Session name ─\n`)).toBe(true);
+    expect(modelListWaits("claude", `${wrapped}──────────── Session name ─\n`)).toBe(true);
+    expect(modelListWaits("claude", `${wrapped}──────────── Session name ─\n  3 tasks (0 done, 1 in progress, 2 open)\n  ◼ 구현\n    Running tests…\n  ◻ 검증\n  ◻ 정리\n`)).toBe(true);
+    // the same footer under an answered list's hint and what came after it holds nothing
+    expect(modelListWaits("claude", `${wrapped}⏺ Kept the model.\n──────────── Session name ─\n`)).toBe(false);
     // a list that takes Enter alone would save the pick as the default: not this card's to press
     expect(parseInteractivePrompt("claude", claudeModelList(1, 0, 10, "  Enter to set as default · Esc to cancel"))).toBeNull();
     expect(parseInteractivePrompt("claude", claudeModelList(1, 0, 10, "  Enter to confirm · Esc to cancel"))).toBeNull();
@@ -2170,6 +2417,72 @@ function codexList(title: string, rows: [string, string][], at: number, footer: 
 const codexModels = (at: number, footer: (row: number) => string = () => CODEX_OPENS) => codexList("Select Model and Effort", CODEX_MODELS, at, footer);
 /** the levels of a model: every level picks, and the last row opens the list of the advanced ones */
 const codexLevels = (at: number, model = "GPT-6-Astra") => codexList(`Select Reasoning Level for ${model}`, CODEX_LEVELS, at, (row) => row === 4 ? CODEX_OPENS : CODEX_PICKS);
+
+// Claude Code 2.1.294's `/effort` slider with ▲ over level `at` (low, medium, high, xhigh, max),
+// as it draws it under the command that opened it
+const CLAUDE_EFFORT_ARROW = [0, 10, 20, 30, 41];
+const CLAUDE_EFFORT_HINT = "  ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel";
+function claudeEffort(at: number, hint = CLAUDE_EFFORT_HINT): string {
+  const pad = " ".repeat(29);
+  const track = `${"─".repeat(CLAUDE_EFFORT_ARROW[at]!)}▲${"─".repeat(41 - CLAUDE_EFFORT_ARROW[at]!)}`;
+  return `❯ /effort\n${"─".repeat(120)}\n  Effort\n\n${pad}Faster${" ".repeat(29)}Smarter\n${pad}${track}      Ultracode  off\n${pad}low     medium     high     xhigh      max      Tab to toggle\n\n\n${hint}\n`;
+}
+// what the slider leaves once `s` picked a level
+const CLAUDE_EFFORT_SET = `❯ /effort\n  ⎿  Set effort level to medium (this session only): Balanced approach with standard implementation and testing\n${"─".repeat(120)}\n❯\n${"─".repeat(120)}\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n`;
+
+describe("Claude Code's effort slider", () => {
+  test("reads the levels it draws, whatever level ▲ stands over", () => {
+    // the capture itself, so that the drawing above is checked against what Claude drew
+    const captured = `❯ /effort
+${"─".repeat(120)}
+  Effort
+
+                             Faster                             Smarter
+                             ──────────▲───────────────────────────────      Ultracode  off
+                             low     medium     high     xhigh      max      Tab to toggle
+
+
+  ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel
+`;
+    expect(claudeEffort(1)).toBe(captured);
+    const prompt = parseInteractivePrompt("claude", captured)!;
+    expect(prompt).toMatchObject({ agent: "claude", kind: "question", title: "", question: "Set effort for this session", body: null, multi_select: false, custom_option_index: null });
+    expect(labels(prompt)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // one card wherever ▲ stands
+    for (const at of [0, 2, 3, 4]) expect(parseInteractivePrompt("claude", claudeEffort(at))!.id).toBe(prompt.id);
+    // herdr reports the pane idle while the slider waits: no other agent's reader takes it for its own
+    for (const agent of ["codex", "omp", "pi", "omo", ""]) expect(parseInteractivePrompt(agent, captured)).toBeNull();
+  });
+
+  test("moves with ←/→ from the level ▲ is over and picks with s, never with Enter", () => {
+    const prompt = parseInteractivePrompt("claude", claudeEffort(2))!;
+    expect(answerKeys(prompt, { option_index: 2 })).toEqual([{ text: "s" }]);
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["left"] }, { keys: ["left"] }, { text: "s" }]);
+    expect(answerKeys(prompt, { option_index: 4 })).toEqual([{ keys: ["right"] }, { keys: ["right"] }, { text: "s" }]);
+    expect(answerKeys(parseInteractivePrompt("claude", claudeEffort(4))!, { option_index: 3 })).toEqual([{ keys: ["left"] }, { text: "s" }]);
+    expect(() => answerKeys(prompt, { custom_text: "high" })).toThrow();
+    expect(() => answerKeys(prompt, { option_index: 5 })).toThrow();
+  });
+
+  test("offers no card for a slider that is not waiting, or that it cannot read", () => {
+    expect(parseInteractivePrompt("claude", CLAUDE_EFFORT_SET)).toBeNull();
+    // the slider's text left above later output takes no key any more, and holds no message back
+    expect(parseInteractivePrompt("claude", `${claudeEffort(2)}Some later output\nand more\n`)).toBeNull();
+    expect(modelListWaits("claude", `${claudeEffort(2)}Some later output\nand more\n`)).toBe(false);
+    expect(modelListWaits("claude", claudeEffort(2))).toBe(true);
+    expect(modelListWaits("claude", CLAUDE_EFFORT_SET)).toBe(false);
+    // a slider that takes Enter alone would save the level as the default: not this card's to press
+    expect(parseInteractivePrompt("claude", claudeEffort(2, "  ←/→ to adjust · Enter to confirm · Esc to cancel"))).toBeNull();
+    // level names a narrow pane wrapped: no card, and the slider still holds the screen
+    const wrapped = claudeEffort(2).replace("low     medium     high     xhigh      max      Tab to toggle", "low     medium     high\n  xhigh      max");
+    expect(parseInteractivePrompt("claude", wrapped)).toBeNull();
+    expect(modelListWaits("claude", wrapped)).toBe(true);
+    // ▲ between two levels stands over neither
+    const between = claudeEffort(2).replace(`${"─".repeat(20)}▲${"─".repeat(21)}`, `${"─".repeat(15)}▲${"─".repeat(26)}`);
+    expect(between).not.toBe(claudeEffort(2));
+    expect(parseInteractivePrompt("claude", between)).toBeNull();
+  });
+});
 
 describe("Codex's model lists", () => {
   test("reads the list of models, whose rows open the next list", () => {
@@ -2565,6 +2878,8 @@ ${omoRule}
     `${above}\n\n${rows.map((row, index) => `${index === at ? "›" : " "} ${index + 1}. ${row}`).join("\n")}\n\nPress enter to continue\n`;
   const RESUME = ["Resume the task", "Start over", "Quit"];
   const DELETE = ["Keep the branch", "Delete the branch", "Quit"];
+  const gjcSelector = (at = 0, rows = ["OpenAI-compatible", "Anthropic-compatible"]) =>
+    `Step 1: Compatibility\n\n${rows.map((row, index) => `${index === at ? "❯" : " "} ${row}`).join("\n")}\n[↑↓ to navigate, Enter to select, Esc to cancel]\n`;
 
   /** the pane as a menu would run it: ↓ and ↑ move the cursor, and the screen shows it */
   function moving(pane: Pane, rows: string[], draw: (at: number) => string = (at) => menu(rows, at), start = 0): void {
@@ -2576,6 +2891,56 @@ ${omoRule}
       pane.screen = draw(at) + (sent.startsWith("text:") ? `\n${sent.slice(5)}\n` : "");
     };
   }
+
+  test("shows a GJC startup selector even before the pane is reported blocked", async () => {
+    await withPane("gjc", "idle", gjcSelector().replace("[↑↓ to navigate, Enter to select, Esc to cancel]", "up/down navigate  enter select  esc cancel"), async () => {
+      const prompt = (await card())!;
+      expect(labels(prompt)).toEqual(["OpenAI-compatible", "Anthropic-compatible", "Esc"]);
+      expect(await answer(prompt.id, { option_index: 0 })).toEqual({ status: 200, code: undefined });
+    });
+  });
+
+  test("answers GJC's unnumbered selector after confirming its moved cursor", async () => {
+    await withPane("gjc", "blocked", gjcSelector(), async (pane) => {
+      let at = 0;
+      pane.onSent = (sent) => {
+        if (sent === "down") at = Math.min(1, at + 1);
+        if (sent === "up") at = Math.max(0, at - 1);
+        pane.screen = gjcSelector(at);
+      };
+      const prompt = (await card())!;
+      expect(prompt.fallback).toBe(true);
+      expect(labels(prompt)).toEqual(["OpenAI-compatible", "Anthropic-compatible", "Esc"]);
+      expect(await answer(prompt.id, { option_index: 1 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["down", "enter"]);
+    });
+  });
+
+  test("does not confirm a changed GJC selector after moving its cursor", async () => {
+    await withPane("gjc", "blocked", gjcSelector(), async (pane) => {
+      const prompt = (await card())!;
+      pane.onSent = (sent) => { if (sent === "down") pane.screen = gjcSelector(1, ["Resume", "Delete"]); };
+      expect(await answer(prompt.id, { option_index: 1 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual(["down"]);
+    });
+  });
+
+  test("checks a GJC selector after each move and stops once it is gone", async () => {
+    const rows = ["First", "Second", "Third", "Fourth"];
+    await withPane("gjc", "blocked", gjcSelector(0, rows), async (pane) => {
+      let at = 0;
+      pane.onSent = (sent) => { if (sent === "down") pane.screen = gjcSelector(++at, rows); };
+      expect(await answer((await card())!.id, { option_index: 3 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["down", "down", "down", "enter"]);
+    });
+    await withPane("gjc", "blocked", gjcSelector(0, rows), async (pane) => {
+      const prompt = (await card())!;
+      // the selector dismissed after the first move: the composer takes the keys now
+      pane.onSent = (sent) => { if (sent === "down") pane.screen = "Ready\n\n❯ \n"; };
+      expect(await answer(prompt.id, { option_index: 3 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual(["down"]);
+    });
+  });
 
   test("moves to the row and confirms it while the menu stays the card's", async () => {
     await withPane("codex", "blocked", menu(RESUME), async (pane) => {
@@ -2993,6 +3358,27 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     });
   });
 
+  test("sets Claude's effort with ←/→ and s only where the slider still stands over that level", async () => {
+    await withPane("claude", "idle", claudeEffort(2), async (pane) => {
+      let at = 2;
+      pane.onSent = (sent) => {
+        if (sent === "right") at = Math.min(4, at + 1);
+        if (sent === "left") at = Math.max(0, at - 1);
+        pane.screen = claudeEffort(at);
+      };
+      const prompt = (await card())!;
+      expect(await answer(prompt.id, { option_index: 0 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["left", "left", "text:s"]);
+    });
+    // a key typed in the terminal at the same moment: ▲ over another level, so no letter
+    await withPane("claude", "idle", claudeEffort(2), async (pane) => {
+      pane.onSent = (sent) => { if (sent === "right") pane.screen = claudeEffort(4); };
+      const prompt = (await card())!;
+      expect(await answer(prompt.id, { option_index: 3 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual(["right"]);
+    });
+  }, 20_000);
+
   // each refusal waits out the answer's own 1.5 s for the list to show the row
   test("types no s, and no further arrow, once Claude's model list is not the one that was tapped", async () => {
     // closed in the terminal right after the answer read it, with no move to wait on: the look
@@ -3225,6 +3611,25 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       expect(await answer(prompt.id, { option_index: 2 })).toEqual({ status: 200, code: undefined });
       expect(pane.sent).toEqual(["down", "text:s"]);
     });
+  });
+
+  test("offers no fallback card, and holds pending input, over an effort slider whose hint the reader cannot take", async () => {
+    // a hint cut inside a word, and one without the session-only key: the slider's Enter still
+    // saves the level as the default, so neither the fallback card nor a pending message may press it
+    const unread = [
+      claudeEffort(2, "  ←/→ to adjust · Enter to confirm · s for this ses\n  sion only · Esc to cancel"),
+      claudeEffort(2, "  ←/→ to adjust · Enter to confirm · Esc to cancel"),
+    ];
+    for (const screen of unread) {
+      expect(parseInteractivePrompt("claude", screen)).toBeNull();
+      expect(parseFallbackPrompt("claude", screen).options.map((option) => option.label)).toContain("Enter");
+      expect(modelListWaits("claude", screen)).toBe(true);
+      await withPane("claude", "blocked", screen, async () => {
+        expect(await card()).toBeNull();
+      });
+    }
+    // the same hint above later output belongs to an answered slider
+    expect(modelListWaits("claude", `${unread[1]}Some later output\n`)).toBe(false);
   });
 
   test("a screen read that comes back after the wait authorises no key", async () => {

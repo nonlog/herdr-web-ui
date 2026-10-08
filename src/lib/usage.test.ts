@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { ProviderUsage, UsageWindow } from "../../shared/protocol.ts";
-import { formatPercent, formatResetIn, glanceWindow, meterPercent, meterText, moveInOrder, orderProviders, tightestWindow, usageName, windowLabel } from "./usage.ts";
+import { composerUsage, formatPercent, formatResetIn, glanceWindow, meterPercent, meterText, moveInOrder, orderProviders, providerForAgent, statusWindows, tightestWindow, usageName, windowLabel } from "./usage.ts";
 
 const NOW = Date.parse("2026-09-29T12:00:00Z");
 const window = (used_percent: number, kind: UsageWindow["kind"] = "week", scope: string | null = null): UsageWindow => ({ kind, scope, used_percent, resets_at: null });
@@ -9,6 +9,22 @@ const provider = (id: ProviderUsage["id"], windows: UsageWindow[], account: stri
 });
 
 describe("usage meters", () => {
+  it("uses the agent's provider and the first visible account in Settings order", () => {
+    const accounts = [provider("claude", [window(40)]), provider("codex", [window(20)], "a@x"), provider("codex", [window(80)], "b@x")];
+    expect(composerUsage(accounts, "codex", ["codex:b@x"], [])?.account).toBe("b@x");
+    expect(composerUsage(accounts, "codex", ["codex:b@x"], ["codex:b@x"])?.account).toBe("a@x");
+    expect(composerUsage(accounts, "pi", [], [])).toBeUndefined();
+    expect(composerUsage(accounts, null, [], [])).toBeUndefined();
+    expect(providerForAgent("agy")).toBe("antigravity");
+    expect(providerForAgent("opencode")).toBe("opencode");
+  });
+
+  it("prioritizes the plan-wide five-hour session, with weekly fallback only", () => {
+    expect(statusWindows(provider("claude", [window(99, "week", "Sonnet"), window(84), window(22, "session")]))).toEqual([window(22, "session"), window(84)]);
+    expect(statusWindows(provider("codex", [window(84)]))).toEqual([window(84)]);
+    expect(statusWindows(provider("claude", [window(22, "session", "Opus"), window(84)]))).toEqual([window(84)]);
+    expect(statusWindows(provider("cursor", [window(80, "month")]))).toEqual([]);
+  });
   it("shows the limit closest to running out", () => {
     expect(tightestWindow(provider("codex", [window(12, "session"), window(77)]))).toEqual(window(77));
     expect(tightestWindow(provider("claude", []))).toBeNull();

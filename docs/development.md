@@ -14,12 +14,42 @@ bun run dev      # Vite on :5173, proxies /api and /ws
 
 ## Checks
 
+`bun run check` runs what CI runs, from the same script (`scripts/check.ts`):
+
+```bash
+bun run check fast                  # CI's Fast checks: workflow syntax, generated types, typecheck, build, unit tests
+bun run check integration browser   # CI's Integration and browser: a build, then both lanes side by side
+bun run check full                  # fast, then both lanes
+bun run check run bun test --timeout 15000 ./server/api.contract.test.ts   # one command on the same isolated herdr
+bun run check run bun scripts/ui-regression.ts                             # (a browser script serves dist/: build first)
+```
+
+`fast` needs no herdr. The other modes run on a herdr of their own: its config, its plugin state
+and the web UI's state live in a directory made for the run (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+`HERDR_WEB_STATE_DIR`), under a session name made for the run. Nothing reads your herdr config,
+so no plugin installed there starts with the test servers, and two runs on one PC share no
+socket and no file. The run stops its herdr servers and removes the directory when it ends, also
+when it is interrupted; `CHECK_DIR=<path>` keeps it there instead. Only one run with a lane at a
+time on a PC: the contract and browser tests are bound by timing, and a second run names the
+first and exits (the lock is loopback port 41737, which a run listens on while it runs). One run per checkout: `fast` rewrites the generated types file while it
+checks it, and `fast` and the browser lane build into `dist/` (`check run` runs only its command).
+
+A local pass is not CI's: the PC has its own Node (CI pins 22), its own cores and its own system
+libraries. The browser lane uses the lockfile's Chromium, which it downloads into Playwright's
+cache on first use. `HERDR_TEST_SHARDS=4` runs four integration files at a time, as a way to
+look for timing failures; the default is one, as in CI.
+
+The single commands still work on their own:
+
 ```bash
 bun run typecheck
 bun run build
 bun run test:unit               # no herdr needed; CI's Fast checks run it
 bun test                        # needs herdr installed; creates and removes its own workspaces
 bun run test:ui                 # browser regression against isolated test servers
+bun scripts/sticky-modifiers-regression.ts # mobile held keys through real legacy/Kitty PTYs
+bun scripts/key-bar-customization-demo-regression.ts # mobile key layout, saved combinations and migration on demo fixtures
+bun scripts/settings-pages-demo-regression.ts # every Settings page on a 390px and a 320px phone, and Back stepping out of the dialog
 bun scripts/chat-browser-qa.ts  # chat lens end to end
 bun scripts/output-browser-qa.ts # terminal output flow control end to end
 bun scripts/math-browser-qa.ts  # chat math: KaTeX loads with the first expression
@@ -45,13 +75,14 @@ bun scripts/keyboard-viewport-regression.ts   # keyboard, rotation and measured 
 bun scripts/keyboard-viewport-demo-regression.ts # original real-app viewport suite on disposable demo fixtures
 bun scripts/droplet-demo-regression.ts        # real-app alerts below the header, keyboard and landscape
 bun scripts/chat-greeting-demo-regression.ts  # an empty chat's greeting: centred on a desktop, docked on a phone
-bun scripts/composer-fit-demo-regression.ts   # the input card's model label: whole or stepped out beside Queue, the context number and an upload; the box's text at Chat font size
+bun scripts/composer-fit-demo-regression.ts   # one Send/Stop control, pending Send now actions, context/label fit and Chat font sizing
 bun scripts/held-rows-demo-regression.ts      # held messages: the fold under an approval card, its button, a row's error
+bun scripts/sidebar-activity-demo-regression.ts # Agents order Activity and Quiet opened finishes: blocked pinned, recency, an opened DONE drawn as ready
 bun scripts/prompt-dock-demo-regression.ts    # the prompt card docked over the input card: its place, its height on a short phone, the grip, a typed pick
 bun scripts/font-swap-demo-regression.ts      # the app's faces arriving late on a slow link: a reader at the end of a chat stays there, a tab strip the user scrolled stays put
 ```
 
-`FILE_VIEWER_CASE=landscape-notch` selects a viewer case; `FILE_VIEWER_CSS=/path/to/before.css` compares another stylesheet. These checks use Chromium mobile emulation and synthetic safe-area/keyboard geometry; they cannot verify actual iOS Safari keyboard dismissal or notch insets. The existing `bun scripts/file-viewer-regression.ts` separately checks history with an owned herdr pane. The original `scripts/mobile-viewport-regression.ts` exports `checkMobileViewport` for the real-app `bun run test:ui` suite; it also checks the command palette and xterm focus transitions. The demo runners build the real client into a temporary directory, inject the committed fictional-session transport and serve it only on loopback; they do not use a live herdr session or download website media. They exercise real-app viewport and alert geometry, but not live herdr connectivity.
+`FILE_VIEWER_CASE=landscape-notch` selects a viewer case; `FILE_VIEWER_CSS=/path/to/before.css` compares another stylesheet. These checks use Chromium mobile emulation and synthetic safe-area/keyboard geometry; they cannot verify actual iOS Safari keyboard dismissal or notch insets. The existing `bun scripts/file-viewer-regression.ts` separately checks history with an owned herdr pane. The original `scripts/mobile-viewport-regression.ts` exports `checkMobileViewport` for the real-app `bun run test:ui` suite; it also checks the command palette and xterm focus transitions. The demo runners build the real client into a temporary directory, inject the committed fictional-session transport and serve it only on loopback; they do not use a live herdr session or download website media. Run on its own, each builds the client itself (`scripts/demo-build.ts`); the browser lane builds it once and names the directory in `HERDR_DEMO_BUILD`, and each runner copies that instead. They exercise real-app viewport and alert geometry, but not live herdr connectivity.
 
 ## README media
 
@@ -136,7 +167,14 @@ after changing the staged session. Files, images, push and remote PCs are not pa
 ## Releasing
 
 1. Open a release PR that bumps `version` in `package.json` and `herdr-plugin.toml`,
-   and moves the `Unreleased` notes in [CHANGELOG.md](../CHANGELOG.md) under the new version.
+   moves the `Unreleased` notes in [CHANGELOG.md](../CHANGELOG.md) under the new version,
+   and tells the release in [release-summaries.json](../release-summaries.json) the way a
+   game's patch notes do: under the version, for each of `en`, `ko`, `ja` and `zh`, the lists
+   `new`, `improved` and `fixed` (a list with nothing to say is left out), each a few lines of
+   plain text, 90 characters at most, the same number of lines in every language. It is what
+   an install shows before and after the update, with the changelog section folded under it,
+   so a line names what changes for the people who use the app and leaves out PR numbers and
+   internals. The unit suite and the release workflow fail without all four languages.
 2. Merge it after CI passes.
 3. Run **Actions → Release → Run workflow**, select `main`, and enter `X.Y.Z` without `v`.
    The CLI equivalent is `gh workflow run release.yml --ref main -f version=X.Y.Z`.
@@ -162,14 +200,17 @@ There is no permanent `develop` branch. Release metadata changes also go through
 
 The [CI workflow](../.github/workflows/ci.yml) runs on every PR and `main` push:
 
-- **Fast checks**: frozen dependency install, generated type freshness, typecheck, build,
-  and `bun run test:unit`. This suite does not start herdr.
-- **Integration and browser**: checksum-pinned herdr 0.9.3, Node 22, isolated state/session,
-  `bun run test:integration`, and `scripts/ui-regression.ts` with the lockfile's Chromium.
-  The two run at the same time (`scripts/ci-lanes.ts`). The integration files can run a few
-  at a time, each worker on a herdr session of its own (`scripts/ci-tests.ts`); CI runs them
-  one by one (`HERDR_TEST_SHARDS: 1`) until the timing-bound contract tests hold under load.
-  Missing herdr fails the integration suite. The owned session is stopped even on failure.
+- **Fast checks**: frozen dependency install, then `bun run check fast`: workflow syntax
+  (checksum-pinned actionlint), generated type freshness, typecheck, build, and
+  `bun run test:unit`. This suite does not start herdr.
+- **Integration and browser**: checksum-pinned herdr 0.9.3, Node 22, then
+  `bun run check integration browser`: a build, `bun run test:integration`, and the browser
+  scripts of `scripts/ci-browser.sh` with the lockfile's Chromium, on a herdr of the run's own
+  ([Checks](#checks)). The two lanes run at the same time (`scripts/ci-lanes.ts`). The
+  integration files can run a few at a time, each worker on a herdr session of its own
+  (`scripts/ci-tests.ts`); they run one by one (`HERDR_TEST_SHARDS`, default 1 in
+  `scripts/check.ts`) until the timing-bound contract tests hold under load.
+  Missing herdr fails the run. Its herdr servers are stopped even on failure.
   Integration tests have a 15-second default timeout so their bounded process-startup
   probes can finish; individual tests can still specify a longer timeout.
 

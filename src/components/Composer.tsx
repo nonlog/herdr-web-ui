@@ -12,7 +12,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { ArrowUp, Clock, FileText, Plus, Square, X } from "lucide-react";
+import { ArrowUp, FileText, Plus, Square, X } from "lucide-react";
 
 import "./Composer.css";
 
@@ -23,10 +23,10 @@ import { paneStorageId } from "../../shared/machines.ts";
 import {
   agentDisplayLabel,
   composerModelDraw,
-  composerQueueShown,
+  composerSendShown,
   composerStatusCompact,
   composerStatusHint,
-  composerStatusWord, composerStatusWordDrawn,
+  composerStatusWord,
   contextLeftPercent,
   formatTokens,
   imageMention,
@@ -39,6 +39,7 @@ import { modelLabel } from "../lib/modelName.ts";
 import { useFacesArrived } from "../lib/fontFaces.ts";
 import { activeTrigger, applyCompletion, type ActiveTrigger } from "../lib/mentions.ts";
 import { quickReplyButtons, useSettings } from "../lib/settings.ts";
+import { composerUsage, formatPercent, formatResetIn, HIGH_PERCENT, meterPercent, meterText, providerForAgent, statusWindows, usageName, useUsage, windowLabel } from "../lib/usage.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { BackgroundTasks } from "./BackgroundTasks.tsx";
 import { MicButton, VoiceRecordingPill, useDictation } from "./VoiceInput.tsx";
@@ -54,7 +55,6 @@ export interface ComposerProps {
   /** an OmO pane's running background tasks: the status line opens their list */
   backgroundTasks?: number;
   metadata?: ConversationMetadata | null;
-  queueMode?: boolean;
   /** replaces the placeholder: how a message answers the agent's waiting prompt */
   answerHint?: string | null;
   /** what the agent suggests typing next (Claude's grey input text): the placeholder, taken with Tab */
@@ -155,7 +155,7 @@ async function cachedPaneCommands(paneId: string, machineId: string, fetchComman
  * screen has no hover). A window the transcript does not name draws no ring. Whether the number
  * is open is the composer's to keep: its text takes room in the row the model label is fitted to.
  */
-function ContextRing({ context, shown, onToggle }: { context: NonNullable<ConversationMetadata["context"]>; shown: boolean; onToggle: () => void }) {
+function ContextRing({ context, shown, readOnly = false, onToggle }: { context: NonNullable<ConversationMetadata["context"]>; shown: boolean; readOnly?: boolean; onToggle: () => void }) {
   const t = useT();
   const left = contextLeftPercent(context);
   if (left === null || context.window === null) return null;
@@ -163,6 +163,14 @@ function ContextRing({ context, shown, onToggle }: { context: NonNullable<Conver
   const detail = t("{used} of {window} tokens", { used: formatTokens(context.used), window: formatTokens(context.window) });
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
+  if (readOnly) return <span className={`composer-context composer-context-readonly${left <= 20 ? " is-low" : ""}`}>
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <circle className="composer-context-track" cx="8" cy="8" r={radius} />
+      <circle className="composer-context-used" cx="8" cy="8" r={radius}
+        strokeDasharray={`${circumference * (100 - left) / 100} ${circumference}`} transform="rotate(-90 8 8)" />
+    </svg>
+    <span className="visually-hidden">{label} · {detail}</span>
+  </span>;
   return (
     <button
       type="button"
@@ -182,6 +190,19 @@ function ContextRing({ context, shown, onToggle }: { context: NonNullable<Conver
   );
 }
 
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia?.(query).matches === true);
+  useEffect(() => {
+    const media = window.matchMedia?.(query);
+    if (!media) return;
+    const refresh = () => setMatches(media.matches);
+    refresh();
+    media.addEventListener("change", refresh);
+    return () => media.removeEventListener("change", refresh);
+  }, [query]);
+  return matches;
+}
+
 /** Chat-style input surface with pane-local drafts, command/file completion, and image mentions. */
 export function Composer({
   connected,
@@ -191,7 +212,6 @@ export function Composer({
   agentStatus,
   backgroundTasks = 0,
   metadata,
-  queueMode = false,
   answerHint = null,
   suggestion = null,
   greeting = null,
@@ -203,13 +223,16 @@ export function Composer({
   const machineId = useMachineId();
   const { fetchPaneCommands, fetchPaneFiles } = useMachineApi();
   const { settings } = useSettings();
+  const mobile = useMediaQuery("(max-width: 640px), (pointer: coarse)");
+  const usageEnabled = settings.showUsage && !mobile && machineId === "local" && providerForAgent(agent) !== null;
+  const { report: usageReport } = useUsage(usageEnabled);
+  const usage = usageEnabled && usageReport !== null ? composerUsage(usageReport.providers, agent, settings.usageOrder, settings.usageHidden) : undefined;
+  const usageWindows = usage === undefined ? [] : statusWindows(usage);
+  const usageLimit = usageWindows[0];
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const statusRef = useRef<HTMLDivElement | null>(null);
   const hintRef = useRef<HTMLSpanElement | null>(null);
-  const queueRef = useRef<HTMLButtonElement | null>(null);
-  /** whether Queue's last press was a finger's: its focus is then not handed to the message box */
-  const queueTouched = useRef(false);
   /** the card's own width: a narrow one shows the task chip's count */
   const [cardWidth, setCardWidth] = useState(0);
   const [contextShown, setContextShown] = useState(false);
@@ -373,7 +396,6 @@ export function Composer({
       return item !== null && item.scrollWidth > item.clientWidth;
     };
     const draw = composerModelDraw({
-      queueShown: queueRef.current !== null,
       modelClipped: clipped(".composer-model"),
       effortClipped: clipped(".composer-reasoning"),
     });
@@ -502,6 +524,7 @@ export function Composer({
   const dictation = useDictation({
     mode: "chat",
     connected,
+    phone: mobile,
     polish: settings.voicePolishChat,
     keywords: () => [...(agent ? [agentLabel] : []), ...commands.map((command) => command.name)],
     box: textareaRef,
@@ -630,10 +653,6 @@ export function Composer({
     if (!connected || uploading || sending || text.trim().length === 0) return;
     const sent = text;
     const sentAttachments = attachments;
-    // Queue leaves with the draft it held. If it was pressed from the keyboard or a mouse it has
-    // the focus, which would fall to the page: the message box takes it then. A touch press
-    // moves nothing (Android focuses a tapped button, iOS does not), so no keyboard is raised
-    const fromQueue = queueRef.current !== null && document.activeElement === queueRef.current && !queueTouched.current;
     const settle = (result: boolean | string): void => {
       const acknowledged = result === true ? composerDrafts.settle(draftKey, sent) : null;
       if (!mounted.current) return;
@@ -648,9 +667,6 @@ export function Composer({
       setNote(edited ? t("Sent as it was. Your changes made while it was sending stayed here and were not sent.") : null);
       for (const attachment of sentAttachments) URL.revokeObjectURL(attachment.previewUrl);
       setAttachments((current) => current.filter((attachment) => !sentAttachments.includes(attachment)));
-      // unless the focus was moved somewhere else while the message was on its way
-      const focused = document.activeElement;
-      if (fromQueue && (focused === queueRef.current || focused === document.body || focused === null)) textareaRef.current?.focus({ preventScroll: true });
     };
     if (!composerDrafts.begin(draftKey, sent)) return;
     // a polish landing before the acknowledgement would count as an edit and keep the sent message here
@@ -665,7 +681,7 @@ export function Composer({
     }
   }, [attachments, connected, dictation.forget, draftKey, onSend, sending, text, uploading]);
 
-  /** A quick reply goes the way a typed message does (queued mid-turn, an answer to an open menu), and leaves the box alone. */
+  /** A quick reply follows the same delivery policy as Send, and leaves the box alone. */
   const sendQuick = useCallback((reply: string) => {
     if (!connected || sending) return;
     setNote(null);
@@ -706,8 +722,14 @@ export function Composer({
           return;
         }
       }
-      if (event.key === "Escape" && trigger) {
+      if (event.key === "Escape" && trigger && !menuDismissed) {
         setMenuDismissed(true);
+        return;
+      }
+      // a draft puts Send where Stop was: Escape is then the Stop the agent's own input has
+      if (event.key === "Escape" && connected && agentStatus === "working" && textRef.current.trim().length > 0) {
+        event.preventDefault();
+        onAbort();
         return;
       }
       // Tab takes the suggestion into the empty box, as in Claude's own input
@@ -724,7 +746,7 @@ export function Composer({
       event.preventDefault();
       send();
     },
-    [choices, menuOpen, offered, selectCompletion, selectedIndex, send, setTextAndCaret, settings.enterSends, trigger],
+    [agentStatus, choices, connected, menuDismissed, menuOpen, offered, onAbort, selectCompletion, selectedIndex, send, setTextAndCaret, settings.enterSends, trigger],
   );
 
   const onPaste = useCallback(
@@ -751,17 +773,23 @@ export function Composer({
 
   const isWorking = agentStatus === "working";
   const statusCompact = composerStatusCompact(cardWidth);
-  const queueShown = composerQueueShown({ queueMode, connected, text, uploading });
+  const sendShown = composerSendShown({ working: isWorking, text });
   const hint = composerStatusHint({ uploading, connected, text });
   const model = metadata?.model ? modelLabel(metadata.model) : null;
   const modelShown = Boolean(metadata?.model || metadata?.reasoning_effort);
+  const usageDetail = usageWindows.map((window) => {
+    const reset = formatResetIn(window.resets_at, Date.now());
+    return `${windowLabel(window)} ${meterText(window, settings.usageCount)}${reset ? ` · ${t("Resets in {time}", { time: reset })}` : ""}`;
+  }).join("\n");
+  const usageCaption = usageLimit === undefined ? "" : `${usageLimit.kind === "session" ? "5h" : windowLabel(usageLimit)} ${formatPercent(meterPercent(usageLimit, settings.usageCount))}`;
+  const usageAccessible = usage === undefined ? "" : `${t("Subscription usage")}: ${usageName(usage)}, ${usageDetail.replaceAll("\n", ", ")}`;
   const hintText = hint === null ? null : t(hint === "uploading" ? "Uploading file…" : "Reconnecting… message held here, never queued");
   const menuId = `composer-menu-${paneId}`;
 
   return (
     <div className="composer" role="group" aria-label={t("Message composer")} data-dictating={dictation.voice.state !== "idle" ? "" : undefined}>
       {greeting}
-      {/* no Tab key on a phone: the suggestion can be a chip there that fills the box, once chosen in Settings */}
+      {/* no Tab key on a phone: the suggestion is a chip there that fills the box, unless Settings turns it off */}
       {settings.showSuggestionChip && offered !== null && text === "" && (
         <div className="composer-quick composer-suggestion-row">
           <button type="button" className="composer-quick-reply composer-suggestion" title={t("Use the suggestion")} onClick={() => setTextAndCaret(offered, offered.length)}>
@@ -945,7 +973,7 @@ export function Composer({
         </div>
         {/* between the two control groups of the card's last row. The agent's name, its separator and the
             state word are read, not drawn: the mark and the header name the agent, and Stop, the live row and
-            the prompt card say the state. DONE alone is drawn: nothing else in the chat says a turn ended unseen.
+            the prompt card say the state. All state words stay available to assistive tech only.
             Where the model label does not fit, it steps out and is still read (fitStatus marks data-model) */}
         <div ref={statusRef} className="composer-status" role="status" data-status={agentStatus ?? "unknown"}
           data-offline={connected ? undefined : ""} data-hint={hint ?? undefined}>
@@ -953,7 +981,7 @@ export function Composer({
           <span className="composer-status-meta">
             <span className="composer-agent-label visually-hidden">{agentLabel}</span>
             <span className="composer-status-separator visually-hidden" aria-hidden="true">·</span>
-            <strong className={composerStatusWordDrawn(agentStatus) ? undefined : "visually-hidden"}>{t(composerStatusWord(agentStatus))}</strong>
+            <strong className="visually-hidden">{t(composerStatusWord(agentStatus))}</strong>
             {/* the mark, the model, the level and the context ring as one quiet pill. It only shows: no role,
                 no focus, nothing to press but the ring inside it. A pane that names no model draws no pill
                 (.is-bare): the mark, a level if it has one, and the ring stand in the row as they are */}
@@ -973,7 +1001,14 @@ export function Composer({
                   </>}
                 </span>
               </span>}
-              {metadata?.context && <ContextRing context={metadata.context} shown={contextShown} onToggle={() => setContextShown((open) => !open)} />}
+              {metadata?.context && <ContextRing context={metadata.context} shown={contextShown} readOnly={mobile} onToggle={() => setContextShown((open) => !open)} />}
+              {usage !== undefined && usage.problem === null && usageLimit !== undefined && <span
+                className={`composer-usage${usageLimit.used_percent >= HIGH_PERCENT ? " is-high" : ""}${usage.problem ? " has-problem" : ""}`}
+                title={`${usageName(usage)}\n${usageDetail}`}
+              >
+                <span aria-hidden="true">{usageCaption}</span>
+                <span className="visually-hidden">{usageAccessible}</span>
+              </span>}
             </span>
             {/* the chip is a button in the left controls; its count is still said here, where a change is announced */}
             {backgroundTasks > 0 && <span className="composer-task-count visually-hidden">{t(backgroundTasks === 1 ? "{n} background task" : "{n} background tasks", { n: backgroundTasks })}</span>}
@@ -985,25 +1020,7 @@ export function Composer({
           )}
         </div>
         <div className="composer-controls composer-controls-right">
-          {queueShown && (
-            <button
-              ref={queueRef}
-              type="button"
-              className="composer-queue-button"
-              aria-label={t("Queue message")}
-              title={t("Queue as the next message")}
-              disabled={!connected || uploading || sending || text.trim().length === 0}
-              onClick={(event) => {
-                // a click says what made it (a key press has no pointer type)
-                queueTouched.current = (event.nativeEvent as PointerEvent).pointerType === "touch";
-                send();
-              }}
-            >
-              <Clock aria-hidden="true" />
-              {t("Queue")}
-            </button>
-          )}
-          {isWorking ? (
+          {!sendShown ? (
             <button
               type="button"
               className="composer-action composer-stop"
@@ -1014,18 +1031,18 @@ export function Composer({
             >
               <Square aria-hidden="true" />
             </button>
-          ) : !queueMode ? (
+          ) : (
             <button
               type="button"
               className="composer-action composer-send"
               aria-label={t("Send message")}
               title={t("Send message")}
               disabled={!connected || uploading || sending || text.trim().length === 0}
-              onClick={send}
+              onClick={() => send()}
             >
               <ArrowUp aria-hidden="true" />
             </button>
-          ) : null}
+          )}
         </div>
       </div>
       {note && <div className="composer-note" role="alert">{note}</div>}
@@ -1033,7 +1050,7 @@ export function Composer({
           already in the state the words describe. Not a block — the text still goes, and pi runs the
           command in the terminal the way its own palette would */}
       {!note && terminalOnly !== null && (
-        <div className="composer-hint">{t("{command} opens a tree the chat cannot show. It runs in the terminal — tap the terminal button at the top of the screen to choose a branch.", { command: `/${terminalOnly}` })}</div>
+        <div className="composer-hint" role="status">{t("{command} opens a tree the chat cannot show. It runs in the terminal — tap the terminal button at the top of the screen to choose a branch.", { command: `/${terminalOnly}` })}</div>
       )}
       {/* above the whole composer: inside the surface it would cover the text being dictated */}
       {dictation.shown && <VoiceRecordingPill dictation={dictation} align="start" />}

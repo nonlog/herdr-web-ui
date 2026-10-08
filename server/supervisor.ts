@@ -52,7 +52,7 @@ export async function runSupervisor(root = resolve(import.meta.dir, "..")) {
   const started = Promise.withResolvers<void>();
   const publish = () => {
     if (updater.status.phase === "error") console.error(`Update failed: ${updater.status.error}`);
-    try { child?.send({ type: "update-status", status: updater.status }); } catch { /* bridge restarting */ }
+    try { child?.send({ type: "update-status", status: updater.status, notes: updater.notes, installed: updater.installed }); } catch { /* bridge restarting */ }
   };
   async function stopChild() {
     const prior = child;

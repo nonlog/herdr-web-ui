@@ -36,6 +36,7 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  * GET /api/health?scope=bridge -> BridgeHealth, never waits for herdr
  * GET /api/bridge -> authenticated BridgeIdentity (socket + runtime compatibility)
  * GET /api/machines -> { machines: Machine[] }; GET /api/machines/events -> MachineEvent SSE
+ * SetupJob/Machine action_required=bridge_conflict: align app versions, then retry setup without update_remote.
  * POST /api/machines/setup -> SetupJob; GET/POST/DELETE /api/machines/setup/:job_id
  * PATCH /api/machines/:id { name?, enabled? }; DELETE /api/machines/:id
  * /api/machines/:id/{session,agents,pane/*,workspace/*} -> existing target-local API
@@ -130,7 +131,9 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *
  *  Access: every route above except /api/health, /api/auth and /api/devices/pair, plus the
  *  /ws upgrade, needs the request to be one of: from this PC itself (no proxy in front);
- *  the PC's own Tailscale login, as `tailscale serve` states it; a paired device's cookie;
+ *  the PC's own Tailscale login, as `tailscale serve` states it — or, where
+ *  HERDR_WEB_TAILSCALE_SERVE_ONLY=1 declares serve the only ingress on a tailnet one login
+ *  owns with no tagged node, a serve request that states no login; a paired device's cookie;
  *  the shared token (HERDR_WEB_TOKEN) as cookie or `Authorization: Bearer <token>`. With a
  *  token configured, only the last two count, this PC and its Tailscale login included. Without one, and while no
  *  device is paired, anything that reaches the server is let in as before (the startup
@@ -621,6 +624,16 @@ export interface PushPayload {
 /** A connection's authority over the shared ptys: `interact` types and resizes, `observe` only watches. */
 export type ClientRole = "interact" | "observe";
 
+/** A follow-up accepted by this bridge, scoped to the connection that submitted it. */
+export interface PendingMessage {
+  id: string;
+  request_id: number;
+  text: string;
+  state: "queued" | "sending" | "held" | "uncertain";
+  created_at: string;
+  error?: { code: string; message: string };
+}
+
 export type ClientMessage =
   /** keep_size: the grid is covered (the chat lens), so the attach leaves the shared pty's size as it is */
   | { type: "attach"; pane_id: string; cols: number; rows: number; flow_control?: "ack"; keep_size?: boolean }
@@ -633,8 +646,14 @@ export type ClientMessage =
    * its own Enter after a short gap, and answers with a submit-result of the same id. `text` is
    * the message as written (agent.prompt pastes it itself), `payload` the same shaped for the
    * pane's bracketed-paste mode, typed when no agent is in front. `typed`: the terminal's own
-   * input line, which types `payload` like the keyboard would even into an agent's open menu */
-  | { type: "submit"; id: number; pane_id: string; text: string; payload: string; typed?: boolean }
+   * input line, which types `payload` like the keyboard would even into an agent's open menu.
+   * `delivery:queue` requires "pending-input" and a live interact attachment: while the agent
+   * works the bridge keeps the message until its next turn, or the owner explicitly steers it.
+   * Omission keeps the legacy immediate submission. Queued messages never resume after lease loss.
+   * Queue request ids increase monotonically per connection; recent duplicates replay their
+   * receipt, and retired ids are rejected rather than executed after history eviction. */
+  | { type: "submit"; id: number; pane_id: string; text: string; payload: string; typed?: boolean; delivery?: "immediate" | "queue" }
+  | { type: "pending-action"; id: number; pane_id: string; pending_id: string; action: "steer" | "discard" }
   /** Masked input: revalidate the visible prompt, type literal bytes + Enter immediately.
    * Never queued, retried, sent through agent.prompt, or echoed in a result. */
   | { type: "secret"; id: number; pane_id: string; prompt: string; secret: string }
@@ -646,7 +665,7 @@ export type ClientMessage =
   | { type: "role"; mode: ClientRole };
 
 /** What a server supports beyond the base protocol, listed in its first snapshot; older bridges list nothing. */
-export type ServerFeature = "submit" | "secret-input" | "input-ready" | "take-over" | "terminal-scroll";
+export type ServerFeature = "submit" | "pending-input" | "secret-input" | "input-ready" | "take-over" | "terminal-scroll";
 
 export type ServerMessage =
   | { type: "snapshot"; snapshot: SessionSnapshot; features?: ServerFeature[] }
@@ -662,8 +681,11 @@ export type ServerMessage =
    * so the browser may resize it and sends semantic wheel events instead of xterm mouse bytes. */
   | { type: "pane-geometry"; pane_id: string; cols: number; rows: number; fixed?: boolean; control?: boolean }
   | { type: "role-ack"; mode: ClientRole }
-  /** how a submit ended: ok once its Enter was sent; otherwise nothing, or only the text, reached the pane */
-  | { type: "submit-result"; id: number; pane_id: string; ok: boolean; code?: string; message?: string }
+  /** ok after Enter delivery, or bridge acceptance (`pending`); never an agent execution acknowledgement. */
+  | { type: "submit-result"; id: number; pane_id: string; ok: boolean; pending?: PendingMessage; code?: string; message?: string }
+  | { type: "pending-result"; id: number; pane_id: string; pending_id: string; ok: boolean; code?: string; message?: string }
+  /** Owner-only receipt and state; only an explicit removed outcome permits deleting a retained client message. */
+  | { type: "pending-messages"; pane_id: string; messages: PendingMessage[]; removed?: Array<{ id: string; outcome: "sent" | "discarded" }> }
   | { type: "secret-result"; id: number; pane_id: string; ok: boolean; code?: string }
   /** agent-status push for ANY pane, attached or not (server-side status collector) */
   | { type: "pane-status"; pane_id: string; agent_status: AgentStatus; /** an OmO pane's running background tasks, when the frame is about one */ background_tasks?: number }

@@ -120,7 +120,25 @@ export class MirrorSession {
     void this.tick();
   }
 
+  /**
+   * One pass: read, send what changed, work out the next delay. Every step after the read
+   * is in the guard too — a throw from `flush()` (a screen that does not parse) or from the
+   * reschedule must not stop the loop with no pty-exit, which on Windows is the only
+   * terminal the pane has.
+   */
   private async tick(): Promise<void> {
+    try {
+      await this.readOnce();
+    } catch (error) {
+      if (this.closed) return;
+      console.error(`pane mirror stopped: ${error instanceof Error ? error.message : String(error)}`);
+      this.closed = true;
+      this.finish();
+      this.options.onExit(null);
+    }
+  }
+
+  private async readOnce(): Promise<void> {
     this.echoing = false;
     if (this.closed) return;
     const active = this.options.activeMs ?? MIRROR_ACTIVE_MS;
@@ -133,7 +151,7 @@ export class MirrorSession {
       if (size && (size.cols !== this.cols || size.rows !== this.rows)) {
         this.cols = size.cols;
         this.rows = size.rows;
-        this.options.onResize?.(size.cols, size.rows);
+        try { this.options.onResize?.(size.cols, size.rows); } catch (error) { console.error(`pane mirror resize: ${error instanceof Error ? error.message : String(error)}`); }
         // the clients' grids were cleared by the resize: the next screen goes out even if unchanged,
         // and it is one read on the new grid, not the one held from before
         this.sent = null;

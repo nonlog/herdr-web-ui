@@ -17,10 +17,11 @@ async function status(): Promise<{ out: string; err: string; exitCode: number }>
   return run("status");
 }
 
-async function run(command: string): Promise<{ out: string; err: string; exitCode: number }> {
+async function run(command: string, extra: Record<string, string> = {}): Promise<{ out: string; err: string; exitCode: number }> {
   const bin = join(scratch, "bin");
   const env: Record<string, string | undefined> = { ...process.env, PATH: `${bin}:${process.env["PATH"] ?? ""}`, HOME: scratch, HERDR_PLUGIN_STATE_DIR: join(scratch, "state") };
   for (const key of ["HERDR_PLUGIN_CONFIG_DIR", "PORT", "HOST", "HERDR_WEB_TOKEN", "HERDR_WEB_STATE_DIR", "XDG_CONFIG_HOME"]) delete env[key];
+  Object.assign(env, extra);
   const child = Bun.spawn(["bun", "scripts/plugin.ts", command], { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" });
   const [out, err, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   return { out, err, exitCode };
@@ -70,6 +71,11 @@ describe("plugin settings files", () => {
   });
 });
 
+/** What the app's bridge health answers (server/index.ts): it holds the port whether herdr answers or not. */
+const BRIDGE_HEALTH = { ok: true, auth: { required: false, authenticated: true }, bridge_protocol: 1 };
+/** What the app's full health answers while herdr does (every release since v0.1.0 has sent these). */
+const APP_HEALTH = { ok: true, herdr: { version: "0.9.3", protocol: 1 }, auth: { required: false, authenticated: true } };
+
 describe("port", () => {
   const keep = (port: number) => {
     mkdirSync(join(scratch, ".config", "herdr-web-ui"), { recursive: true });
@@ -113,9 +119,39 @@ describe("port", () => {
     } finally { await stranger.stop(true); }
   });
 
+  it("does not take another program's JSON, or the app's shape with a failing status, for the app's bridge health", async () => {
+    for (const bridge of [Response.json({ ok: true }), Response.json(BRIDGE_HEALTH, { status: 503 })]) {
+      const stranger = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: (request) => new URL(request.url).searchParams.get("scope") === "bridge"
+          ? bridge.clone()
+          : Response.json({ error: { code: "unavailable", message: "not us" } }, { status: 503 }),
+      });
+      try {
+        writeFileSync(join(configDir, ".env"), `PORT=${stranger.port}\n`);
+        const started = await run("start");
+        expect(started.err).not.toContain("herdr web ui is running");
+        expect(started.exitCode).toBe(1);
+        expect(started.err).toContain(`port ${stranger.port} on 127.0.0.1 cannot be opened`);
+      } finally { await stranger.stop(true); }
+    }
+  });
+
+  it("does not take another program answering ok on both health URLs for the app", async () => {
+    const stranger = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ ok: true }) });
+    try {
+      writeFileSync(join(configDir, ".env"), `PORT=${stranger.port}\n`);
+      const started = await run("start");
+      expect(started.out).not.toContain("already running");
+      expect(started.exitCode).toBe(1);
+      expect(started.err).toContain(`port ${stranger.port} on 127.0.0.1 cannot be opened`);
+    } finally { await stranger.stop(true); }
+  });
+
   it("follows a start that is coming up on another port instead of opening a second server", async () => {
     // the app answers on the port the other start fell back to
-    const ours = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ ok: true }) });
+    const ours = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json(APP_HEALTH) });
     // the kept port is held by someone else; its first health probe is the moment the other start writes its choice
     const stranger = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => { keep(ours.port!); return new Response(null, { status: 404 }); } });
     try {
@@ -129,6 +165,52 @@ describe("port", () => {
       expect(readFileSync(join(scratch, ".config", "herdr-web-ui", "plugin-port"), "utf8")).toBe(`${ours.port}\n`);
     } finally { await Promise.all([ours.stop(true), stranger.stop(true)]); }
   });
+
+  it("keeps the port of its own server that cannot reach herdr instead of moving the app (#428)", async () => {
+    // the app answers its bridge health, but the full one fails as it does while herdr is away
+    const ours = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => new URL(request.url).searchParams.get("scope") === "bridge"
+        ? Response.json(BRIDGE_HEALTH)
+        : Response.json({ error: { code: "connect_failed", message: "herdr socket unreachable" } }, { status: 502 }),
+    });
+    try {
+      keep(ours.port!);
+      mkdirSync(join(scratch, "state"), { recursive: true });
+      writeFileSync(join(scratch, "state", "server.pid"), `${process.pid}\n`); // the start that runs it, alive
+      // a start that moves anyway spawns no real server: there is no server/managed.ts under this root
+      const started = await run("start", { HERDR_PLUGIN_ROOT: scratch });
+      expect(started.out).not.toContain("instead");
+      expect(started.exitCode).toBe(1);
+      expect(started.err).toContain(`herdr web ui is running at http://127.0.0.1:${ours.port} (pid ${process.pid}) but cannot reach herdr: herdr socket unreachable`);
+      expect(readFileSync(join(scratch, ".config", "herdr-web-ui", "plugin-port"), "utf8")).toBe(`${ours.port}\n`);
+      expect(readFileSync(join(scratch, "state", "server.pid"), "utf8")).toBe(`${process.pid}\n`);
+    } finally { await ours.stop(true); }
+  }, 40_000);
+
+  it("reports its own server as running when herdr comes back while start asks why it cannot reach it", async () => {
+    // herdr is away through the wait and the check after the bridge probe, and back for the question after that
+    let afterBridge = -1;
+    const ours = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        if (new URL(request.url).searchParams.get("scope") === "bridge") { afterBridge = 0; return Response.json(BRIDGE_HEALTH); }
+        if (afterBridge >= 0 && afterBridge++ >= 1) return Response.json(APP_HEALTH);
+        return Response.json({ error: { code: "connect_failed", message: "herdr socket unreachable" } }, { status: 502 });
+      },
+    });
+    try {
+      keep(ours.port!);
+      mkdirSync(join(scratch, "state"), { recursive: true });
+      writeFileSync(join(scratch, "state", "server.pid"), `${process.pid}\n`);
+      const started = await run("start", { HERDR_PLUGIN_ROOT: scratch });
+      expect(started.err).not.toContain("cannot reach herdr");
+      expect(started.exitCode).toBe(0);
+      expect(started.out).toContain(`herdr web ui already running at http://127.0.0.1:${ours.port}`);
+    } finally { await ours.stop(true); }
+  }, 40_000);
 });
 
 describe("stop", () => {

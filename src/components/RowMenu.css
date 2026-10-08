@@ -5,6 +5,9 @@
   z-index: calc(var(--z-drawer) + 1);
   min-width: 208px;
   max-width: min(280px, calc(100vw - var(--space-4)));
+  /* the popover's max-height comes from the room the anchor leaves (RowMenu.tsx); `.menu` hides
+     its overflow, so the scroll box is here */
+  overflow-y: auto;
 }
 
 .row-menu .menu-item:focus-visible {

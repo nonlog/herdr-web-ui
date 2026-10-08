@@ -33,7 +33,7 @@ it("herdr loads the Phone setup entrypoint and keeps its QR and code visible in 
   };
   const app = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === "/api/health") return Response.json({ ok: true });
+    if (path === "/api/health") return Response.json({ ok: true, herdr: { version: "0.9.3", protocol: 1 }, auth: { required: false, authenticated: true } });
     if (path === "/api/access") return Response.json({ port: app.port, tailscale: { serving_url: "https://demo.example.ts.net" } });
     if (path === "/api/devices/pair/start") return Response.json({ code: "123456" });
     return new Response(null, { status: 404 });

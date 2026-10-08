@@ -283,6 +283,13 @@ export function forgetGjcState(): void {
   processTable = null;
 }
 
+/** What one pane's gjc chat left behind: its bound session and that file's title scan (a memo either way). */
+export function forgetGjcPane(paneId: string): void {
+  const bound = windowsBindings.get(paneId);
+  windowsBindings.delete(paneId);
+  if (bound !== undefined) titleScans.delete(bound.path);
+}
+
 /**
  * Where `file` sits inside `root`, as path segments, or null when it is not inside. The
  * platform's own rules decide: a Windows path comes with backslashes and a drive letter whose

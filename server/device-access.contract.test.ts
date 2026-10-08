@@ -154,7 +154,7 @@ it("watch credentials cannot mutate HTTP state, read credential files, or elevat
 
 it("revoking a paired device removes its persistent push subscription", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-device-push-"));
-  const server = createServer({ port: 0, stateDir: root, token: "test-push-owner", tailscaleOwner: null, machines: false });
+  const server = createServer({ port: 0, stateDir: root, token: "test-push-owner", tailscaleOwner: null, machines: false, pushLoopbackHttp: true });
   const fake = await startFakePushService();
   const base = `http://127.0.0.1:${server.port}`;
   const admin = { ...guard, authorization: "Bearer test-push-owner" };

@@ -251,31 +251,34 @@
 }
 
 .markdown p,
-.markdown h1,
-.markdown h2,
-.markdown h3,
-.markdown h4,
-.markdown h5,
-.markdown h6,
+.markdown-h1,
+.markdown-h2,
+.markdown-h3,
+.markdown-h4,
+.markdown-h5,
+.markdown-h6,
 .markdown blockquote,
 .markdown-list {
   margin: 0 0 var(--space-3);
 }
 
-.markdown h1 { font-size: var(--fs-xl); }
-.markdown h2 { font-size: var(--fs-lg); }
+/* Every agent heading is an h3 (Markdown.tsx: an agent's markdown must not shadow the app's own
+   h1/h2 outline), so the tag says nothing about the level and the level class is what these
+   rules key off — the same drawing as before the remap, level by level. */
+.markdown-h1 { font-size: var(--fs-xl); }
+.markdown-h2 { font-size: var(--fs-lg); }
 /* h3 is the prose size, and below it the size stops shrinking: the weight, then the dim colour,
    tell the levels apart */
-.markdown h3,
-.markdown h4,
-.markdown h5,
-.markdown h6 { font-size: var(--chat-fs-body); }
-.markdown h1,
-.markdown h2,
-.markdown h3,
-.markdown h4,
-.markdown h5 { color: inherit; font-weight: var(--fw-semibold); line-height: var(--lh-tight); }
-.markdown h6 { color: var(--text-dim); font-weight: var(--fw-semibold); line-height: var(--lh-tight); }
+.markdown-h3,
+.markdown-h4,
+.markdown-h5,
+.markdown-h6 { font-size: var(--chat-fs-body); }
+.markdown-h1,
+.markdown-h2,
+.markdown-h3,
+.markdown-h4,
+.markdown-h5 { color: inherit; font-weight: var(--fw-semibold); line-height: var(--lh-tight); }
+.markdown-h6 { color: var(--text-dim); font-weight: var(--fw-semibold); line-height: var(--lh-tight); }
 
 .markdown-list {
   padding-left: var(--space-5);
@@ -992,7 +995,7 @@
   width: var(--control-h);
   padding: 0;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 @media (pointer: coarse) {
@@ -1068,12 +1071,14 @@
   line-height: var(--lh-base);
 }
 
-/* and so do the parts of it that name a size of their own: a heading from h3 down is the size
-   of the summary's text, and code is the step below it */
-.chat-compact-text .markdown h3,
-.chat-compact-text .markdown h4,
-.chat-compact-text .markdown h5,
-.chat-compact-text .markdown h6 {
+/* and so do the parts of it that name a size of their own: every heading is the size of the
+   summary's text, whichever level the agent wrote it as, and code is the step below it */
+.chat-compact-text .markdown-h1,
+.chat-compact-text .markdown-h2,
+.chat-compact-text .markdown-h3,
+.chat-compact-text .markdown-h4,
+.chat-compact-text .markdown-h5,
+.chat-compact-text .markdown-h6 {
   font-size: inherit;
 }
 

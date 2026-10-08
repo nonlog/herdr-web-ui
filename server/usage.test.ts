@@ -124,6 +124,26 @@ describe("providers", () => {
     ]);
   });
 
+  it("reads Claude's other per-model weekly limits from `limits`, after the flat fields", async () => {
+    keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "k", expiresAt: NOW + HOUR, subscriptionType: "max" } }) });
+    replies.set("https://api.anthropic.com/api/oauth/usage", { body: {
+      five_hour: { utilization: 42, resets_at: "2026-09-29T14:00:00.000Z" },
+      seven_day_sonnet: { utilization: 5, resets_at: null },
+      limits: [
+        { kind: "session", group: "session", percent: 42, resets_at: "2026-09-29T14:00:00.000Z", scope: null },
+        { kind: "weekly_scoped", group: "weekly", percent: 30.04, resets_at: "2026-10-11T19:59:00Z", scope: { model: { display_name: "Fable" } } },
+        { kind: "weekly_scoped", group: "weekly", percent: 9, resets_at: null, scope: { model: { display_name: "Sonnet" } } },
+        { kind: "weekly_scoped", group: "weekly", percent: 12, resets_at: null, scope: { model: null } },
+      ],
+    } });
+    const [usage] = (await new UsageService(context("darwin"), only("claude")).report()).providers;
+    expect(usage!.windows).toEqual([
+      { kind: "session", scope: null, used_percent: 42, resets_at: "2026-09-29T14:00:00.000Z" },
+      { kind: "week", scope: "Sonnet", used_percent: 5, resets_at: null },
+      { kind: "week", scope: "Fable", used_percent: 30, resets_at: "2026-10-11T19:59:00.000Z" },
+    ]);
+  });
+
   it("reads the Claude credentials file when Claude Code refreshed it but not the keychain item", async () => {
     keychain.set("Claude Code-credentials|me", { status: "found", value: JSON.stringify({ claudeAiOauth: { accessToken: "stale", expiresAt: NOW - HOUR } }) });
     write(join(home, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "file", expiresAt: NOW + 8 * HOUR } });

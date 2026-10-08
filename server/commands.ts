@@ -5,7 +5,7 @@ import { join, relative, sep } from "node:path";
 import type { SlashCommand } from "../shared/protocol.ts";
 
 const BUILTINS: Record<string, readonly string[]> = {
-  claude: ["clear", "compact", "config", "cost", "help", "init", "memory", "model", "permissions", "review", "status", "doctor", "login", "logout", "pr-comments", "release-notes", "terminal-setup", "vim"],
+  claude: ["clear", "compact", "config", "cost", "effort", "goal", "help", "init", "memory", "model", "permissions", "review", "status", "doctor", "login", "logout", "pr-comments", "release-notes", "terminal-setup", "vim"],
   omp: ["help", "clear", "compact", "model", "new", "sessions", "exit"],
   codex: ["clear", "compact", "diff", "help", "model", "new", "quit", "review", "status"],
   // pi 0.87.1, as its own palette lists them, less /tree — the way omp's list curates its own
@@ -39,6 +39,8 @@ const DESCRIPTIONS: Record<string, string> = {
   "pr-comments": "Fetch pull request comments", "release-notes": "Show release notes", "terminal-setup": "Configure terminal integration",
   vim: "Toggle Vim mode", new: "Start a new session", sessions: "List sessions", exit: "Exit the agent",
   diff: "Show the current diff", quit: "Exit the agent",
+  goal: "[condition|clear] — Keep working until a condition is met",
+  effort: "Set effort level for model usage",
 };
 
 function description(markdown: string): string {

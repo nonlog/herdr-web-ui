@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 import { appFaces } from "./app-faces.ts";
 import panes from "../site/demo/fixtures/panes.json";
+import { buildDemoApp } from "./demo-build.ts";
 
 // The held messages' fold, on the unmodified app over the demo's fixture transport: the demo's
 // "web" pane has an approval card open, which is what folds the rows. All files and HTTP traffic
@@ -60,14 +61,7 @@ const writeQueue = (page: Page, pane: string, value: string): Promise<void> => p
 }, [`herdr-web-ui:queue:${pane}`, value] as const);
 
 try {
-  const build = Bun.spawnSync([join(repo, "node_modules/.bin/vite"), "build", "--base", "./", "--outDir", app, "--emptyOutDir", "--logLevel", "warn"], { cwd: repo });
-  assert.equal(build.exitCode, 0, new TextDecoder().decode(build.stderr));
-  const transport = await Bun.build({
-    entrypoints: [join(repo, "site/demo/transport.ts")], outdir: app,
-    naming: "demo-transport.js", target: "browser",
-    define: { __APP_VERSION__: JSON.stringify(JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).version) },
-  });
-  assert.ok(transport.success, transport.logs.map(String).join("\n"));
+  await buildDemoApp(app);
   const index = join(app, "index.html");
   const html = readFileSync(index, "utf8");
   assert.match(html, /<script type="module"/);

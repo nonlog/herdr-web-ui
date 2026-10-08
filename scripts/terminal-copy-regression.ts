@@ -31,8 +31,34 @@ setInterval(() => {}, 1000);
         releasing = true;
         setTimeout(() => { releasing = false; }, 0);
       }, { capture: true });
-      const state = { checking: false, writes: [] as boolean[], pending: 0 };
+      const state = { checking: false, writes: [] as boolean[], pending: 0, positions: { asked: 0, open: 0 } };
       (window as any).clipboardGesture = state;
+      // A press reads the pane's scroll position, and only a release after it has arrived asks
+      // herdr for the text and reserves the async write. Count the reads asked for and still
+      // open, so a drag can wait for its own instead of racing it or taking an earlier press's.
+      const fetchPage = window.fetch.bind(window);
+      (window as any).fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        if (method !== "GET" || !url.pathname.endsWith("/pane/scroll")) return fetchPage(input, init);
+        state.positions.asked++;
+        state.positions.open++;
+        let closed = false;
+        const close = (): void => {
+          if (!closed) state.positions.open--;
+          closed = true;
+        };
+        try {
+          const response = await fetchPage(input, init);
+          if (!response.ok) close();
+          const json = response.json.bind(response);
+          response.json = () => json().finally(close);
+          return response;
+        } catch (error) {
+          close();
+          throw error;
+        }
+      };
       for (const method of ["write", "writeText"] as const) {
         const original = navigator.clipboard[method].bind(navigator.clipboard);
         (navigator.clipboard as any)[method] = (value: any) => {
@@ -56,12 +82,21 @@ setInterval(() => {}, 1000);
     const first = page.locator(".pane-terminal .xterm-rows > div", { hasText: "DRAGCOPY-first-line" });
     await first.waitFor();
 
+    /** Presses and waits for the viewport position the press asked for: until then a release copies the visible text alone. */
+    const press = async (): Promise<void> => {
+      const before = await page.evaluate(() => (window as any).clipboardGesture.positions.asked as number);
+      await page.mouse.down();
+      await page.waitForFunction((count) => {
+        const { asked, open } = (window as any).clipboardGesture.positions;
+        return asked > count && open === 0;
+      }, before);
+    };
     /** Drags and returns what reached the pane between press and release (hover reports before it are herdr's). */
     const drag = async (from: { x: number; y: number }, to: { x: number; y: number }): Promise<string[]> => {
       await page.mouse.move(from.x, from.y);
       await page.waitForTimeout(100);
       const before = inputs.length;
-      await page.mouse.down();
+      await press();
       await page.mouse.move((from.x + to.x) / 2, (from.y + to.y) / 2, { steps: 4 });
       await page.mouse.move(to.x, to.y, { steps: 4 });
       await page.mouse.up();
@@ -259,8 +294,7 @@ setInterval(() => {}, 1000);
     // at the bottom of the history, a fast drag past the bottom edge still takes the last line
     await page.evaluate(() => navigator.clipboard.writeText(""));
     await page.mouse.move(screen.x + 1, screen.y + screen.height / 2);
-    await page.mouse.down();
-    await page.waitForTimeout(200);
+    await press();
     await page.mouse.move(screen.x + 1, screen.y + screen.height + 20, { steps: 1 });
     await page.mouse.up();
     assert.equal(lines(await filled()).at(-1), 299, "a drag past the bottom edge takes the last line");
@@ -273,8 +307,7 @@ setInterval(() => {}, 1000);
     await page.mouse.move(pressAt.x, pressAt.y);
     await page.waitForTimeout(100);
     const beforeWheel = inputs.length;
-    await page.mouse.down();
-    await page.waitForTimeout(200); // the viewport position arrives
+    await press();
     await page.mouse.move(screen.x + 1, pressAt.y + lineHeight * 3, { steps: 3 });
     for (let i = 0; i < 4; i++) {
       await page.mouse.wheel(0, -lineHeight * 10);
@@ -295,8 +328,7 @@ setInterval(() => {}, 1000);
     const edgeStartTop = await topRow();
     const bottomAt = { x: screen.x + 200, y: screen.y + screen.height - lineHeight * 1.5 };
     await page.mouse.move(bottomAt.x, bottomAt.y);
-    await page.mouse.down();
-    await page.waitForTimeout(200);
+    await press();
     await page.mouse.move(screen.x + 1, screen.y - 20, { steps: 5 });
     await page.waitForTimeout(600);
     await page.mouse.move(screen.x + 1, screen.y + lineHeight / 2, { steps: 2 });

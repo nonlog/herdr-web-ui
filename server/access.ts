@@ -10,7 +10,14 @@
  * Without a token, and until the first device is paired, anything that reaches the server is
  * let in as it always was, except through a proxy
  * on a PC whose Tailscale login is known: there, a request with no login header is a tagged
- * node (tailscale serve states no person for it), and a tailnet can hold many of those.
+ * node (tailscale serve states no person for it), and a tailnet can hold many of those. The
+ * exception is an install whose operator declared `tailscale serve` the only way in
+ * (HERDR_WEB_TAILSCALE_SERVE_ONLY) on a tailnet Tailscale says holds no tagged node and no second
+ * login: no stranger exists there to be mistaken for, so a serve-proxied request with no login is
+ * the owner, and the owner's own phone opens the address without a code. On that path, and only
+ * there, the request's Host must name this PC's own Tailscale name or address: `tailscale serve`
+ * passes the client's Host through, and under the declaration no other ingress exists to forge it
+ * through, while a rebinding page can only ever present its own origin.
  * A PC whose own node is tagged has no login to compare with: its proxied requests pair, the
  * owner's included, unless HERDR_WEB_TAILSCALE_OWNER names the login to let in.
  *
@@ -31,6 +38,8 @@ export interface AccessInput {
   funnel: boolean;
   /** Tailscale-User-Login: set by tailscale serve for a person's device, absent for tagged nodes */
   tailscaleLogin: string | null;
+  /** the request's Host header, as sent */
+  host: string | null;
   /** the shared token matched (cookie or bearer) */
   tokenMatched: boolean;
   /** the device the cookie belongs to */
@@ -39,6 +48,14 @@ export interface AccessInput {
   owner: string | null;
   /** this PC's Tailscale node is tagged: Tailscale runs here, and names no person as its owner */
   tagged: boolean;
+  /** the one login `tailscale status` proves owns every node of this tailnet, none tagged (`parseSoleTailnetLogin`), or null */
+  soleLogin: string | null;
+  /** this PC's MagicDNS name from `tailscale status`, without its trailing dot */
+  dnsName: string | null;
+  /** this PC's IPv4 address on the tailnet from `tailscale status` */
+  tailnetIp: string | null;
+  /** the operator declared `tailscale serve` as this install's only ingress (HERDR_WEB_TAILSCALE_SERVE_ONLY) */
+  serveOnly: boolean;
   tokenConfigured: boolean;
   /** a device has been paired at some point: the gate is closed to strangers (server/devices.ts) */
   gated: boolean;
@@ -56,17 +73,22 @@ export function isLoopbackAddress(address: string): boolean {
 const PROXY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "forwarded", "via", "tailscale-user-login"];
 
 /**
- * Is this Host header a name for this machine itself? It is read as a bare authority, a name
- * or a bracketed address with an optional port, and nothing else: handed to a URL parser,
- * `public.example@localhost` and `localhost/x@public.example` both came out as localhost.
+ * The name a Host header addresses, lower-cased, without its port or its DNS root dot. It is read
+ * as a bare authority, a name or a bracketed address with an optional port, and nothing else:
+ * handed to a URL parser, `public.example@localhost` and `localhost/x@public.example` both came
+ * out as localhost.
  */
-export function isLoopbackHost(host: string): boolean {
+export function hostName(host: string): string | null {
   const authority = /^(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::\d{1,5})?$/i.exec(host);
-  if (!authority) return false;
   // one trailing dot is the DNS root, the same name
-  const name = authority[1]!.toLowerCase().replace(/\.$/, "");
-  return name === "localhost" || name.endsWith(".localhost") || name === "[::1]"
-    || /^127(?:\.\d{1,3}){3}$/.test(name) || /^\[::ffff:127(?:\.\d{1,3}){3}\]$/.test(name);
+  return authority ? authority[1]!.toLowerCase().replace(/\.$/, "") : null;
+}
+
+/** Is this Host header a name for this machine itself? */
+export function isLoopbackHost(host: string): boolean {
+  const name = hostName(host);
+  return name !== null && (name === "localhost" || name.endsWith(".localhost") || name === "[::1]"
+    || /^127(?:\.\d{1,3}){3}$/.test(name) || /^\[::ffff:127(?:\.\d{1,3}){3}\]$/.test(name));
 }
 
 /**
@@ -80,6 +102,18 @@ export function cameThroughProxy(headers: Headers): boolean {
   return host === null || !isLoopbackHost(host);
 }
 
+/** Does the request's Host name this PC on the tailnet, by its MagicDNS name or its IPv4 address? */
+export function addressesNode(input: Pick<AccessInput, "host" | "dnsName" | "tailnetIp">): boolean {
+  const name = input.host === null ? null : hostName(input.host);
+  if (name === null) return false;
+  return (input.dnsName !== null && name === input.dnsName.toLowerCase()) || (input.tailnetIp !== null && name === input.tailnetIp);
+}
+
+/** The request shape of the owner's no-login grant: a serve-only install, a forwarded request from loopback with no login, not Funnel. */
+export function isServeOwnerRequest(input: Pick<AccessInput, "serveOnly" | "loopback" | "forwarded" | "funnel" | "tailscaleLogin">): boolean {
+  return input.serveOnly && input.loopback && input.forwarded && !input.funnel && input.tailscaleLogin === null;
+}
+
 export function decideAccess(input: AccessInput): Access {
   if (input.tokenMatched) return { level: "full", via: "token", role: "drive" };
   if (input.device !== null) return { level: "full", via: "device", role: input.device.role, device: input.device };
@@ -90,8 +124,16 @@ export function decideAccess(input: AccessInput): Access {
     if (input.tailscaleLogin.toLowerCase() === input.owner.toLowerCase()) return { level: "full", via: "tailscale", role: "drive", login: input.tailscaleLogin };
     return { level: "none", reason: "other_user" };
   }
+  // A proxied request with no login is a tagged node, which a tailnet can hold many of. Where the
+  // operator declared tailscale serve the only ingress, Tailscale says one login owns every node on
+  // this tailnet, none tagged, and the request is addressed to this PC, there is nobody for it to be
+  // but the owner. Funnel is the public internet, which that proof says nothing about.
+  const sole = input.soleLogin;
+  if (sole !== null && input.owner?.toLowerCase() === sole.toLowerCase() && isServeOwnerRequest(input) && addressesNode(input)) {
+    return { level: "full", via: "tailscale", role: "drive", login: sole };
+  }
   if (input.loopback && !input.forwarded) return { level: "full", via: "local", role: "drive" };
-  if (input.loopback && input.forwarded && (input.owner !== null || input.tagged)) return { level: "none", reason: "pairing_required" };
+  if (input.loopback && input.forwarded && (input.owner !== null || input.tagged || input.serveOnly)) return { level: "none", reason: "pairing_required" };
   // the public internet is never "open", whatever is paired
   if (!input.gated && !input.funnel) return { level: "full", via: "open", role: "drive" };
   return { level: "none", reason: "pairing_required" };

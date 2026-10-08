@@ -6,7 +6,6 @@
   --side-box: var(--control-h);
   --side-row: var(--control-h);
   --side-row-2: calc(var(--control-h) + var(--space-3));
-  --side-indent: calc(var(--icon-size) + var(--space-2));
   --side-action: var(--space-6);
   --side-hover: color-mix(in srgb, var(--bg-hover) 50%, var(--bg-panel));
   --side-selected: var(--bg-hover);
@@ -116,8 +115,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 }
 
 /* the trailing padding keeps the status cell, which the selector draws at the row's right edge */
-.workspace-header,
-.pane-row {
+.workspace-header {
   position: relative;
   display: flex;
   align-items: center;
@@ -144,10 +142,9 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 }
 
 /* One indent level. A linked worktree keeps herdr's repository workspace as its parent and sits
-   under that row's mark, clear of the folder column; a folder's workspaces move by the indent.
-   The fill stays as wide as the list and the row's content moves. */
+   under that row's mark, clear of the folder column. The fill stays as wide as the list and the
+   row's content moves. */
 .worktree-children .workspace-header { padding-left: var(--side-box); }
-.directory-contents .pane-row { padding-left: var(--side-indent); }
 
 /* The folder that leads a workspace row. It is the fold, and a button, when linked worktrees
    sit under the workspace: open while they show, closed while they are folded. */
@@ -176,22 +173,18 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 
 /* hover first, selection after it: one neutral fill at two strengths */
 @media (hover: hover) {
-  .workspace-header:hover,
-  .pane-item:hover > .pane-row,
-  .directory-header:hover {
+  .workspace-header:hover {
     background: var(--side-hover);
   }
 }
 
-.workspace-group.is-selected > .workspace-header,
-.pane-item.is-selected > .pane-row {
+.workspace-group.is-selected > .workspace-header {
   background: var(--side-selected);
 }
 
 /* keyboard focus draws the ring on the whole row and no fill */
 @supports selector(:has(*)) {
-  .workspace-header:has(> .workspace-select:focus-visible),
-  .pane-row:has(> .pane-select:focus-visible) {
+  .workspace-header:has(> .workspace-select:focus-visible) {
     outline: var(--ring);
     outline-offset: calc(var(--ring-offset) * -1);
   }
@@ -207,9 +200,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   min-width: 0;
 }
 
-.workspace-name,
-.sidebar-pane-title,
-.directory-name {
+.workspace-name {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -224,8 +215,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 
 /* Settings → Sidebar rows → Two lines: a row says what its pane is doing, and where under it,
    on the height and in the type of an agent's row. */
-.machine-workspaces.is-two-line .workspace-header,
-.machine-workspaces.is-two-line .pane-row { min-height: var(--side-row-2); }
+.machine-workspaces.is-two-line .workspace-header { min-height: var(--side-row-2); }
 
 .workspace-copy.is-two-line {
   flex-direction: column;
@@ -241,8 +231,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   min-width: 0;
 }
 
-.workspace-place,
-.pane-subtitle {
+.workspace-place {
   min-width: 0;
   overflow: hidden;
   color: var(--text-dim);
@@ -264,48 +253,12 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   white-space: nowrap;
 }
 
-.workspace-group.is-selected > .workspace-header .workspace-name,
-.pane-item.is-selected > .pane-row .sidebar-pane-title,
-.directory-group.is-selected > .directory-header .directory-name {
+.workspace-group.is-selected > .workspace-header .workspace-name {
   color: var(--text-strong);
 }
 
-.workspace-group.is-selected > .workspace-header .sidebar-mark,
-.pane-item.is-selected > .pane-row .sidebar-mark {
+.workspace-group.is-selected > .workspace-header .sidebar-mark {
   color: var(--text);
-}
-
-.directory-header {
-  position: relative;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: var(--side-row);
-  padding: 0 var(--side-box) 0 0;
-  border: 0;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.directory-header:focus-visible { outline-offset: calc(var(--ring-offset) * -1); }
-
-.directory-header > svg {
-  flex: 0 0 auto;
-  width: var(--icon-size);
-  height: var(--icon-size);
-  margin-inline: calc((var(--side-box) - var(--icon-size)) / 2);
-  color: var(--text-dim);
-}
-
-.directory-copy {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-width: 0;
 }
 
 .workspace.is-dragging {
@@ -359,8 +312,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 /* A row's menu button takes no room until the row is hovered, focused, selected or its menu is
    open; only the name gives way to it. It stays in the focus order (never display: none): the
    menu and the confirm dialog hand the focus back to it. */
-.workspace-actions,
-.pane-actions {
+.workspace-actions {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
@@ -371,46 +323,18 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 
 .workspace-header:focus-within > .workspace-actions,
 .workspace-group.is-selected > .workspace-header > .workspace-actions,
-.workspace-actions:has([aria-expanded="true"]),
-.pane-item:focus-within > .pane-row > .pane-actions,
-.pane-item.is-selected > .pane-row > .pane-actions,
-.pane-actions:has([aria-expanded="true"]) {
+.workspace-actions:has([aria-expanded="true"]) {
   width: auto;
   overflow: visible;
   opacity: 1;
 }
 
 @media (hover: hover) {
-  .workspace-header:hover > .workspace-actions,
-  .pane-item:hover > .pane-row > .pane-actions {
+  .workspace-header:hover > .workspace-actions {
     width: auto;
     overflow: visible;
     opacity: 1;
   }
-}
-
-.pane-copy {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  justify-content: center;
-  min-width: 0;
-  gap: var(--space-1);
-}
-
-.pane-primary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.pane-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* The status cell belongs to the selector (a click or a drag on it is the row's) and is drawn at
@@ -453,11 +377,16 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   animation: sidebar-working var(--dur-pulse) steps(8, end) infinite;
 }
 
-/* Weight follows urgency. Waiting for an answer is the one filled glyph; finished and not yet
-   looked at is a dot, as an unread mark is; running moves, so it needs no color. Waiting and
-   done keep the colors they have on every other surface. */
+/* A question mark asks for an answer; a dot, as an unread mark is, has finished and was not
+   looked at; running moves, so it needs no color. Waiting and done keep the colors they have
+   on every other surface. */
 .sidebar-status[data-status="working"] { color: var(--text-dim); }
-.sidebar-status[data-status="blocked"] svg { fill: currentColor; }
+
+.sidebar-status-mark {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  line-height: 1;
+}
 
 .sidebar-status-dot {
   width: var(--space-2);
@@ -568,8 +497,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   }
 
   /* Row menus stay visible on touch. */
-  .workspace-actions,
-  .pane-actions {
+  .workspace-actions {
     width: auto;
     overflow: visible;
     opacity: 1;
@@ -578,8 +506,7 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 
 @media (prefers-reduced-motion: reduce) {
   .workspace,
-  .workspace-header,
-  .pane-row {
+  .workspace-header {
     transition: none;
   }
 

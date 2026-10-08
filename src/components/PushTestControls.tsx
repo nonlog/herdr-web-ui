@@ -26,23 +26,27 @@ export function PushTestControls({ onEnable }: { onEnable: () => Promise<boolean
   };
 
   return (
-    <>
+    <div className="settings-item">
       <div className="settings-row">
-        <div><span className="settings-label">{t("Test notification")}</span><span className="settings-description">{t("Check whether this device can receive push alerts")}</span></div>
+        <div className="settings-row-text">
+          <span className="settings-label">{t("Test notification")}</span>
+          <span className="settings-description">{t("Check whether this device can receive push alerts")}</span>
+          {/* always in the document, empty until there is something to say: a live region */}
+          <span className="settings-hint" role="status">
+            {!supported || result === "unsupported" ? t("Push alerts need HTTPS or localhost, and on iPhone the home-screen app.")
+              : denied ? t("Allow notifications in your browser settings, then try again.")
+              : result === "sent" ? t("Test notification sent. Check this device for the alert.")
+              : result === "missing" ? t("This device's push subscription is missing. Turn alerts on again.")
+              : result === "permission" ? t("Allow notifications to test alerts on this device.")
+              : result === "failed" ? t("Could not send the test notification. Try again.")
+              : !settings.alertsOn ? t("Alerts off") : null}
+          </span>
+        </div>
         <button type="button" className="btn" disabled={busy || !settings.alertsOn || !supported || denied} onClick={() => void send(false)}>{busy ? t("Sending…") : t("Send test")}</button>
       </div>
-      <p className="settings-hint" role="status">
-        {!supported || result === "unsupported" ? t("Push alerts need HTTPS or localhost, and on iPhone the home-screen app.")
-          : denied ? t("Allow notifications in your browser settings, then try again.")
-          : result === "sent" ? t("Test notification sent. Check this device for the alert.")
-          : result === "missing" ? t("This device's push subscription is missing. Turn alerts on again.")
-          : result === "permission" ? t("Allow notifications to test alerts on this device.")
-          : result === "failed" ? t("Could not send the test notification. Try again.")
-          : !settings.alertsOn ? t("Alerts off") : null}
-      </p>
-      {enable && supported && !denied && <div className="phone-actions">
+      {enable && supported && !denied && <div className="settings-actions">
         <button type="button" className="btn" disabled={busy} onClick={() => void send(true)}>{t("Turn alerts on again")}</button>
       </div>}
-    </>
+    </div>
   );
 }

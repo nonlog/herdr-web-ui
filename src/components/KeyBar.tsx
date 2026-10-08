@@ -3,21 +3,19 @@ import { Keyboard } from "lucide-react";
 
 import "./KeyBar.css";
 
-import type { KeyBarExtra, KeyBarKey } from "../lib/keys.ts";
+import type { KeyBarExtra, KeyBarKey, StickyModifiers } from "../lib/keys.ts";
+import { keyBarItemId, keyBarItemLabel, type KeyBarItem, type KeyBarKeyItem } from "../lib/keyBar.ts";
 import { useT } from "../lib/i18n.ts";
 
 export type { KeyBarKey };
 
 export interface KeyBarProps {
   disabled?: boolean;
-  /** Fires for every key except Control, which toggles the one-shot modifier instead. */
-  onKey: (key: KeyBarKey) => void;
-  ctrlArmed: boolean;
-  onToggleCtrl: () => void;
-  altArmed: boolean;
-  onToggleAlt: () => void;
-  /** the optional keys chosen in Settings, drawn in their fixed places */
-  extras: readonly KeyBarExtra[];
+  /** Modifier buttons toggle; other keys go to the terminal. */
+  onKey: (item: KeyBarKeyItem) => void;
+  modifiers: StickyModifiers;
+  onToggleModifier: (modifier: keyof StickyModifiers) => void;
+  items: readonly KeyBarItem[];
   /** on a touch screen: whether the keyboard types straight into the terminal (else the input line) */
   directTyping?: boolean;
   onToggleDirect?: () => void;
@@ -83,12 +81,8 @@ export const ARROWS: ReadonlyArray<{ key: KeyBarKey; label: string; direction: D
   { key: "ArrowRight", label: "Right", direction: "right" },
 ];
 
-/** Settings' name for each optional key: its cap, and a spoken name where the cap does not read as one. */
-export const EXTRA_KEY_CAPS: Record<KeyBarExtra, { cap: string; label?: string }> = {
-  alt: { cap: "Alt" },
-  "shift-tab": { cap: "⇧Tab", label: "Shift Tab" },
-  "home-end": { cap: "Home End" },
-  "page-up-down": { cap: "PgUp PgDn", label: "Page up and Page down" },
+/** Legacy single-key aliases: their caps and spoken names where a cap does not read as one. */
+export const EXTRA_KEY_CAPS: Partial<Record<KeyBarExtra, { cap: string; label?: string }>> = {
   "ctrl-d": { cap: "^D", label: "Control D" },
   "ctrl-z": { cap: "^Z", label: "Control Z" },
   pipe: { cap: "|" },
@@ -101,9 +95,8 @@ export const EXTRA_KEY_CAPS: Record<KeyBarExtra, { cap: string; label?: string }
  * for touch, a hardware keyboard already has all of them. Hence role="group", not
  * toolbar: a toolbar promises arrow-key navigation between items, which these skip.
  */
-export function KeyBar({ onKey, ctrlArmed, onToggleCtrl, altArmed, onToggleAlt, extras, directTyping, onToggleDirect, disabled }: KeyBarProps) {
+export function KeyBar({ onKey, modifiers, onToggleModifier, items, directTyping, onToggleDirect, disabled }: KeyBarProps) {
   const t = useT();
-  const has = (extra: KeyBarExtra): boolean => extras.includes(extra);
   return (
     <div className="key-bar" role="group" aria-label={t("Terminal keys")}>
       {/* first: on a narrow cover screen the row scrolls, and the mode toggle must not be the key cut off */}
@@ -112,50 +105,25 @@ export function KeyBar({ onKey, ctrlArmed, onToggleCtrl, altArmed, onToggleAlt, 
           <Keyboard aria-hidden="true" />
         </Key>
       )}
-      <Key disabled={disabled} dataKey="Escape" onPress={() => onKey("Escape")}>
-        Esc
-      </Key>
-      <Key disabled={disabled} dataKey="Tab" onPress={() => onKey("Tab")}>
-        Tab
-      </Key>
-      {has("shift-tab") && (
-        <Key disabled={disabled} dataKey="BackTab" label={t("Shift Tab")} onPress={() => onKey("BackTab")}>
-          ⇧Tab
-        </Key>
-      )}
-      <Key disabled={disabled} dataKey="Control" pressed={ctrlArmed} onPress={onToggleCtrl}>
-        Ctrl
-      </Key>
-      {has("alt") && (
-        <Key disabled={disabled} dataKey="Alt" pressed={altArmed} onPress={onToggleAlt}>
-          Alt
-        </Key>
-      )}
-      {ARROWS.map((arrow) => (
-        <Key disabled={disabled} key={arrow.key} dataKey={arrow.key} label={t(arrow.label)} onPress={() => onKey(arrow.key)}>
-          <Chevron direction={arrow.direction} />
-        </Key>
-      ))}
-      {has("home-end") && (
-        <>
-          <Key disabled={disabled} dataKey="Home" onPress={() => onKey("Home")}>Home</Key>
-          <Key disabled={disabled} dataKey="End" onPress={() => onKey("End")}>End</Key>
-        </>
-      )}
-      {has("page-up-down") && (
-        <>
-          <Key disabled={disabled} dataKey="PageUp" label={t("Page up")} onPress={() => onKey("PageUp")}>PgUp</Key>
-          <Key disabled={disabled} dataKey="PageDown" label={t("Page down")} onPress={() => onKey("PageDown")}>PgDn</Key>
-        </>
-      )}
-      <Key disabled={disabled} dataKey="ctrl-c" label={t("Control C")} onPress={() => onKey("ctrl-c")}>
-        ^C
-      </Key>
-      {has("ctrl-d") && <Key disabled={disabled} dataKey="ctrl-d" label={t("Control D")} onPress={() => onKey("ctrl-d")}>^D</Key>}
-      {has("ctrl-z") && <Key disabled={disabled} dataKey="ctrl-z" label={t("Control Z")} onPress={() => onKey("ctrl-z")}>^Z</Key>}
-      {has("pipe") && <Key disabled={disabled} dataKey="pipe" onPress={() => onKey("pipe")}>|</Key>}
-      {has("tilde") && <Key disabled={disabled} dataKey="tilde" onPress={() => onKey("tilde")}>~</Key>}
-      {has("slash") && <Key disabled={disabled} dataKey="slash" onPress={() => onKey("slash")}>/</Key>}
+      {items.map((item) => {
+        if (item.type === "modifier") {
+          const cap = { ctrl: "Ctrl", alt: "Alt", shift: "Shift" }[item.modifier];
+          const dataKey = { ctrl: "Control", alt: "Alt", shift: "Shift" }[item.modifier];
+          return <Key key={keyBarItemId(item)} disabled={disabled} dataKey={dataKey} pressed={modifiers[item.modifier]} onPress={() => onToggleModifier(item.modifier)}>{cap}</Key>;
+        }
+        const arrow = ARROWS.find((candidate) => candidate.key === item.key);
+        const extra = EXTRA_KEY_CAPS[item.key as KeyBarExtra];
+        const label = item.modifiers !== undefined ? t("Press {key}", { key: keyBarItemLabel(item) })
+          : arrow ? t(arrow.label)
+          : item.key === "ctrl-c" ? t("Control C")
+          : item.key === "BackTab" ? t("Shift Tab")
+          : item.key === "PageUp" ? t("Page up")
+          : item.key === "PageDown" ? t("Page down")
+          : extra?.label ? t(extra.label) : undefined;
+        return <Key key={keyBarItemId(item)} disabled={disabled} dataKey={item.modifiers === undefined ? item.key : keyBarItemId(item)} label={label} onPress={() => onKey(item)}>
+          {arrow && item.modifiers === undefined ? <Chevron direction={arrow.direction} /> : keyBarItemLabel(item)}
+        </Key>;
+      })}
     </div>
   );
 }

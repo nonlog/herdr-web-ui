@@ -188,6 +188,35 @@
   color: var(--text);
 }
 
+/* The only native <dialog> in the app, so it has no .modal-scrim ancestor and the phone
+   bottom-sheet rules in styles.css never reach it: it stays a centred card on a phone. A dialog
+   opened with showModal() lives in the top layer and is centred by the UA's `margin: auto`,
+   clamped by its `max-width`/`max-height` and stretched by `inset: 0`, so the sheet form needs
+   all three reset, not just a border radius. */
+@media (max-width: 640px) {
+  .machine-dialog {
+    width: 100%;
+    max-width: none;
+    max-height: 92%;
+    margin: auto auto 0;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+}
+
+/* the phone's keyboard is up (lib/viewport.ts): as the sheet does, this one ends where the
+   keyboard begins instead of sitting behind it — the same reason styles.css drops the sheet's
+   bottom padding here */
+@media (max-width: 640px) {
+  [data-keyboard] .machine-dialog {
+    inset-block-start: 0;
+    inset-block-end: auto;
+    height: var(--app-height, 100%);
+    margin-block: auto 0;
+    padding-bottom: 0;
+  }
+}
+
 .machine-dialog::backdrop { background: var(--scrim); }
 
 .machine-dialog .modal-title {
@@ -345,7 +374,7 @@
   position: relative;
   height: 6px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--bg);
 }
 

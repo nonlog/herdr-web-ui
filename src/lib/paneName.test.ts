@@ -48,10 +48,10 @@ it("draws a two-line row as the pane's title over its place, without repeating a
   // a pane the user named keeps its name, also when it is the folder's
   expect(taskRowLines({ paneTitle: "api", labelled: true, folder: "api", workspace: "checkout-api" }))
     .toEqual({ title: "api", place: "checkout-api" });
-  // a linked worktree is placed by its branch, then its own workspace name
-  expect(taskRowLines({ paneTitle: "session-list", labelled: false, folder: "fix-session-list", workspace: "fix/session-list", alias: "Hotfix" }))
-    .toEqual({ title: "session-list", place: "fix/session-list · Hotfix · fix-session-list" });
+  // a linked worktree is placed by its workspace name, then its branch where the name does not say it
+  expect(taskRowLines({ paneTitle: "session-list", labelled: false, folder: "fix-session-list", workspace: "Hotfix", alias: "fix/session-list" }))
+    .toEqual({ title: "session-list", place: "Hotfix · fix/session-list · fix-session-list" });
   // a pane named as its worktree's workspace does not have that name said again under it
-  expect(taskRowLines({ paneTitle: "Hotfix", labelled: true, folder: "fix-payment", workspace: "fix/payment", alias: "Hotfix" }))
+  expect(taskRowLines({ paneTitle: "Hotfix", labelled: true, folder: "fix-payment", workspace: "Hotfix", alias: "fix/payment" }))
     .toEqual({ title: "Hotfix", place: "fix/payment · fix-payment" });
 });

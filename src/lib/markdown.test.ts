@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { loadKatex, Markdown } from "../components/Markdown.tsx";
 import { SettingsProvider } from "./settings.ts";
-import { FOLD_CODE_AFTER_LINES, FOLDED_CODE_LINES, foldCode, parseInline, parseMarkdown, safeMarkdownHref, type InlineNode, type ListBlock } from "./markdown.ts";
+import { FOLD_CODE_AFTER_LINES, FOLDED_CODE_LINES, foldCode, inlineMarks, isTableSeparator, mathNestsTooDeep, parseInline, parseMarkdown, safeMarkdownHref, trimUrl, type InlineNode, type ListBlock } from "./markdown.ts";
 
 describe("parseMarkdown", () => {
   it("renders inline and display math while leaving fenced code untouched", async () => {
@@ -16,6 +16,19 @@ describe("parseMarkdown", () => {
       expect(html).toContain("katex-display");
       expect(html).toContain("katex-html");
       expect(html).not.toContain("katex-error");
+    } finally {
+      if (languages) Object.defineProperty(navigator, "languages", languages);
+      else Reflect.deleteProperty(navigator, "languages");
+    }
+  });
+  it("draws Korean, Japanese or Chinese text written straight into an expression", async () => {
+    await loadKatex();
+    const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+    try {
+      const html = renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(Markdown, { children: "\\(가 + 1\\) and \\(日本 = x\\)" }) }));
+      expect(html.match(/class="katex"/g)?.length).toBe(2);
+      expect(html).not.toContain("\\(가");
     } finally {
       if (languages) Object.defineProperty(navigator, "languages", languages);
       else Reflect.deleteProperty(navigator, "languages");
@@ -218,6 +231,165 @@ describe("foldCode", () => {
   });
 });
 
+describe("text no one wrote by hand", () => {
+  // what an agent prints, or a changelog holds, is not always prose: the page parses it while it
+  // draws, so a line that takes seconds freezes the tab, and one that nests without end crashes it
+  const within = (milliseconds: number, run: () => void): void => {
+    const start = performance.now();
+    run();
+    expect(performance.now() - start).toBeLessThan(milliseconds);
+  };
+  /** every string of up to `length` of the `parts`, in order */
+  const everyLine = (parts: string[], length: number): string[] => {
+    let lines = [""];
+    const all = [""];
+    for (let step = 0; step < length; step += 1) {
+      lines = lines.flatMap((line) => parts.map((part) => line + part));
+      all.push(...lines);
+    }
+    return all;
+  };
+
+  it("cuts a URL's closing parentheses as it did, counting them once", () => {
+    // the rule as it was written first: both counts taken again at every closing parenthesis
+    const asBefore = (url: string): string => {
+      let end = url.length;
+      for (;;) {
+        const last = url[end - 1];
+        if (last !== undefined && ".,:;!?'\"*_~".includes(last)) { end -= 1; continue; }
+        if (last === ")") {
+          const text = url.slice(0, end);
+          if (text.split(")").length > text.split("(").length) { end -= 1; continue; }
+        }
+        break;
+      }
+      return url.slice(0, end);
+    };
+    const urls = everyLine(["a", "(", ")", ".", "_"], 6).map((tail) => `https://x.dev/${tail}`);
+    expect(urls.length).toBeGreaterThan(19_000);
+    for (const url of urls) expect(trimUrl(url)).toBe(asBefore(url));
+    within(1000, () => expect(trimUrl(`https://x.dev/${")".repeat(48_000)}`)).toBe("https://x.dev/"));
+    within(1000, () => parseMarkdown(`https://x.dev/${")".repeat(48_000)}`));
+  });
+
+  it("knows a table's separator line as it did, cell by cell", () => {
+    // the one pattern it was: it shares a run of spaces between its parts in every way there is
+    const asBefore = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+    const lines = everyLine([" ", "|", "---", "--", ":", "x"], 6);
+    expect(lines.length).toBeGreaterThan(55_000);
+    let separators = 0;
+    for (const line of lines) {
+      expect(`${line}: ${isTableSeparator(line)}`).toBe(`${line}: ${asBefore.test(line)}`);
+      if (isTableSeparator(line)) separators += 1;
+    }
+    expect(separators).toBeGreaterThan(100);
+    for (const line of ["|---|---|", "---|---", " | :--- | ---: | :---: | ", "\t|---\t|\t---|\t"]) expect(isTableSeparator(line)).toBe(true);
+    for (const line of ["", "---", "|---|", "||---|---", "|---|---||", "|--|--|", "|---|-x-|"]) expect(isTableSeparator(line)).toBe(false);
+    within(1000, () => parseMarkdown(`a|b\n${" ".repeat(96_000)}x`));
+    within(1000, () => parseMarkdown(`a|b\n---|---${" ".repeat(96_000)}x`));
+  });
+
+  it("looks once for the end of a formula that never closes", () => {
+    within(1000, () => {
+      const blocks = parseMarkdown("\\[\n".repeat(32_000));
+      expect(blocks).toHaveLength(32_000);
+      expect(blocks.every((block) => block.type === "paragraph")).toBe(true);
+    });
+    // the search ends at a fence: what opens after it is looked for again
+    expect(parseMarkdown("\\[ a\n\\[ b\n```\ncode\n```\n\\[ c \\]\n\\[ d").map((block) => block.type))
+      .toEqual(["paragraph", "paragraph", "code", "math", "paragraph"]);
+  });
+
+  it("looks once for what closes a bracket, an inline formula or an underscore", () => {
+    // a megabyte of each took from one minute to four: every one was searched from to the line's end
+    for (const part of ["[a", "\\(", "_a ", "__a "]) {
+      const line = part.repeat(Math.ceil(1_000_000 / part.length));
+      within(1000, () => expect(parseInline(line)).toEqual([{ type: "text", value: line }]));
+    }
+    // a label closed with an address that is not, and a `__` that only a `_` closes
+    within(1000, () => expect(parseInline("[a](b".repeat(200_000))).toHaveLength(1));
+    within(1000, () => expect(parseInline("__a b_ ".repeat(150_000))).toHaveLength(300_000));
+    // the marks are the ones it found as one pattern, searching the whole line
+    const asBefore = /(`[^`\n]+`|\\\(.+?\\\)|\[[^\]\n]+\]\([^\s)]+\)|<https?:\/\/[^\s<>]+>|file:\/\/\/[!#-;=?-_a-~]+|https?:\/\/[!-;=?-~]+|(?<![\w.@/-])www\.[!-;=?-~]+|\*\*[^*\n]+\*\*|(?<![\p{L}\p{N}\p{M}_])__(?=\S)[^\n]*?\S__(?![\p{L}\p{N}\p{M}_])|~~[^~\n]+~~|(?<!\*)\*[^*\n]+\*(?!\*)|(?<![\p{L}\p{N}\p{M}_])_(?=\S)[^\n]*?\S_(?![\p{L}\p{N}\p{M}_]))/gu;
+    const found = (marks: Iterable<RegExpMatchArray>): string => [...marks].map((mark) => `${mark.index}:${mark[0]}`).join("\n");
+    const lines = everyLine(["_", "a", " ", "[", "](", ")", "\\(", "\\)", "\n"], 5);
+    expect(lines.length).toBeGreaterThan(66_000);
+    let marked = 0;
+    for (const line of lines) {
+      const marks = found(inlineMarks(line));
+      expect(`${line}: ${marks}`).toBe(`${line}: ${found(line.matchAll(asBefore))}`);
+      if (marks !== "") marked += 1;
+    }
+    expect(marked).toBeGreaterThan(1000);
+  });
+
+  it("adds an item's lines to it without copying the item at every line", () => {
+    within(1000, () => {
+      const [list] = parseMarkdown(`- a\n${"  x\n".repeat(48_000)}`) as [ListBlock];
+      expect(list.items).toHaveLength(1);
+      expect(list.items[0]?.content).toHaveLength(96_001);
+    });
+  });
+
+  it("stops nesting emphasis after a few levels, and keeps what is inside as text", () => {
+    const depth = (nodes: InlineNode[]): number => {
+      let levels = 0;
+      for (let level = nodes; level.length > 0; levels += 1) {
+        level = level.flatMap((node) => "children" in node ? node.children : []);
+      }
+      return levels;
+    };
+    within(1000, () => {
+      const nodes = parseInline(`${"_".repeat(48_000)} x`);
+      expect(depth(nodes)).toBeLessThan(20);
+      // nothing is lost: what the levels left over hold is still there, as text
+      expect(JSON.stringify(nodes)).toContain("_".repeat(40_000));
+    });
+    // what people write nests as before
+    expect(parseInline("**a _b ~~c~~_**")).toEqual([{ type: "strong", children: [{ type: "text", value: "a " },
+      { type: "em", children: [{ type: "text", value: "b " }, { type: "del", children: [{ type: "text", value: "c" }] }] }] }]);
+    expect(depth(parseInline(`${"__".repeat(8)}a${"__".repeat(8)}`))).toBe(9);
+    // a link around it is not a level: sixteen of emphasis read whole inside a label too
+    const sixteen = `${"__".repeat(16)}a\`x\`b${"__".repeat(16)}`;
+    expect(JSON.stringify(parseInline(sixteen))).toContain('{"type":"code","value":"x"}');
+    expect(JSON.stringify(parseInline(`[${sixteen}](https://x.dev)`))).toContain('{"type":"code","value":"x"}');
+  });
+
+  it("reads a heading or an item whose text holds a line separator, without trying every split of its spaces", () => {
+    // U+2028 is not a line here (only \n is), and `.` stops at it unless told otherwise
+    within(1000, () => {
+      const [heading] = parseMarkdown(`# ${" ".repeat(48_000)}a\u2028b`);
+      expect(heading).toEqual({ type: "heading", level: 1, content: [{ type: "text", value: "a\u2028b" }] });
+    });
+    within(1000, () => {
+      const [list] = parseMarkdown(`- ${" ".repeat(48_000)}a\u2028b`) as [ListBlock];
+      expect(list.items).toEqual([{ content: [{ type: "text", value: "a\u2028b" }] }]);
+    });
+    within(1000, () => parseMarkdown(`1. ${" ".repeat(48_000)}\u2029`));
+  });
+
+  it("shows a formula nested beyond reason as its source, without asking KaTeX", async () => {
+    for (const formula of ["x", "\\frac{1}{2}", "{".repeat(100) + "}".repeat(100), "\\{".repeat(500), "{}".repeat(5000)]) expect(mathNestsTooDeep(formula)).toBe(false);
+    expect(mathNestsTooDeep("{".repeat(101))).toBe(true);
+    const fractions = `${"\\frac{1}{".repeat(4000)}x${"}".repeat(4000)}`;
+    expect(mathNestsTooDeep(fractions)).toBe(true);
+    await loadKatex();
+    const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
+    Object.defineProperty(navigator, "languages", { configurable: true, value: ["en"] });
+    try {
+      within(1000, () => {
+        const html = renderToStaticMarkup(createElement(SettingsProvider, { children: createElement(Markdown, { children: `\\[${fractions}\\]\n\n\\(\\frac{1}{2}\\)` }) }));
+        expect(html).toContain("\\frac{1}{\\frac{1}{");
+        // the formula beside it is still drawn
+        expect(html).toContain("katex-html");
+      });
+    } finally {
+      if (languages) Object.defineProperty(navigator, "languages", languages);
+      else Reflect.deleteProperty(navigator, "languages");
+    }
+  });
+});
+
 describe("numbered lists as agents write them", () => {
   const render = (source: string): string => {
     const languages = Object.getOwnPropertyDescriptor(navigator, "languages");
@@ -313,5 +485,20 @@ describe("numbered lists as agents write them", () => {
     expect(html).not.toContain("<script");
     expect(html).not.toContain("<img");
     expect(html).not.toContain("<b>");
+  });
+});
+
+describe("quotes nested beyond reason", () => {
+  it("parses a line of thousands of quote marks without overflowing the stack", () => {
+    const blocks = parseMarkdown(`${">".repeat(30_000)} deep\n\nafter`);
+    expect(blocks.map((block) => block.type)).toEqual(["blockquote", "paragraph"]);
+    let depth = 0;
+    for (let block = blocks[0]; block?.type === "blockquote"; block = block.blocks[0]) depth += 1;
+    expect(depth).toBe(33);
+  });
+
+  it("still nests the quotes people write", () => {
+    const [outer] = parseMarkdown("> one\n> > two");
+    expect(outer?.type === "blockquote" && outer.blocks.map((block) => block.type)).toEqual(["paragraph", "blockquote"]);
   });
 });

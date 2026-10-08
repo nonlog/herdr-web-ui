@@ -48,7 +48,7 @@ try {
   await herdrRpc("pane.send_text", { pane_id: paneId, text: `printf '%s\\n' '${answer}'\n` });
   server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "push"), codexHome });
   browser = await chromium.launch({ executablePath: process.env["CHROME_PATH"] ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
   // a pane opens its terminal the first time; this QA is about the chat lens
   await page.addInitScript((id) => localStorage.setItem(`herdr-web-ui:view:${id}`, "chat"), paneId);
   const errors: string[] = [];
@@ -76,13 +76,11 @@ try {
       && attach.right <= status.left && status.right <= action.left && status.top < action.bottom && status.bottom > action.top;
   }), true, "the message on top, one row of controls under it, one round button");
   assert.equal(await page.locator(".composer-status").evaluate((node) => {
-    // DONE is the one state word the row draws; READY, RUN and INPUT are read, not drawn
+    // Every pane status word is read by assistive tech, not drawn in the chat controls.
     const word = node.querySelector("strong");
-    const hidden = [node.querySelector(".composer-agent-label"), node.querySelector(".composer-reasoning-full")];
-    if (node.getAttribute("data-status") !== "done") hidden.push(word);
-    else if (word === null || word.getBoundingClientRect().width <= 1) return false;
+    const hidden = [node.querySelector(".composer-agent-label"), word, node.querySelector(".composer-reasoning-full")];
     return hidden.every((item) => item !== null && item.textContent !== "" && item.getBoundingClientRect().width <= 1);
-  }), true, "the agent's name, the state word (unless DONE) and the reasoning sentence are read, not drawn");
+  }), true, "the agent's name, every pane status word and the reasoning sentence are read, not drawn");
   const work = log.locator(".work-block-head");
   const report = (state: "working" | "idle") => herdrRpc("pane.report_agent", { pane_id: paneId, source: "manual", agent: "codex", state, agent_session_path: rollout });
   const head = (expanded: boolean, title: string) => log.locator(`.work-block-head[aria-expanded="${expanded}"]`).filter({ hasText: title });

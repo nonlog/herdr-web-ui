@@ -1,23 +1,35 @@
-import { unmanagedUpdateStatus, type UpdateCommand, type UpdateStatus } from "../shared/update.ts";
+import { noInstalledNotes, noUpdateNotes, readInstalledNotes, readUpdateNotes, unmanagedUpdateStatus, type InstalledNotes, type UpdateCommand, type UpdateNotes, type UpdateStatus } from "../shared/update.ts";
 import { jsonResponse } from "./http.ts";
 
 export interface UpdateService {
   status(): UpdateStatus;
+  /** what the available update brings, from the supervisor's last check */
+  notes(): UpdateNotes;
+  /** what the last update brought, from the supervisor that runs it */
+  installed(): InstalledNotes;
   request(command: UpdateCommand): void;
 }
 
 /** Only the managed entrypoint connects IPC; importing createServer in tests does not. */
 export function connectUpdater(): UpdateService {
   let status = unmanagedUpdateStatus();
+  let notes = noUpdateNotes();
+  let installed = noInstalledNotes();
   if (process.send && process.env["HERDR_WEB_MANAGED"] === "1") {
     process.on("message", (message: unknown) => {
-      const value = message as { type?: string; status?: UpdateStatus };
-      if (value?.type === "update-status" && value.status) status = value.status;
+      const value = message as { type?: string; status?: UpdateStatus; notes?: unknown; installed?: unknown };
+      if (value?.type !== "update-status" || !value.status) return;
+      status = value.status;
+      // a supervisor older than the notes sends none: the one being replaced, or a fallback
+      notes = readUpdateNotes(value.notes);
+      installed = readInstalledNotes(value.installed);
     });
     process.send({ type: "update-status-request" });
   }
   return {
     status: () => status,
+    notes: () => notes,
+    installed: () => installed,
     request: (command) => process.send?.({ type: "update-command", command }),
   };
 }
@@ -45,8 +57,10 @@ export function handleUpdateRequest(request: Request, pathname: string, service?
   };
   const fail = (code: string, message: string, http: number) => reply({ error: { code, message } }, http);
   if (pathname === "/api/updates" && request.method === "GET") return reply(status);
+  if (pathname === "/api/updates/notes" && request.method === "GET") return reply(service?.notes() ?? noUpdateNotes());
+  if (pathname === "/api/updates/installed" && request.method === "GET") return reply(service?.installed() ?? noInstalledNotes());
   if (request.method !== "POST" || (pathname !== "/api/updates/check" && pathname !== "/api/updates/install")) {
-    return fail("method_not_allowed", "Use GET /api/updates or POST /api/updates/check or /install", 405);
+    return fail("method_not_allowed", "Use GET /api/updates, /api/updates/notes or /api/updates/installed, or POST /api/updates/check or /install", 405);
   }
   if (!updateRequestAllowed(request)) return fail("invalid_update_request", "Use the update controls from this app.", 403);
   if (!service || !status.managed) return fail("updates_unmanaged", status.blocked_reason ?? "Updates unavailable", 409);

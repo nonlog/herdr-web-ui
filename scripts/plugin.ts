@@ -133,11 +133,44 @@ async function health(): Promise<boolean> {
   try {
     const response = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(1500) });
     if (!response.ok) return false;
-    // the port may hold another program's 200 (a kept port that went stale): only the app's answer counts
-    const body = await response.json() as { ok?: unknown };
-    return body.ok === true;
+    // the port may hold another program's 200 (a kept port that went stale): only the app's answer
+    // counts, in the shape every release has sent (server/index.ts)
+    const body = await response.json() as { ok?: unknown; herdr?: unknown; auth?: unknown };
+    return body.ok === true && typeof body.herdr === "object" && body.herdr !== null && appAuth(body.auth);
   } catch {
     return false;
+  }
+}
+
+/** Whether the app holds the port: its bridge health answers without asking herdr. */
+async function appOnPort(): Promise<boolean> {
+  try {
+    const response = await fetch(`${origin}/api/health?scope=bridge`, { signal: AbortSignal.timeout(1500) });
+    if (!response.ok) return false;
+    // another program's JSON can say ok too: only the app's own answer (server/index.ts) counts
+    const body = (await response.json()) as { ok?: unknown; auth?: unknown; bridge_protocol?: unknown };
+    return body.ok === true && Number.isInteger(body.bridge_protocol) && appAuth(body.auth);
+  } catch {
+    return false;
+  }
+}
+
+/** The `auth` the app's health answers carry: whether a token is required and whether this request got in. */
+function appAuth(auth: unknown): boolean {
+  const fields = auth as { required?: unknown; authenticated?: unknown } | null | undefined;
+  return typeof fields?.required === "boolean" && typeof fields.authenticated === "boolean";
+}
+
+/** Why the app's full health fails, as it says: herdr's error while herdr is away; null when it answers now (herdr came back). */
+async function healthError(): Promise<string | null> {
+  try {
+    // short, as health() is: the wait before this has already spent the start's deadline
+    const response = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(1500) });
+    const body = (await response.json()) as { ok?: unknown; error?: { message?: unknown } };
+    if (response.ok && body.ok === true) return null;
+    return typeof body.error?.message === "string" ? body.error.message : `its health check answered ${response.status}`;
+  } catch {
+    return "its health check did not answer";
   }
 }
 
@@ -192,6 +225,15 @@ async function settlePort(): Promise<"ready" | "running" | "failed"> {
     }
     if (await health()) return "running";
     await Bun.sleep(250);
+  }
+  // the app holds the port but cannot reach herdr: another port would put a second server beside it (#428)
+  if (await appOnPort()) {
+    if (await health()) return "running";
+    const why = await healthError();
+    if (why === null) return "running";
+    const pid = recordedPid();
+    failStart(`herdr web ui is running at ${origin}${pid === null ? "" : ` (pid ${pid})`} but cannot reach herdr: ${why}. It keeps this port and answers again once herdr is back.`);
+    return "failed";
   }
   const settings = CONFIG_FILES.at(-1) ?? join(CONFIG_DIR, "env");
   const blocked = platform() === "win32"

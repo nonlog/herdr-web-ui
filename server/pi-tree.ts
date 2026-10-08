@@ -146,6 +146,16 @@ export function piEntryIndex(path: string): PiIndex | null {
   return fresh;
 }
 
+/** Drops one file's index: the next read rebuilds it from the file, which is all it ever was. */
+export function forgetPiIndex(path: string): void {
+  piIndexes.delete(path);
+}
+
+/** Drops every index: the next read rebuilds each one. */
+export function forgetAllPiIndexes(): void {
+  piIndexes.clear();
+}
+
 /**
  * The active branch: the last entry written back to its root, oldest first, as byte
  * ranges of the file. Adjacent entries merge into one range, so a session no /tree

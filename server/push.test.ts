@@ -43,7 +43,7 @@ afterEach(() => {
 
 /** Alerts go out at once, and each status change is awaited until its alert went out. */
 function subscribed(options: Partial<Parameters<typeof createPushService>[0]> = {}): PushService {
-  const push = createPushService({ stateDir, timing: { short: 0, long: 0, longTurn: 0 }, ...options });
+  const push = createPushService({ loopbackHttp: true, stateDir, timing: { short: 0, long: 0, longTurn: 0 }, ...options });
   push.subscribe(fake.subscription);
   const onStatus = push.onStatus;
   push.onStatus = async (...args) => {
@@ -56,7 +56,8 @@ function subscribed(options: Partial<Parameters<typeof createPushService>[0]> = 
 describe("parseSubscription", () => {
   it("accepts what a browser's PushSubscription.toJSON() produces", () => {
     const browserJson = { ...fake.subscription, expirationTime: null };
-    expect(parseSubscription(browserJson)).toEqual(fake.subscription);
+    // the fake's endpoint is loopback http, which only a service made for it accepts
+    expect(parseSubscription(browserJson, { loopbackHttp: true })).toEqual(fake.subscription);
   });
 
   it("rejects endpoints and keys a push service could never have issued", () => {
@@ -67,27 +68,42 @@ describe("parseSubscription", () => {
     expect(parseSubscription({ endpoint, keys: { ...keys, auth: "AAAA" } })).toBeNull();
     expect(parseSubscription({ endpoint })).toBeNull();
     expect(parseSubscription("subscription")).toBeNull();
+    // a plain-http endpoint is never a browser subscription, and it is the shape that
+    // would turn the sender into a POST from inside the user's network
+    expect(parseSubscription({ endpoint: "http://169.254.169.254/latest/meta-data/", keys })).toBeNull();
+    expect(parseSubscription({ endpoint: "http://192.168.0.10:9000/push/1", keys })).toBeNull();
+  });
+
+  it("refuses http on loopback too, unless the push service was made for the tests' fake", () => {
+    const { keys } = fake.subscription;
+    for (const endpoint of ["http://127.0.0.1:9000/push/1", "http://[::1]:9000/push/1", "http://localhost:9000/push/1"]) {
+      expect(parseSubscription({ endpoint, keys })).toBeNull();
+      expect(parseSubscription({ endpoint, keys }, { loopbackHttp: true })).not.toBeNull();
+    }
+    expect(parseSubscription({ endpoint: "https://127.0.0.1:9000/push/1", keys })).not.toBeNull();
+    expect(parseSubscription({ endpoint: "https://push.example/x", keys })).not.toBeNull();
+    expect(parseSubscription({ endpoint: "http://192.168.0.10:9000/push/1", keys }, { loopbackHttp: true })).toBeNull();
   });
 });
 
 describe("push state", () => {
   it("keeps one owner-only VAPID key pair across restarts", () => {
-    const key = createPushService({ stateDir }).publicKey();
+    const key = createPushService({ loopbackHttp: true, stateDir }).publicKey();
     expect(Buffer.from(key, "base64url").length).toBe(65);
-    expect(createPushService({ stateDir }).publicKey()).toBe(key);
+    expect(createPushService({ loopbackHttp: true, stateDir }).publicKey()).toBe(key);
     expect(statSync(join(stateDir, "vapid.json")).mode & 0o777).toBe(0o600);
   });
 
   it("refuses a malformed key file instead of rotating the key under every device", () => {
     writeFileSync(join(stateDir, "vapid.json"), "{}\n");
-    expect(() => createPushService({ stateDir }).publicKey()).toThrow("malformed");
+    expect(() => createPushService({ loopbackHttp: true, stateDir }).publicKey()).toThrow("malformed");
     expect(readFileSync(join(stateDir, "vapid.json"), "utf8")).toBe("{}\n");
   });
 
   it("keeps subscriptions across restarts", async () => {
     subscribed();
     expect(statSync(join(stateDir, "push-subscriptions.json")).mode & 0o777).toBe(0o600);
-    const restarted = createPushService({ stateDir });
+    const restarted = createPushService({ loopbackHttp: true, stateDir });
     expect(await restarted.sendTest(fake.subscription.endpoint)).toEqual({ ok: true });
     expect(fake.received).toHaveLength(1);
   });
@@ -247,7 +263,7 @@ describe("alert timing and each device's choice", () => {
   /** real timers, short enough for a test; the clock that measures turns is ours to move */
   function timed(alerts?: AlertPrefs) {
     let clock = 0;
-    const push = createPushService({ stateDir, timing: { short: 40, long: 80, longTurn: 1_000 }, now: () => clock });
+    const push = createPushService({ loopbackHttp: true, stateDir, timing: { short: 40, long: 80, longTurn: 1_000 }, now: () => clock });
     push.subscribe(fake.subscription, alerts);
     push.seed([pane("w1:p1", "idle", "claude")]);
     return { push, advance: (ms: number) => { clock += ms; } };
@@ -326,12 +342,12 @@ describe("alert timing and each device's choice", () => {
   });
 
   it("keeps a device's choice through a re-registration without one, and a restart", async () => {
-    const push = createPushService({ stateDir });
+    const push = createPushService({ loopbackHttp: true, stateDir });
     push.subscribe(fake.subscription, { input: false, done: "off" });
     push.subscribe(fake.subscription);
     const stored = JSON.parse(readFileSync(join(stateDir, "push-subscriptions.json"), "utf8")) as Array<{ alerts?: AlertPrefs }>;
     expect(stored[0]!.alerts).toEqual({ input: false, done: "off" });
-    const restarted = createPushService({ stateDir, timing: { short: 0, long: 0, longTurn: 0 } });
+    const restarted = createPushService({ loopbackHttp: true, stateDir, timing: { short: 0, long: 0, longTurn: 0 } });
     restarted.seed([pane("w1:p1", "working", "claude")]);
     await restarted.onStatus("w1:p1", "blocked");
     await restarted.settled();
@@ -342,7 +358,7 @@ describe("alert timing and each device's choice", () => {
 it("cancels the remaining delay group after an earlier device already received its finish", async () => {
   const slower = await startFakePushService();
   try {
-    const push = createPushService({ stateDir, timing: { short: 0, long: 10_000, longTurn: 0 } });
+    const push = createPushService({ loopbackHttp: true, stateDir, timing: { short: 0, long: 10_000, longTurn: 0 } });
     push.subscribe(fake.subscription, { input: true, done: "always" });
     push.subscribe(slower.subscription, { input: true, done: "long" });
     push.seed([pane("w1:p1", "working", "claude")]);
@@ -359,6 +375,7 @@ it("settles only after a delivery already under way, when a later group is calle
   let asked!: () => void;
   const titleAsked = new Promise<void>((resolve) => { asked = resolve; });
   const push = createPushService({
+    loopbackHttp: true,
     stateDir, timing: { short: 0, long: 10_000, longTurn: 0 },
     lookupTitle: () => { asked(); return new Promise((resolve) => { release = () => resolve("claude"); }); },
   });
@@ -385,18 +402,18 @@ it("settles only after a delivery already under way, when a later group is calle
 it("persists device ownership and refuses revoked and legacy subscriptions after restart", async () => {
   const active = new Set(["device-a"]);
   const canDeliver = (id: string | null | undefined) => id === null || typeof id === "string" && active.has(id);
-  const push = createPushService({ stateDir, canDeliver });
+  const push = createPushService({ loopbackHttp: true, stateDir, canDeliver });
   push.subscribe(fake.subscription, undefined, "device-a");
   expect(JSON.parse(readFileSync(join(stateDir, "push-subscriptions.json"), "utf8"))[0].device_id).toBe("device-a");
   active.clear();
-  const restarted = createPushService({ stateDir, canDeliver });
+  const restarted = createPushService({ loopbackHttp: true, stateDir, canDeliver });
   await restarted.onEnded("w1:p1");
   expect(fake.received).toHaveLength(0);
   restarted.revokeDevice("device-a");
   expect(await restarted.sendTest(fake.subscription.endpoint)).toBeNull();
   // Legacy records cannot identify a revoked device; re-registration supplies an owner.
   push.subscribe(fake.subscription);
-  const migrated = createPushService({ stateDir, canDeliver });
+  const migrated = createPushService({ loopbackHttp: true, stateDir, canDeliver });
   await migrated.onEnded("w1:p1");
   expect(fake.received).toHaveLength(0);
   migrated.subscribe(fake.subscription, undefined, null);
@@ -406,7 +423,7 @@ it("persists device ownership and refuses revoked and legacy subscriptions after
 
 it("keeps a pending alert across re-registration but drops it after device revocation", async () => {
   const active = new Set(["device-a"]);
-  const push = createPushService({ stateDir, timing: { short: 20 }, canDeliver: (id) => typeof id === "string" && active.has(id) });
+  const push = createPushService({ loopbackHttp: true, stateDir, timing: { short: 20 }, canDeliver: (id) => typeof id === "string" && active.has(id) });
   push.subscribe(fake.subscription, undefined, "device-a");
   push.seed([pane("w1:p1", "working", "claude")]);
   await push.onStatus("w1:p1", "blocked");
@@ -424,7 +441,7 @@ it("keeps a pending alert across re-registration but drops it after device revoc
 it("keeps a subscription made through the open LAN only while the LAN stays open", async () => {
   let gated = false;
   // the server's rule (index.ts): owners null always, undefined only while ungated
-  const push = createPushService({ stateDir, canDeliver: (id) => id === null || (id === undefined ? !gated : false) });
+  const push = createPushService({ loopbackHttp: true, stateDir, canDeliver: (id) => id === null || (id === undefined ? !gated : false) });
   const request = new Request("http://192.168.1.20:8787/api/push/subscribe", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ subscription: fake.subscription }),
   });
@@ -438,9 +455,22 @@ it("keeps a subscription made through the open LAN only while the LAN stays open
   expect(fake.received).toHaveLength(1);
 });
 
+it("never follows a redirect: an https endpoint cannot send the alert on to a local service", async () => {
+  // a push service never redirects; one that does is an endpoint pointing the POST elsewhere
+  const redirector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 307, headers: { location: fake.subscription.endpoint } }) });
+  try {
+    const push = createPushService({ loopbackHttp: true, stateDir });
+    const endpoint = `http://127.0.0.1:${redirector.port}/push/1`;
+    push.subscribe({ ...fake.subscription, endpoint });
+    const delivery = await push.sendTest(endpoint);
+    expect(delivery?.ok).toBe(false);
+    expect(fake.received).toHaveLength(0);
+  } finally { redirector.stop(true); }
+});
+
 describe("push resync after lost status events", () => {
   it("calls off the waiting alert of a pane that closed while events were lost", async () => {
-    const push = createPushService({ stateDir, timing: { short: 50, long: 50, longTurn: 0 } });
+    const push = createPushService({ loopbackHttp: true, stateDir, timing: { short: 50, long: 50, longTurn: 0 } });
     push.subscribe(fake.subscription);
     push.seed([pane("w1:p1", "working", "gone"), pane("w1:p2", "working", "kept"), pane("w1:p3", "working", "new")]);
     await push.onStatus("w1:p1", "blocked");
@@ -466,7 +496,7 @@ describe("push resync after lost status events", () => {
   });
 
   it("calls off an alert still waiting for a pane that is at rest by the snapshot", async () => {
-    const push = createPushService({ stateDir, timing: { short: 50, long: 50, longTurn: 0 } });
+    const push = createPushService({ loopbackHttp: true, stateDir, timing: { short: 50, long: 50, longTurn: 0 } });
     push.subscribe(fake.subscription);
     push.seed([pane("w1:p1", "working", "claude")]);
     await push.onStatus("w1:p1", "blocked");

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Browser } from "playwright-core";
 import { herdrRpc, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
+import { openSettingsPage } from "./settings-page.ts";
 
 /** Settings > Chat > Panes open in: one choice puts every agent pane on that lens, the ones that remembered another included. */
 export async function checkDefaultView(browser: Browser, origin: string): Promise<void> {
@@ -35,7 +36,8 @@ export async function checkDefaultView(browser: Browser, origin: string): Promis
     assert.match((await lens()) ?? "", /^Live terminal/, "a desktop opens an agent pane's terminal by default");
 
     await page.keyboard.press("ControlOrMeta+Shift+Comma");
-    await page.getByRole("group", { name: "Panes open in" }).or(page.locator('[aria-label="Panes open in"]')).getByRole("button", { name: "Chat", exact: true }).click();
+    await openSettingsPage(page, "Chat");
+    await page.getByRole("group", { name: "Panes open in", exact: true }).getByRole("button", { name: "Chat", exact: true }).click();
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => document.querySelector(".view-switch button[aria-pressed='true']")?.getAttribute("title")?.startsWith("Chat transcript") === true);
     await page.locator(`.pane-select[title^="${two} —"]`).click();

@@ -25,6 +25,13 @@ describe("paneCommands", () => {
     expect(paneCommands(null, "/tmp")).toEqual([]);
   });
 
+  it("offers Claude's /goal with the argument it takes", () => {
+    const goal = paneCommands("claude", null, temp("commands-home-")).find((command) => command.name === "goal");
+    expect(goal?.source).toBe("builtin");
+    expect(goal?.description.startsWith("[condition|clear] — ")).toBeTrue();
+    expect(paneCommands("codex", null, temp("commands-home-")).some((command) => command.name === "goal")).toBeFalse();
+  });
+
   it("loads user and nested project Claude commands with descriptions", () => {
     const home = temp("commands-home-");
     const cwd = temp("commands-project-");

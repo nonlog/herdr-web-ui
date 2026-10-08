@@ -1,10 +1,24 @@
 import { describe, expect, it } from "bun:test";
 import { Terminal } from "@xterm/xterm";
-import { fileUriPath, terminalFileLinks } from "./terminalFileLinks.ts";
+import { fileUriPath, isWebLink, terminalFileLinks } from "./terminalFileLinks.ts";
 
 /** a plain press of the primary button, as xterm hands one to a link */
 const click = { button: 0 } as MouseEvent;
 const written = (term: Terminal, text: string) => new Promise<void>((resolve) => term.write(text, resolve));
+
+describe("isWebLink", () => {
+  it("opens http and https addresses, in any case", () => {
+    for (const uri of ["http://example.com", "https://example.com/a?b=c#d", "HTTPS://EXAMPLE.COM"]) {
+      expect(isWebLink(uri)).toBe(true);
+    }
+  });
+
+  it("refuses every other scheme a crafted terminal line could carry", () => {
+    for (const uri of ["javascript:alert(1)", "data:text/html,<script>x</script>", "vbscript:x", "file:///etc/passwd", "ws://example.com", "//example.com", "example.com", " https://example.com"]) {
+      expect(isWebLink(uri)).toBe(false);
+    }
+  });
+});
 
 describe("terminal file links", () => {
   it("excludes sentence punctuation but preserves encoded filename punctuation", async () => {

@@ -46,6 +46,16 @@ herdr 0.9.3). Older bridge bundles keep waiting until updated, and observe conne
 
 ## Disconnects and updates
 
+**Update bridge** also reuses a bridge whose live identity verifies as current; it does not
+download, install or restart the same version again.
+
+**Multiple apps connecting to one PC.** Keep those apps on the same version. An older app
+with this protection refuses to downgrade a newer bridge and asks you to update the app itself.
+Apps from before this version can still replace a newer bridge. If another app
+starts an incompatible bridge during an update, setup reports a **Bridge connection conflict**
+instead of offering an automatic update loop. Update or disconnect the other app before retrying.
+The update path never takes over a terminal or stops herdr sessions.
+
 PC registrations and last snapshots persist in `<stateDir>/machines.json`; `HERDR_WEB_STATE_DIR` chooses the state directory. A disconnected PC retains its last roster with controls disabled. Retries back off from 1 second to 60 seconds. Other PCs keep working. Reconnection never changes a non-empty selection or sends held input. Composer drafts, held messages, terminal drafts, lenses, recent panes and notification identities include both machine and pane. Held messages have an explicit **Send now** action.
 
 **Disconnect** closes that PC’s observer, forwards and terminal attachments, preserving remote processes. **Remove PC** additionally forgets its local registration/key; the public key line on the remote account remains visible for manual removal (`herdr-web-ui:<machine-id>`). No unrelated authorized keys are removed.

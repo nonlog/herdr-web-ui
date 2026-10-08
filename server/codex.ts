@@ -432,10 +432,31 @@ function rolloutHeader(path: string): RecordValue | null {
   } finally { closeSync(fd); }
 }
 
+/**
+ * A Windows path without the `\\?\` prefix that Codex on Windows stores in `threads` (`cwd`,
+ * `rollout_path`), as Rust's canonical paths carry it: `\\?\D:\x` is `D:\x` and
+ * `\\?\UNC\host\share` is `\\host\share` (#518). Any other path, `\\?\Volume{…}\` included, is
+ * returned as it is: without its prefix it would read as a relative path.
+ */
+export function withoutVerbatimPrefix(path: string): string {
+  if (!path.startsWith("\\\\?\\")) return path;
+  const rest = path.slice(4);
+  if (/^UNC\\/i.test(rest)) return `\\\\${rest.slice(4)}`;
+  return /^[A-Za-z]:\\/.test(rest) ? rest : path;
+}
+
+/** The `cwd` values Codex may have stored for a directory: as given, and on Windows also with `\\?\`. */
+export function storedCwds(cwd: string): [string, string] {
+  const plain = withoutVerbatimPrefix(cwd);
+  if (/^[A-Za-z]:\\/.test(plain)) return [plain, `\\\\?\\${plain}`];
+  if (/^\\\\[^\\?.]/.test(plain)) return [plain, `\\\\?\\UNC\\${plain.slice(2)}`];
+  return [cwd, cwd];
+}
+
 /** File access is constrained by canonical paths, including symlink targets. */
 export function codexRolloutPath(path: string, codexHome: string): string | null {
   try {
-    const canonical = realpathSync(path);
+    const canonical = realpathSync(withoutVerbatimPrefix(path));
     const rel = relative(toNamespacedPath(realpathSync(join(codexHome, "sessions"))), toNamespacedPath(canonical));
     if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || !canonical.endsWith(".jsonl")) return null;
     if (!statSync(canonical).isFile()) return null;
@@ -556,6 +577,21 @@ export function forgetHistoryChains(): void {
 /** Drops one rollout's remembered chain: its next read resolves it again. */
 export function forgetHistoryChain(path: string): void {
   historyChains.delete(path);
+}
+
+/** Everything remembered about one rollout: its chain, its question scan and any scan in flight. */
+export function forgetCodexStateFor(path: string): void {
+  historyChains.delete(path);
+  questionScans.delete(path);
+  questionScansInFlight.delete(path);
+}
+
+/** Every remembered chain and question scan: the next read resolves each one again. */
+export function forgetAllCodexState(): void {
+  historyChains.clear();
+  questionScans.clear();
+  questionScansInFlight.clear();
+  linesBeforeCut.clear();
 }
 
 /** Lines before a cut, per file identity and cut: the bytes before a cut never change. */

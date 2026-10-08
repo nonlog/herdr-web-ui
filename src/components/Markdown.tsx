@@ -1,7 +1,7 @@
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 
-import { foldCode, parseMarkdown, type InlineNode, type ListBlock, type MarkdownBlock } from "../lib/markdown.ts";
+import { foldCode, mathNestsTooDeep, parseMarkdown, type InlineNode, type ListBlock, type MarkdownBlock } from "../lib/markdown.ts";
 import { codeIsFilePath, OpenFileContext, splitFilePaths } from "../lib/filePaths.ts";
 import { fileUriPath } from "../lib/terminalFileLinks.ts";
 import { useT } from "../lib/i18n.ts";
@@ -33,9 +33,13 @@ function useKatex(): Katex | null {
 function MathExpression({ value, displayMode = false }: { value: string; displayMode?: boolean }) {
   const katex = useKatex();
   const source = displayMode ? `\\[${value}\\]` : `\\(${value}\\)`;
-  if (!katex) return <span>{source}</span>;
+  if (!katex || mathNestsTooDeep(value)) return <span>{source}</span>;
   try {
-    // KaTeX escapes text and rejects untrusted commands by default.
+    // KaTeX escapes text and rejects untrusted commands by default, and an unknown command
+    // throws - the catch below then draws the source form. `trust` stays at its default, which
+    // is what keeps \href and \includegraphics refused. `strict` only governs input LaTeX would
+    // not accept: "ignore" draws Korean, Japanese or Chinese text inside an expression, which
+    // `strict: true` throws on.
     const html = katex.renderToString(value, { displayMode, strict: "ignore" });
     return <span className={displayMode ? "markdown-math-display" : "markdown-math"} dangerouslySetInnerHTML={{ __html: html }} />;
   } catch {
@@ -146,10 +150,11 @@ function Blocks({ blocks }: { blocks: MarkdownBlock[] }) {
   return <>{blocks.map((block, index): ReactNode => {
     const key = `${block.type}-${index}`;
     switch (block.type) {
-      case "heading": {
-        const Tag = `h${block.level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
-        return <Tag key={key}><Inline nodes={block.content} /></Tag>;
-      }
+      case "heading":
+        // agent headings are h3 whatever the agent wrote: the app's own h1/h2 (Brand, the dialog
+        // titles) stay the outline above them. The level rides on a class, so the stylesheet
+        // keeps drawing each level as it did (ChatView.css `.markdown h1`...`.markdown h6`).
+        return <h3 key={key} className={`markdown-h${block.level}`}><Inline nodes={block.content} /></h3>;
       case "paragraph":
         return <p key={key}>{block.lines.map((line, lineIndex) => <span key={lineIndex}><Inline nodes={line} />{lineIndex < block.lines.length - 1 && <br />}</span>)}</p>;
       case "list": return <List key={key} block={block} />;
