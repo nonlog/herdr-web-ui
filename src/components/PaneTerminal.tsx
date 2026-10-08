@@ -369,7 +369,10 @@ export function PaneTerminal({
     const historyHost = document.createElement("div");
     historyHost.className = "pane-terminal-local-history";
     historyHost.hidden = true;
-    host.append(historyHost);
+    // This must be a sibling of the scrolling grid, not its descendant: an adopted desktop
+    // grid is taller than a phone's viewport, and its scrollTop would move an absolute child
+    // out of view. The terminal-surface is the fixed viewport containing both renderers.
+    host.parentElement!.append(historyHost);
     const historyTerm = new Terminal({
       convertEol: false,
       cursorBlink: false,
@@ -1357,6 +1360,7 @@ export function PaneTerminal({
       host.removeEventListener("compositionend", compositionEnd);
       term.dispose();
       historyTerm.dispose();
+      historyHost.remove();
       termRef.current = null;
       historyTermRef.current = null;
       socketRef.current = null;

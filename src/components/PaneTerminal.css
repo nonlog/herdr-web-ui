@@ -55,6 +55,18 @@
   display: none;
 }
 
+.pane-terminal-local-history .xterm {
+  padding: var(--space-2) var(--space-2) 0;
+}
+
+.pane-terminal-local-history .xterm-viewport {
+  scrollbar-width: none;
+}
+
+.pane-terminal-local-history .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
 /* a grid that is not this browser's own (observing, or mirrored from a PC that cannot attach)
    can be larger than the mount: it scrolls instead of clipping, so every cell can be reached.
    A finger pans it through PaneTerminal's touch handlers (touch-action stays none), a mouse

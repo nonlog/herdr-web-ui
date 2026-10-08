@@ -155,6 +155,15 @@ try {
   await small.locator(".pane-terminal").hover();
   await small.mouse.wheel(0, -1200);
   await until(async () => (await historyVisible(small)) > 0 && (await historyScreen(small)).includes("hist-"), "wheel up shows private ANSI history");
+  assert.equal(await small.evaluate(() => {
+    const pane = document.querySelector(".pane-terminal")!.getBoundingClientRect();
+    const overlay = document.querySelector(".pane-terminal-local-history")!.getBoundingClientRect();
+    return Math.abs(pane.top - overlay.top) <= 2 && Math.abs(pane.left - overlay.left) <= 2
+      && Math.abs(pane.width - overlay.width) <= 2 && Math.abs(pane.height - overlay.height) <= 2;
+  }), true, "private history remains pinned to the phone viewport even when the adopted grid scrolls");
+  await small.mouse.wheel(0, -4000);
+  await until(async () => await small.locator(".pane-terminal-local-history .xterm-rows span[class*='xterm-fg-1']", { hasText: "red-cell" }).count() > 0,
+    "retained history preserves old ANSI red text");
   assert.equal((await paneScrollInfo(paneId))?.offset_from_bottom, 0, "phone history never moves native scrollback");
   assert.equal(phoneMessages.filter((message) => message.type === "scroll" || message.type === "resize").length, 0, "passive history sends no shared scroll or resize");
   assert.ok((await screen(page)).includes("tail-marker"), "desktop view stays at live bottom while phone scrolls");
