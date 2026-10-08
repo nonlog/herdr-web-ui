@@ -3,6 +3,11 @@
 ## [Unreleased - nonlog fork]
 
 ### Fork changes
+- Keep Windows terminal controllers on the native pane's grid on desktop and touch;
+  browser resize/focus cannot enlarge the shared PTY and hide its bottom input row.
+  Follow native window changes and announce frame geometry before painting or replaying.
+- Allow dependency/build steps required by normal plugin installation and updates;
+  remove the CI-provenance update block. Development verification and releases still use CI.
 - Preserve native Windows `terminal session control` live ANSI transport, readiness,
   takeover/recovery handling, semantic wheel coalescing and the legacy mirror fallback.
 - Preserve Codex Windows namespace/cwd matching and bounded, unambiguous cross-directory

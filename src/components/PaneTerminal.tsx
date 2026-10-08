@@ -1113,9 +1113,9 @@ export function PaneTerminal({
         panned = false;
         followCursor();
       } else if (message.type === "pane-geometry") {
-        // Observe clients adopt the shared grid. A legacy pane.read mirror is fixed to herdr's
-        // own pane size. A terminal-session controller is live and browser-sized like direct attach,
-        // but its wheel path stays semantic (controlSessionRef) instead of xterm mouse bytes.
+        // Observe clients adopt the shared grid. A legacy mirror and a Windows controller
+        // follow Herdr's native pane size. The controller remains live, with semantic
+        // wheel input (controlSessionRef), but never resizes the native PTY from the browser.
         if (message.pane_id !== paneRef.current) return;
         if (message.fixed) {
           fixedGridRef.current = true;
