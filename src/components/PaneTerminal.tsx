@@ -437,7 +437,7 @@ export function PaneTerminal({
     let historyOpened = false;
     let historyWriting = false;
     let historyNeedsPaint = false;
-    let historyPainted: typeof historyRead = null;
+    let historyPainted: Awaited<ReturnType<typeof fetchPaneHistoryAnsi>> | null = null;
     let historyPaintedCols = 0;
     let historyPaintedRows = 0;
     const hideLocalHistory = (): void => {
