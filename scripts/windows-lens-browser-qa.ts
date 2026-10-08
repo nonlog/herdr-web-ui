@@ -85,7 +85,7 @@ try {
     cols: 110, rows: 34, env: { HERDR_SOCKET_PATH: process.env["HERDR_SOCKET"]!, TERM: "xterm-256color" },
     onData: data => { nativeOutput = (nativeOutput + data).slice(-262144); }, onExit: () => {} });
   await until(async () => nativeOutput.length > 0, "native frontend connected");
-  await herdrRpc("workspace.focus", { target: created.workspace.workspace_id });
+  await herdrRpc("workspace.focus", { workspace_id: created.workspace.workspace_id });
   const nativeRect = async () => (await sessionSnapshot()).layouts.flatMap(layout => layout.panes).find(p => p.pane_id === paneId)!.rect;
   await until(async () => { const rect = await nativeRect(); return rect.height > 0 && rect.height < 34 && rect.width <= 110; }, "native window lays out its pane");
   const beforeBrowser = await nativeRect();
