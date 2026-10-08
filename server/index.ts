@@ -2106,11 +2106,15 @@ export function createServer(
               const alreadyAttached = attachment.clients.has(client);
               attachment.clients.add(client);
               if (!alreadyAttached && message.flow_control === "ack") client.data.output.set(message.pane_id, new OutputWindow());
-              // Tell the browser which transport owns geometry before replaying bytes.
-              if (attachment.mirror) {
-                send(client, { type: "pane-geometry", pane_id: message.pane_id, cols: attachment.cols, rows: attachment.rows, fixed: true });
-              } else if (attachment.control) {
-                send(client, { type: "pane-geometry", pane_id: message.pane_id, cols: attachment.cols, rows: attachment.rows, control: true });
+              // Adopting clients need the replay's grid first on every transport. Direct
+              // attach also replays an alternate-screen stream: parsing it at a phone's
+              // initial grid clips cells even if geometry follows a moment later.
+              if (attachment.mirror || attachment.control || client.data.mode === "observe" || message.keep_size === true) {
+                send(client, {
+                  type: "pane-geometry", pane_id: message.pane_id,
+                  cols: attachment.cols, rows: attachment.rows,
+                  ...(attachment.mirror ? { fixed: true } : attachment.control ? { control: true } : {}),
+                });
               }
               // hand the newcomer the current screen it would otherwise have missed
               // (a mirror keeps its latest screen whole; a pty keeps a bounded tail of its stream)
@@ -2125,15 +2129,6 @@ export function createServer(
               if (client.data.mode === "interact" && message.keep_size !== true) {
                 // an operator's viewport owns the shared grid
                 resizePty(message.pane_id, geometry.cols, geometry.rows);
-              } else {
-                // an observer, or a grid the chat lens covers, adopts the grid the operators left behind
-                send(client, {
-                  type: "pane-geometry",
-                  pane_id: message.pane_id,
-                  cols: attachment.cols,
-                  rows: attachment.rows,
-                  ...(attachment.control ? { control: true } : {}),
-                });
               }
               break;
             }

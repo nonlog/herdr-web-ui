@@ -201,7 +201,7 @@ try {
   await shell(operator, "for i in $(seq 1 80); do echo row-$i; done; printf '%*s\\r\\n' $COLUMNS right-edge");
   await until(async () => (await screen(operator)).includes("right-edge"), "wide operator screen");
   const watch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" });
-  const observer = await watch.newPage(); record(observer);
+  const observer = await watch.newPage(); const observerWire = record(observer);
   await observer.routeWebSocket(/\/ws(\?|$)/, (socket) => {
     const upstream = socket.connectToServer();
     socket.onMessage((message) => {
@@ -211,6 +211,10 @@ try {
   });
   await observer.goto(`${directOrigin}/?pane=${encodeURIComponent(attached)}`);
   await observer.locator(".terminal-banner-observe").waitFor();
+  await until(async () => observerWire.received.some((m) => m.type === "pty-data" && m.pane_id === attached), "observer receives replay");
+  const geometryIndex = observerWire.received.findIndex((m) => m.type === "pane-geometry" && m.pane_id === attached);
+  const replayIndex = observerWire.received.findIndex((m) => m.type === "pty-data" && m.pane_id === attached);
+  assert.ok(geometryIndex >= 0 && geometryIndex < replayIndex, "shared geometry must precede ANSI replay, or the observer permanently clips wide rows");
   await until(async () => (await screen(observer)).includes("right-edge"), "observer receives operator grid");
   assert.equal((await scrollOf(observer)).adopted, true);
   await drag(observer, -220, 0); assert.ok((await scrollOf(observer)).left > 0, "observer pans horizontally");

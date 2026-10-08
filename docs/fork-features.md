@@ -21,6 +21,7 @@
 | Codex 跨目录恢复会话 | `codexTranscriptRows`、`cwdVariants`、`CWD_MATCH`、`codexTranscriptPath` | Windows 恢复选择器切到其他目录时，使用有界候选与唯一、充分的屏幕匹配；歧义时拒绝猜测，不选择错误会话。 |
 | 公网滚轮请求合并 | `src/lib/terminalWheel.ts` 及测试、`PaneTerminal.tsx` | 应用内滚动将像素/行/页归一化，约 40 ms 合并一批，保留滚轮速度设置，避免高延迟链路累积大量重绘请求。 |
 | 手机不争抢 PTY 尺寸 | `PaneTerminal.tsx`、`scripts/chat-size-regression.ts` | 手机 `attach` 使用 `keep_size:true`；焦点、键盘、字体、视口、聊天/终端切换不触发共享 PTY resize；显示较大网格时允许横向平移。 |
+| 接入时的几何与画面顺序 | `server/index.ts`、双客户端浏览器回归 | direct attach 的 observer / keep-size 客户端也必须先收到共享 geometry 再收到 ANSI replay，避免按手机初始小网格解析宽画面造成截断。 |
 | 独立 ANSI 历史视图 | `src/lib/terminalHistory.ts`、`PaneTerminal.tsx`、`PaneTerminal.css` | 实时 xterm 保持 `scrollback:0`；独立只读渲染器显示被动读取的真实历史，不用 `pane.scroll` 或 `terminal.scroll` 浏览历史。 |
 | 缓存即时滚动 | `src/lib/terminalHistory.test.ts`、`scripts/windows-lens-browser-qa.ts` | 预取后只移动本地 viewport；同一快照不反复 reset / 重写全部 ANSI；新输出不打断正在阅读的位置；过期请求不能污染新窗格。 |
 
