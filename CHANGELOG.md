@@ -24,6 +24,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#521](https://github.com/devswha/herdr-web-ui/pull/521))
 
 ### Changed
+- Touch terminals now keep their scrollback and geometry client-local: swiping old output uses
+  passive `pane.read` ANSI history instead of Herdr's pane-global scroll offset, and a phone
+  adopts the existing pane grid instead of resizing it. Scrolling or browser chrome changes on a
+  phone therefore no longer move/reflow a native Herdr terminal open on the PC.
 - Windows terminal-controller scrolling now normalizes browser wheel deltas to terminal rows and
   coalesces high-resolution wheel/trackpad bursts. A normal wheel notch moves about three rows at
   the default speed, while remote sessions send at most 25 semantic scroll commands per second,

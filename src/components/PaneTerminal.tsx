@@ -14,7 +14,7 @@ import { heldCountShown, heldOpenAtFold, heldOpenOnFocus, heldRefocusDue, heldRo
 import { MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, agentDisplayLabel, composerMessage, composerPayload, submitNote, submitNotTyped } from "../lib/compose.ts";
 import { afterRead, afterSend, afterSettled, composerLift, greetingMemory, rememberGreeting, greetingFits, greetingFolder, roomOverComposer, showsGreeting, type ChatRead } from "../lib/greeting.ts";
 import { answerFromText, answerHint, answerRefusal, needsConfirmation, type TypedAnswer } from "../lib/promptAnswer.ts";
-import { ApiError, assertAttachable, fetchPaneScroll, fetchPaneSelection, scrollPane } from "../lib/api.ts";
+import { ApiError, assertAttachable, fetchPaneHistoryAnsi, fetchPaneScroll, fetchPaneSelection, scrollPane } from "../lib/api.ts";
 import { parseOsc52 } from "../lib/osc52.ts";
 import { matchHerdrWidths } from "../lib/terminalWidths.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
@@ -139,6 +139,11 @@ export function PaneTerminal({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const stackRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
+  const historyTermRef = useRef<Terminal | null>(null);
+  // The live terminal effect owns the history renderer; other effects and the input line use
+  // these refs rather than calling a function in a different effect's lexical scope.
+  const resetLocalHistoryRef = useRef<(pane: string | null) => void>(() => {});
+  const hideLocalHistoryRef = useRef<() => void>(() => {});
   const fitRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<HerdrSocket | null>(null);
   const paneRef = useRef<string | null>(paneId);
@@ -173,6 +178,9 @@ export function PaneTerminal({
   // herdr terminal session control is browser-sized like direct attach, but wheel events are
   // semantic commands so herdr can choose host scrollback vs TUI mouse/alternate scrolling.
   const controlSessionRef = useRef(false);
+  // Touch-sized clients keep herdr's shared pane geometry and browse retained history locally.
+  // That keeps a phone's viewport/scroll gestures from moving or reflowing a native Herdr UI.
+  const localGridRef = useRef(false);
   // the terminal grid as the server last said it for this pane (pane-geometry), whoever set it
   const sharedGridRef = useRef<{ cols: number; rows: number } | null>(null);
   // the modifyOtherKeys level the pane's program asked for, as this pane's stream last said it
@@ -358,6 +366,21 @@ export function PaneTerminal({
     term.loadAddon(new WebLinksAddon((_event, uri) => { window.open(uri, "_blank", "noopener,noreferrer"); }));
     term.registerLinkProvider(terminalFileLinkProvider(() => term.buffer.active, (path, event) => { if (linkPressed(event)) openFileRef.current?.(path); }));
     term.open(host);
+    const historyHost = document.createElement("div");
+    historyHost.className = "pane-terminal-local-history";
+    historyHost.hidden = true;
+    host.append(historyHost);
+    const historyTerm = new Terminal({
+      convertEol: false,
+      cursorBlink: false,
+      disableStdin: true,
+      scrollback: 20_000,
+      allowProposedApi: true,
+      fontSize: terminalFontSize,
+      fontFamily: TERMINAL_FONT_STACK,
+      theme: terminalTheme(theme, palette),
+    });
+    historyTermRef.current = historyTerm;
     const compositionStart = () => setComposing(true);
     const compositionEnd = () => setComposing(false);
     host.addEventListener("compositionstart", compositionStart);
@@ -398,6 +421,138 @@ export function PaneTerminal({
     let controlWheelColumn: number | undefined;
     let controlWheelRow: number | undefined;
     let controlWheelModifiers = 0;
+    const HISTORY_PREFETCH_LINES = 512;
+    const HISTORY_MAX_LINES = 20_000;
+    let historyPane: string | null = null;
+    let historyRead: Awaited<ReturnType<typeof fetchPaneHistoryAnsi>> | null = null;
+    let historyReadLines = 0;
+    let historyRequestedLines = 0;
+    let historyFetching = false;
+    let historyFailed = false;
+    let historyStale = true;
+    let historyAdvancedWhileViewing = false;
+    let historyActive = false;
+    let historyOffset = 0;
+    let historyEpoch = 0;
+    let historyOpened = false;
+    let historyWriting = false;
+    let historyNeedsPaint = false;
+    let historyPainted: typeof historyRead = null;
+    let historyPaintedCols = 0;
+    let historyPaintedRows = 0;
+    const hideLocalHistory = (): void => {
+      if (historyAdvancedWhileViewing) historyStale = true;
+      historyAdvancedWhileViewing = false;
+      historyActive = false;
+      historyOffset = 0;
+      historyHost.hidden = true;
+      historyTerm.clearSelection();
+    };
+    hideLocalHistoryRef.current = hideLocalHistory;
+    const moveLocalViewport = (): void => {
+      if (!historyActive || !historyOpened || historyWriting) return;
+      const max = historyTerm.buffer.active.baseY;
+      // A capped read (or the start of a pane's retained history) is the topmost row.
+      if (historyRead && (!historyRead.truncated || historyReadLines >= HISTORY_MAX_LINES)) {
+        historyOffset = Math.min(historyOffset, max);
+      }
+      if (historyOffset <= 0) { hideLocalHistory(); return; }
+      historyTerm.scrollToBottom();
+      historyTerm.scrollLines(-Math.min(historyOffset, max));
+      historyTerm.refresh(0, historyTerm.rows - 1);
+    };
+    const paintLocalHistory = (): void => {
+      if (!historyActive || !historyRead || historyPane !== paneRef.current) return;
+      historyHost.hidden = false;
+      // Opening while display:none gives xterm zero-width font metrics on mobile Chromium.
+      if (!historyOpened) {
+        historyTerm.open(historyHost);
+        matchHerdrWidths(historyTerm);
+        historyOpened = true;
+      }
+      if (historyWriting) { historyNeedsPaint = true; return; }
+      const cols = term.cols;
+      const rows = term.rows;
+      if (historyPainted === historyRead && historyPaintedCols === cols && historyPaintedRows === rows) {
+        moveLocalViewport();
+        return;
+      }
+      historyWriting = true;
+      historyPainted = historyRead;
+      historyPaintedCols = cols;
+      historyPaintedRows = rows;
+      historyTerm.reset();
+      if (historyTerm.cols !== cols || historyTerm.rows !== rows) historyTerm.resize(cols, rows);
+      historyTerm.write(historyRead.text, () => {
+        historyWriting = false;
+        if (disposed) return;
+        if (historyNeedsPaint || (historyActive && historyPainted !== historyRead)) {
+          historyNeedsPaint = false;
+          paintLocalHistory();
+        } else {
+          moveLocalViewport();
+        }
+      });
+    };
+    const ensureLocalHistory = (pane: string, lines: number): void => {
+      if (disposed || !historyActive || pane !== historyPane || pane !== paneRef.current) return;
+      historyRequestedLines = Math.min(HISTORY_MAX_LINES, Math.max(HISTORY_PREFETCH_LINES, lines, historyRequestedLines));
+      if (!historyStale && historyRead && historyReadLines >= historyRequestedLines) {
+        paintLocalHistory();
+        return;
+      }
+      if (historyFetching || historyFailed) return;
+      historyFetching = true;
+      const epoch = historyEpoch;
+      const requested = historyRequestedLines;
+      void fetchPaneHistoryAnsi(pane, requested, machineId).then((read) => {
+        if (disposed || epoch !== historyEpoch || pane !== paneRef.current) return;
+        historyRead = read;
+        historyReadLines = requested;
+        historyStale = false;
+        paintLocalHistory();
+      }, () => {
+        if (epoch === historyEpoch) historyFailed = true;
+      }).finally(() => {
+        if (disposed || epoch !== historyEpoch) return;
+        historyFetching = false;
+        if (historyActive && !historyFailed && historyRequestedLines > historyReadLines) {
+          ensureLocalHistory(pane, historyRequestedLines);
+        }
+      });
+    };
+    const resetLocalHistory = (pane: string | null): void => {
+      ++historyEpoch; // ignore an in-flight fetch belonging to a previous pane
+      hideLocalHistory();
+      historyPane = pane;
+      historyRead = null;
+      historyReadLines = 0;
+      historyRequestedLines = 0;
+      historyFetching = false;
+      historyFailed = false;
+      historyStale = true;
+      historyAdvancedWhileViewing = false;
+      historyPainted = null;
+      historyNeedsPaint = false;
+    };
+    resetLocalHistoryRef.current = resetLocalHistory;
+    const scrollLocalHistory = (pane: string, deltaY: number, deltaMode: number): boolean => {
+      if (!coarseRef.current || deltaY === 0) return false;
+      const intent = semanticWheelIntent(semanticWheelDeltaLines(deltaY, deltaMode, term.rows), wheelSpeedRef.current);
+      if (!intent) return true;
+      historyOffset = Math.max(0, historyOffset + (intent.direction === "up" ? intent.lines : -intent.lines));
+      if (historyOffset === 0) {
+        hideLocalHistory();
+        return true;
+      }
+      // A failed passive read is retried only after another user gesture, not in a loop.
+      if (historyFailed) historyFailed = false;
+      historyActive = true;
+      if (historyRead && !historyStale) paintLocalHistory();
+      const needed = term.rows + historyOffset + 64;
+      ensureLocalHistory(pane, needed > historyReadLines ? Math.max(needed, historyReadLines * 2) : historyReadLines || HISTORY_PREFETCH_LINES);
+      return true;
+    };
     const flushControlWheel = (): void => {
       if (controlWheelTimer !== null) {
         window.clearTimeout(controlWheelTimer);
@@ -456,6 +611,20 @@ export function PaneTerminal({
         dragWheel(event);
         return false;
       }
+      const pane = paneRef.current;
+      // Switching into a TUI mouse/alternate buffer invalidates the passive history overlay.
+      if (historyActive && (term.buffer.active.type !== "normal" || term.modes.mouseTrackingMode !== "none")) {
+        hideLocalHistory();
+      }
+      // A touch device's scrollback is a client-local view. Herdr's host scroll offset is pane
+      // global, so sending terminal.scroll here would also move a native desktop Herdr window.
+      // Mouse-reporting TUIs still get their wheel events; ordinary history never leaves the page.
+      if (pane && localGridRef.current && !observeRef.current && !fixedGridRef.current
+        && !event.ctrlKey && term.buffer.active.type === "normal" && term.modes.mouseTrackingMode === "none"
+        && scrollLocalHistory(pane, event.deltaY, event.deltaMode)) {
+        if (term.hasSelection()) term.clearSelection();
+        return false;
+      }
       // terminal session control has no local PTY for xterm to encode the wheel into.
       // Normalize the browser delta to terminal rows and coalesce a burst before sending it:
       // herdr still decides host scrollback vs DEC mouse reporting / alternate scroll.
@@ -473,7 +642,6 @@ export function PaneTerminal({
           }
         }
         const modifiers = (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0);
-        const pane = paneRef.current;
         if (pane) queueControlWheel(
           pane,
           semanticWheelDeltaLines(event.deltaY, event.deltaMode, term.rows),
@@ -484,7 +652,7 @@ export function PaneTerminal({
         return false;
       }
       // an adopted grid sends herdr nothing: the wheel is the browser's, and pans the mount
-      if (adopted()) return false;
+      if (adopted() && !localGridRef.current) return false;
       if (term.hasSelection()) term.clearSelection();
       const reporting = term.modes.mouseTrackingMode !== "none";
       // a trackpad pinch arrives as a wheel with Ctrl down: it is not scrolling, and goes once as before
@@ -507,7 +675,7 @@ export function PaneTerminal({
     // drag pans it. Until the user pans, the view keeps the cursor's row in sight: the top of
     // the grid while the row fits there, else the bottom rows, where a prompt sits. A mirror
     // has no cursor; xterm's own rests on the last row with text, which serves the same.
-    const adopted = (): boolean => observeRef.current || fixedGridRef.current;
+    const adopted = (): boolean => observeRef.current || fixedGridRef.current || localGridRef.current;
     let panned = false;
     const followCursor = (): void => {
       host.toggleAttribute("data-adopted-grid", adopted());
@@ -794,6 +962,10 @@ export function PaneTerminal({
       if (paneRef.current) setInputReady(socket.canInput(paneRef.current));
       if (message.type === "pty-data") {
         if (message.pane_id !== paneRef.current) return;
+        // Reading older rows is a frozen per-client snapshot while the live pane advances.
+        // Refresh it only on the next entry; never refetch on every incoming ANSI frame.
+        if (historyActive) historyAdvancedWhileViewing = true;
+        else historyStale = true;
         // raw pty bytes: append, never repaint, so xterm keeps the screen and selection
         const acknowledge = socket.outputAcknowledgement(message);
         const owner = message.pane_id;
@@ -808,6 +980,9 @@ export function PaneTerminal({
             return;
           }
           setOutputReady(true);
+          if (historyActive && (term.buffer.active.type !== "normal" || term.modes.mouseTrackingMode !== "none")) {
+            hideLocalHistory();
+          }
           followCursor();
           const lines: string[] = [];
           const buffer = term.buffer.active;
@@ -838,7 +1013,7 @@ export function PaneTerminal({
         setObserving(nowObserving);
         term.options.disableStdin = nowObserving || secretRef.current !== null || heldRef.current;
         onRoleAckRef.current?.(message.mode);
-        if (!nowObserving && !fixedGridRef.current && !chatViewRef.current) {
+        if (!nowObserving && !fixedGridRef.current && !localGridRef.current && !chatViewRef.current) {
           try {
             fit.fit();
           } catch {
@@ -865,8 +1040,9 @@ export function PaneTerminal({
         // chat lens entered later must draw its hidden screen for that grid, not this device's
         sharedGridRef.current = { cols: message.cols, rows: message.rows };
         // the chat lens adopts the shared grid too: the screen it reads (a masked prompt) is drawn for it
-        if (!observeRef.current && !fixedGridRef.current && !chatViewRef.current) return;
+        if (!observeRef.current && !fixedGridRef.current && !localGridRef.current && !chatViewRef.current) return;
         if (term.cols !== message.cols || term.rows !== message.rows) term.resize(message.cols, message.rows);
+        if (historyActive) paintLocalHistory();
         panned = false;
         followCursor();
       } else if (message.type === "error") {
@@ -956,6 +1132,7 @@ export function PaneTerminal({
       commandBackspace = false;
       const current = paneRef.current;
       if (!current || observeRef.current || secretRef.current !== null || heldRef.current) return;
+      if (historyActive) hideLocalHistory();
       let input = data;
       if (ctrlRef.current && isPrintable(data)) {
         ctrlRef.current = false;
@@ -1067,10 +1244,10 @@ export function PaneTerminal({
     });
     observer.observe(host);
 
-    // Touch screens never emit wheel events and xterm.js has no touch scrolling:
-    // translate a single-finger drag on the terminal into wheel events, so the
-    // normal buffer scrolls its own viewport and the alternate buffer (with mouse
-    // reporting on) forwards the gesture to herdr, exactly like a mouse wheel.
+    // Touch screens never emit wheel events and xterm.js has no touch scrolling.
+    // A vertical drag browses this browser's passive history; only a mouse-reporting
+    // TUI is allowed to receive semantic wheel input. Horizontal movement pans an
+    // adopted shared grid without resizing or scrolling herdr itself.
     // The text follows the finger, as everywhere on a phone: dragging down brings
     // older lines in. Each event carries the finger's position, since xterm reports
     // a wheel at the cell under it (without one, every report said row 1, column 1).
@@ -1097,9 +1274,14 @@ export function PaneTerminal({
       const across = touchX - first.clientX;
       touchX = first.clientX;
       touchY = first.clientY;
-      if (adopted()) {
+      if (adopted() && !localGridRef.current) {
         panned = true;
         host.scrollBy(across, delta);
+        return;
+      }
+      if (localGridRef.current && Math.abs(across) > Math.abs(delta)) {
+        panned = true;
+        host.scrollBy(across, 0);
         return;
       }
       if (delta !== 0) {
@@ -1121,7 +1303,7 @@ export function PaneTerminal({
     // connections never do this: they own no geometry to re-assert.
     const refit = (): void => {
       const current = paneRef.current;
-      if (!current || observeRef.current || fixedGridRef.current || chatViewRef.current) return;
+      if (!current || observeRef.current || fixedGridRef.current || localGridRef.current || chatViewRef.current) return;
       try {
         fit.fit();
       } catch {
@@ -1141,6 +1323,9 @@ export function PaneTerminal({
       observer.disconnect();
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       if (controlWheelTimer !== null) window.clearTimeout(controlWheelTimer);
+      ++historyEpoch;
+      resetLocalHistoryRef.current = () => {};
+      hideLocalHistoryRef.current = () => {};
       host.removeEventListener("touchstart", onTouchStart);
       host.removeEventListener("touchmove", onTouchMove);
       host.removeEventListener("touchend", onTouchEnd);
@@ -1171,7 +1356,9 @@ export function PaneTerminal({
       host.removeEventListener("compositionstart", compositionStart);
       host.removeEventListener("compositionend", compositionEnd);
       term.dispose();
+      historyTerm.dispose();
       termRef.current = null;
+      historyTermRef.current = null;
       socketRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one terminal for the mount; theme/font follow in their own effect
@@ -1180,7 +1367,9 @@ export function PaneTerminal({
   // the theme follows the settings without a remount
   useEffect(() => {
     const term = termRef.current;
-    if (term) term.options.theme = terminalTheme(theme, palette);
+    const next = terminalTheme(theme, palette);
+    if (term) term.options.theme = next;
+    if (historyTermRef.current) historyTermRef.current.options.theme = next;
   }, [theme, palette]);
 
   // the font follows too, and a font change moves the grid. xterm measures the cell (and the DOM
@@ -1198,7 +1387,12 @@ export function PaneTerminal({
       if (term.options.fontSize === terminalFontSize && term.options.fontFamily === fontFamily) return;
       term.options.fontSize = terminalFontSize;
       term.options.fontFamily = fontFamily;
-      if (observeRef.current || fixedGridRef.current || chatViewRef.current) return;
+      const historyTerm = historyTermRef.current;
+      if (historyTerm) {
+        historyTerm.options.fontSize = terminalFontSize;
+        historyTerm.options.fontFamily = fontFamily;
+      }
+      if (observeRef.current || fixedGridRef.current || localGridRef.current || chatViewRef.current) return;
       try {
         fitRef.current?.fit();
       } catch {
@@ -1216,6 +1410,7 @@ export function PaneTerminal({
   // resize while covered may have been skipped by a zero-size layout
   useEffect(() => {
     if (chatView) {
+      hideLocalHistoryRef.current();
       const pane = paneRef.current;
       if (pane) socketRef.current?.keepSize(pane);
       // the grid another device left the pty at while this one showed the terminal
@@ -1224,7 +1419,7 @@ export function PaneTerminal({
       if (shared && hidden && !observeRef.current && (hidden.cols !== shared.cols || hidden.rows !== shared.rows)) hidden.resize(shared.cols, shared.rows);
       return;
     }
-    if (observeRef.current || fixedGridRef.current) return;
+    if (observeRef.current || fixedGridRef.current || localGridRef.current) return;
     const term = termRef.current;
     try {
       fitRef.current?.fit();
@@ -1252,9 +1447,10 @@ export function PaneTerminal({
     setUnsupported(false);
     fixedGridRef.current = false;
     controlSessionRef.current = false;
+    localGridRef.current = coarseRef.current;
     sharedGridRef.current = null;
     // the next pane's grid is this browser's again unless it says otherwise (pane-geometry)
-    hostRef.current?.toggleAttribute("data-adopted-grid", observeRef.current);
+    hostRef.current?.toggleAttribute("data-adopted-grid", observeRef.current || localGridRef.current);
     secretRef.current = null;
     setSecret(null);
     term.options.disableStdin = observeRef.current;
@@ -1272,13 +1468,14 @@ export function PaneTerminal({
     setCtrlArmed(false);
     altRef.current = false;
     setAltArmed(false);
+    resetLocalHistoryRef.current(paneId);
     if (!paneId) return;
     try {
       fit?.fit();
     } catch {
       /* not laid out yet; the ResizeObserver will follow up */
     }
-    socket.attach(paneId, term.cols, term.rows, chatViewRef.current);
+    socket.attach(paneId, term.cols, term.rows, chatViewRef.current || localGridRef.current);
     // the chat lens covers the grid and its composer takes the keyboard: focusing the hidden
     // grid sent the keys straight to the pane, and showed a phone's IME text mid-screen
     if (!chatViewRef.current && !autoSelected && !coarseRef.current) term.focus();
@@ -1355,6 +1552,7 @@ export function PaneTerminal({
     if (!term || !socket || pane === null || secretRef.current !== null || heldRef.current) return false;
     const sent = socket.submit(pane, composerMessage(text), composerPayload(text, term.modes.bracketedPasteMode));
     if (sent === null) return false;
+    hideLocalHistoryRef.current();
     term.scrollToBottom();
     setChatSent((current) => current + 1);
     const owner = paneStorageId(machineId, pane);
@@ -1388,6 +1586,7 @@ export function PaneTerminal({
     const payload = message.includes("\n") ? composerPayload(text, term.modes.bracketedPasteMode) : message;
     const sent = socket.submit(pane, message, payload, true);
     if (sent === null) return false;
+    hideLocalHistoryRef.current();
     term.scrollToBottom();
     return sent.then((result) => (result.ok ? true : submitNote(result.code, result.message)));
   }, []);
@@ -1397,6 +1596,7 @@ export function PaneTerminal({
     const pane = paneRef.current;
     if (!socket || pane === null || !socket.connected) return false;
     const sent = socket.sendInput(pane, "\r");
+    if (sent) hideLocalHistoryRef.current();
     termRef.current?.scrollToBottom();
     return sent;
   }, []);

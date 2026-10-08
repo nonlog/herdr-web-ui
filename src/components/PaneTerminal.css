@@ -27,6 +27,7 @@
    on the mount: the fit addon subtracts the terminal element's padding but reads the
    parent's border-box width, so padding on the mount would overflow the last columns */
 .pane-terminal {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
@@ -36,6 +37,22 @@
      the composer instead, or starts pull-to-refresh */
   touch-action: none;
   overscroll-behavior: contain;
+}
+
+/* A touch client reads retained ANSI history into its own xterm instead of changing Herdr's
+   pane-global scroll offset. It sits over the live renderer; the live stream keeps updating
+   underneath and is revealed immediately when the local view returns to the bottom. */
+.pane-terminal-local-history {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--term-bg);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pane-terminal-local-history[hidden] {
+  display: none;
 }
 
 /* a grid that is not this browser's own (observing, or mirrored from a PC that cannot attach)

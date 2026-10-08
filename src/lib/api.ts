@@ -134,6 +134,16 @@ export async function fetchPaneTranscript(paneId: string, lines: number, machine
   }
 }
 
+/** Passive ANSI rows from the pane's retained history.
+ *
+ * Unlike pane.scroll / terminal.scroll this does not move herdr's shared viewport, so a
+ * phone can browse old output without moving a native Herdr window on another device.
+ */
+export async function fetchPaneHistoryAnsi(paneId: string, lines: number, machineId = "local"): Promise<PaneReadResult> {
+  const query = new URLSearchParams({ pane_id: paneId, source: "recent", format: "ansi", lines: String(lines) });
+  return (await getJson<{ read: PaneReadResult }>(machinePath(machineId, `pane/read?${query.toString()}`))).read;
+}
+
 /** Which turns (ConversationResponse.cursor): the page `before` a cursor, not past `since`; the newest ones `from` a held start. */
 export type ConversationPageQuery = { before?: string; since?: string; from?: string };
 

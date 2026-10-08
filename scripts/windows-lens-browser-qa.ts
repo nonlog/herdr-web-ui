@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 import { createServer } from "../server/index.ts";
-import { workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
+import { paneScrollInfo, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-winlens-"));
 const evidence = process.env["UI_EVIDENCE_DIR"];
@@ -26,6 +26,18 @@ async function until(done: () => Promise<boolean>, label: string, timeout = 10_0
   throw new Error(`Timed out: ${label}`);
 }
 const screen = (page: Page) => page.locator(".xterm-rows").innerText();
+const historyScreen = (page: Page) => page.locator(".pane-terminal-local-history .xterm-rows").innerText();
+const historyVisible = (page: Page) => page.locator(".pane-terminal-local-history:not([hidden])").count();
+/** Read the actual PTY's dimensions, not the size of either browser's DOM surface. */
+async function ptyGrid(page: Page, suffix: string): Promise<string> {
+  const marker = `pty-grid-${suffix}:`;
+  await page.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type(`printf '${marker}'; stty size`);
+  await page.keyboard.press("Enter");
+  const grid = new RegExp(`${marker}(\\d+)\\s+(\\d+)`);
+  await until(async () => grid.test(await screen(page)), `PTY grid ${suffix}`);
+  return (await screen(page)).match(grid)!.slice(1).join("x");
+}
 
 /** Where `text` sits against the terminal mount: each side's distance inside it, negative when cut off. */
 const inset = (page: Page, text: string) => page.evaluate((needle) => {
@@ -110,33 +122,76 @@ try {
   await page.locator(".xterm-helper-textarea").focus();
   await page.keyboard.type("for i in $(seq 1 60); do echo hist-$i; done; printf '%*s\\n' $COLUMNS right-edge");
   await page.keyboard.press("Enter");
+  const desktopGrid = await ptyGrid(page, "before");
   await page.keyboard.type("tail-marker");
   await until(async () => /right-edge[\s\S]*tail-marker/.test(await screen(page)), "the full screen reaches the controlled terminal");
 
-  // A controller is browser-sized: a phone does not pan a desktop grid. Its wheel goes
-  // to herdr, which scrolls host history and redraws the controller stream.
+  // A phone is a passive grid consumer: it must not resize the desktop-owned PTY or move
+  // herdr's pane-global scroll offset, even while reading older, ANSI-coloured history.
+  const nativeScroll = await paneScrollInfo(paneId);
+  assert.equal(nativeScroll?.offset_from_bottom, 0, "the native pane starts at live bottom");
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   const small = await phone.newPage();
+  const phoneMessages: Array<{ type?: string; keep_size?: boolean }> = [];
+  await small.routeWebSocket(/\/ws(\?|$)/, (socket) => {
+    const upstream = socket.connectToServer();
+    socket.onMessage((message) => {
+      if (typeof message === "string") {
+        try { phoneMessages.push(JSON.parse(message) as { type?: string; keep_size?: boolean }); } catch {}
+      }
+      upstream.send(message);
+    });
+  });
   small.on("pageerror", (error) => errors.push(error.message));
   small.setDefaultTimeout(10_000);
   await small.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
   await until(async () => (await screen(small)).includes("tail-marker"), "a phone-sized viewer gets the current controlled screen");
   const fittedControl = await scrollOf(small);
-  assert.deepEqual([fittedControl.adopted, fittedControl.width, fittedControl.height], [false, 0, 0], "a controlled grid fits the phone");
-  assert.equal(await small.locator(".pane-terminal").evaluate((host) => getComputedStyle(host).overflow), "hidden");
+  assert.equal(fittedControl.adopted, true, "phone adopts the original pane grid");
+  assert.equal(await small.locator(".pane-terminal").evaluate((host) => getComputedStyle(host).overflow), "auto");
+  assert.ok(phoneMessages.some((message) => message.type === "attach" && message.keep_size === true), "phone attaches with keep_size");
+  assert.equal(phoneMessages.filter((message) => message.type === "resize").length, 0, "phone never resizes the PTY");
+  assert.equal((await paneScrollInfo(paneId))?.viewport_rows, nativeScroll?.viewport_rows, "phone join preserves the native row count");
   await small.locator(".pane-terminal").hover();
   await small.mouse.wheel(0, -1200);
-  await until(async () => !(await screen(small)).includes("tail-marker"), "wheel up scrolls herdr history through terminal.scroll");
+  await until(async () => (await historyVisible(small)) > 0 && (await historyScreen(small)).includes("hist-"), "wheel up shows private ANSI history");
+  assert.equal((await paneScrollInfo(paneId))?.offset_from_bottom, 0, "phone history never moves native scrollback");
+  assert.equal(phoneMessages.filter((message) => message.type === "scroll" || message.type === "resize").length, 0, "passive history sends no shared scroll or resize");
+  assert.ok((await screen(page)).includes("tail-marker"), "desktop view stays at live bottom while phone scrolls");
   if (evidence) await small.screenshot({ path: join(evidence, "windows-control-phone-history.png") });
   await small.mouse.wheel(0, 1200);
-  await until(async () => (await screen(small)).includes("tail-marker"), "wheel down returns to the live bottom");
-  assert.deepEqual(await scrollOf(small), fittedControl, "semantic history scrolling never pans the terminal mount");
+  await until(async () => (await historyVisible(small)) === 0 && (await screen(small)).includes("tail-marker"), "wheel down returns to the live bottom");
+  assert.equal((await paneScrollInfo(paneId))?.offset_from_bottom, 0);
+  assert.equal(phoneMessages.filter((message) => message.type === "resize").length, 0);
+  assert.equal((await scrollOf(small)).left, fittedControl.left, "local history does not pan the horizontal grid");
   assert.equal(await small.evaluate(() => document.documentElement.scrollWidth <= innerWidth && scrollY === 0), true, "the page itself never scrolls");
-  console.log("PASS a Windows-style controller fits a phone and scrolls herdr history");
+  await page.keyboard.press("Control+u"); // discard the unsubmitted tail-marker before the next shell command
+  assert.equal(await ptyGrid(page, "after"), desktopGrid, "the desktop PTY geometry survives the phone session");
+  const phoneLine = small.getByRole("textbox", { name: "Terminal input line", exact: true });
+  await phoneLine.fill("echo phone-input-ok");
+  await phoneLine.press("Enter");
+  await until(async () => (await screen(page)).includes("phone-input-ok"), "phone can still send input at live bottom");
+
+  // Mouse-aware TUIs keep their semantic wheel events; only ordinary host history is local.
+  await page.keyboard.type("printf '\\033[?1000hmouse-mode-ready\\n'");
+  await page.keyboard.press("Enter");
+  await until(async () => (await screen(small)).includes("mouse-mode-ready"), "phone sees mouse reporting enabled");
+  await small.mouse.wheel(0, -120);
+  await until(async () => phoneMessages.some((message) => message.type === "scroll"), "TUI mouse reporting still sends semantic scroll");
+  const tuiScrollCount = phoneMessages.filter((message) => message.type === "scroll").length;
+  await page.keyboard.type("printf '\\033[?1000l\\033[?1049halt-mode-ready\\n'");
+  await page.keyboard.press("Enter");
+  await until(async () => (await screen(small)).includes("alt-mode-ready"), "phone sees alternate buffer");
+  await small.mouse.wheel(0, -120);
+  await until(async () => phoneMessages.filter((message) => message.type === "scroll").length > tuiScrollCount, "alternate screen keeps semantic scroll");
+  assert.equal(await historyVisible(small), 0, "TUI scrolling never opens history overlay");
+  assert.equal(phoneMessages.filter((message) => message.type === "resize").length, 0, "TUI operation does not resize shared pane");
+  await page.keyboard.type("printf '\\033[?1049l'");
+  await page.keyboard.press("Enter");
+  console.log("PASS a Windows-style controller keeps its native geometry and scroll offset as a phone reads local history");
   await phone.close();
 
-  // A herdr that attaches: an interact client's grid is its own and fits, so nothing pans and a
-  // vertical drag still scrolls herdr's history. An observer adopts the operator's grid and pans it.
+  // Direct attach also adopts the pane on touch; observers still pan an operator's full grid.
   const second = await workspaceCreate({ cwd, label: "herdr-web-ui-test-winlens-attach" });
   workspaces.push(second.workspace.workspace_id);
   const attached = second.root_pane.pane_id;
@@ -152,12 +207,14 @@ try {
   await line.press("Enter");
   await until(async () => (await screen(mine)).includes("hist-200"), "the attached pane's output");
   const fitted = await scrollOf(mine);
-  assert.deepEqual([fitted.adopted, fitted.width, fitted.height], [false, 0, 0], "a grid of this browser's own fits: nothing to pan");
-  assert.equal(await mine.locator(".pane-terminal").evaluate((host) => getComputedStyle(host).overflow), "hidden");
-  await dragUntil(mine, 0, 300, async () => !(await screen(mine)).includes("hist-200"), "a drag down still scrolls herdr's history");
-  assert.deepEqual(await scrollOf(mine), fitted, "and pans nothing");
+  assert.equal(fitted.adopted, true, "direct-attach phone adopts herdr's native grid");
+  assert.equal(await mine.locator(".pane-terminal").evaluate((host) => getComputedStyle(host).overflow), "auto");
+  const directScroll = await paneScrollInfo(attached);
+  await dragUntil(mine, 0, 300, async () => (await historyVisible(mine)) > 0 && (await historyScreen(mine)).includes("hist-"), "a drag down browses local history");
+  assert.equal((await paneScrollInfo(attached))?.offset_from_bottom, directScroll?.offset_from_bottom, "direct-attach phone does not move herdr scroll");
+  assert.equal((await scrollOf(mine)).left, fitted.left, "vertical history swipes do not pan the mount");
   if (evidence) await mine.screenshot({ path: join(evidence, "attach-phone-history.png") });
-  console.log("PASS a phone's own grid fits as before, and a drag scrolls herdr's history");
+  console.log("PASS direct-attach phone swipes use isolated history, not global pane scroll");
   await own.close();
 
   const operator = await context.newPage();
