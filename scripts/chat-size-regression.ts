@@ -61,7 +61,8 @@ const attached = (page: Page, nth = 1) => page.waitForFunction((count) => (windo
 /**
  * The chat lens leaves the shared terminal's size alone (#361): a desktop tab drives a pane's grid
  * from its terminal lens, a phone opens the same pane in the chat lens, and the program in the pane
- * still sees the desktop's size. Switching the phone to its terminal lens fits the grid to the phone.
+ * still sees the desktop's size. Switching the phone to its terminal lens must not reflow the
+ * shared pane either: it adopts the existing desktop grid and scrolls history independently.
  * The size is the one the pane's own shell reports (`stty size`), not what either browser thinks.
  */
 export async function checkChatKeepsTerminalSize(browser: Browser, origin: string): Promise<void> {
@@ -91,30 +92,28 @@ export async function checkChatKeepsTerminalSize(browser: Browser, origin: strin
     if (process.env.UI_EVIDENCE_DIR) await desktop.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "chat-size-desktop.png") });
     console.log(`PASS a phone's chat lens leaves the shared grid at the desktop's ${desktopSize}`);
 
-    // the phone's terminal lens fits the grid to the phone: the shell sees it change
-    // on a phone the lens switch shows no label: the button is known by its title
+    // Terminal and chat lenses now both preserve the native grid on a touch device.
+    // On a phone the lens switch shows no label: the button is known by its title.
     await phone.locator('button[title^="Live terminal"]').tap();
-    await phone.waitForFunction(() => (window as unknown as { frames_: { dir: string; type: string }[] }).frames_.some((f) => f.dir === "out" && f.type === "resize"), undefined, { timeout: 10_000 });
-    const deadline = Date.now() + 10_000;
-    let phoneSize = desktopSize;
-    while (phoneSize === desktopSize && Date.now() < deadline) phoneSize = await size();
-    assert.notEqual(phoneSize, desktopSize, "the phone's terminal lens fits the grid to the phone");
-    assert.ok(Number(phoneSize.split(" ")[1]) < Number(desktopSize.split(" ")[1]), `phone ${phoneSize} narrower than desktop ${desktopSize}`);
-    console.log(`PASS the phone's terminal lens fits the grid to ${phoneSize}`);
+    await phone.locator(".terminal-stack:not(.is-chat)").waitFor({ state: "attached" });
+    await phone.locator(".pane-terminal[data-adopted-grid]").waitFor({ state: "attached" });
+    await Bun.sleep(NO_RESIZE_WAIT_MS);
+    assert.deepEqual(await sent(phone), [{ dir: "out", type: "attach", keep_size: true }], "the phone's terminal lens does not send resize");
+    assert.equal(await size(), desktopSize, "the phone's terminal lens preserves the desktop grid");
+    console.log(`PASS both phone lenses leave the shared grid at ${desktopSize}`);
 
-    // the desktop's terminal lens ignored that resize: it drives the grid itself. Entering the chat
-    // lens, its hidden screen takes the grid the pty has now, since what the chat reads there (a
-    // masked prompt) is drawn for the phone's grid. xterm's DOM renderer keeps one element a row.
+    // The desktop still owns its normal terminal grid; switching to chat must adopt the same
+    // grid without resizing it. xterm's DOM renderer keeps one element per row.
     const hiddenRows = () => desktop.locator(".pane-terminal .xterm-rows > div").count();
-    const phoneRows = Number(phoneSize.split(" ")[0]);
-    assert.notEqual(await hiddenRows(), phoneRows, "the desktop's terminal lens kept its own grid");
+    const desktopRows = Number(desktopSize.split(" ")[0]);
+    assert.equal(await hiddenRows(), desktopRows, "the desktop's terminal grid remains intact");
     await desktop.getByTitle("Chat transcript (⌘⇧J)", { exact: true }).click();
     await desktop.locator(".terminal-stack.is-chat").waitFor({ state: "attached" });
     const adopted = Date.now() + 10_000;
-    while (await hiddenRows() !== phoneRows && Date.now() < adopted) await Bun.sleep(100);
-    assert.equal(await hiddenRows(), phoneRows, "the desktop's chat lens draws its hidden screen for the shared grid");
-    assert.equal(await size(), phoneSize, "entering the chat lens resizes nothing");
-    console.log(`PASS the desktop's chat lens draws its hidden screen for the shared grid of ${phoneSize}`);
+    while (await hiddenRows() !== desktopRows && Date.now() < adopted) await Bun.sleep(100);
+    assert.equal(await hiddenRows(), desktopRows, "the desktop's chat lens keeps the shared row count");
+    assert.equal(await size(), desktopSize, "entering the desktop chat lens resizes nothing");
+    console.log(`PASS the desktop's chat lens preserves the native grid of ${desktopSize}`);
   } finally {
     for (const context of contexts) await context.close();
     await workspaceClose(created.workspace.workspace_id).catch(() => undefined);
