@@ -395,7 +395,7 @@ export function createServer(
   // herdr releases its exclusive attach slot only after the old process exits.
   const retiringAttachments = new Map<string, Promise<void>>();
   const clients = new Set<Client>();
-  type PendingLease = { attachment: PaneAttachment; pty: PtySession | MirrorSession; authority: object };
+  type PendingLease = { attachment: PaneAttachment; pty: PaneAttachment["pty"]; authority: object };
   const pendingAuthorities = new WeakMap<Client, Map<string, object>>();
   type PendingItem = PendingRecord<Client, PendingLease>;
   const pending = new PendingInputs<Client, PendingLease>((owner, paneId, messages, removed) => {
