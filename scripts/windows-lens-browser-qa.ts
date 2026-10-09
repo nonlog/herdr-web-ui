@@ -18,7 +18,7 @@ const pages: Page[] = [];
 const errors: string[] = [];
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 let native: PtySession | undefined;
-type Frame = { type?: string; pane_id?: string; keep_size?: boolean; data?: string };
+type Frame = { type?: string; pane_id?: string; keep_size?: boolean; data?: string; keys?: string[] };
 
 async function until(done: () => Promise<boolean>, label: string, timeout = 15_000): Promise<void> {
   const deadline = Date.now() + timeout;
@@ -183,6 +183,21 @@ try {
   assert.equal(await size(paneId), desktopGrid, "native PTY geometry is unchanged");
   await phone.setViewportSize({ width: 390, height: 844 });
   console.log(`PASS isolated touch history, ANSI, frozen viewport, input and geometry; cached gesture ${elapsed.toFixed(1)} ms with 800 ms artificial history latency`);
+
+  // A Kitty-disambiguated TUI distinguishes the Escape key from a literal 0x1b.
+  // This reproduces the Pi/Claude/Codex Stop failure with a harmless test process,
+  // never an agent in the user's real session.
+  const kitty = join(root, "kitty.py");
+  writeFileSync(kitty, "import os,sys,termios,tty\nold=termios.tcgetattr(0)\ntty.setraw(0)\ntry:\n sys.stdout.write('\\x1b[>1uKITTY-READY\\r\\n');sys.stdout.flush()\n while True:\n  data=os.read(0,128)\n  sys.stdout.write('KITTY-BYTES:'+data.hex()+'\\r\\n');sys.stdout.flush()\n  if b'q' in data: break\nfinally:\n sys.stdout.write('\\x1b[<uKITTY-END\\r\\n');sys.stdout.flush();termios.tcsetattr(0,termios.TCSADRAIN,old)\n");
+  await shell(desktop, `python3 -u '${kitty}'`);
+  await until(async () => (await screen(desktop)).includes("KITTY-READY"), "Kitty keyboard mode is active in the isolated TUI");
+  const escSentAt = desktopWire.sent.length;
+  await input(desktop).press("Escape");
+  await until(async () => desktopWire.sent.slice(escSentAt).some((m) => m.type === "keys" && m.keys?.[0] === "esc"), "physical Escape is a semantic key");
+  await until(async () => (await screen(desktop)).includes("KITTY-BYTES:1b5b323775"), "Herdr encodes Escape according to Kitty protocol, rather than sending raw ESC");
+  await paneSendText(paneId, "q");
+  await until(async () => (await screen(desktop)).includes("KITTY-END"), "Kitty test process exits without interrupting an agent");
+  console.log("PASS Windows-style control delivers a semantic Escape to a Kitty-disambiguated TUI");
 
   // Herdr's JSON ANSI bridge does not expose the application's mouse/alternate modes.
   // Explicit Application scroll preserves TUI operation without guessing those modes.

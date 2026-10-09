@@ -1247,8 +1247,11 @@ export function PaneTerminal({
       const input = data;
       const key = keyFromData(data);
       const chord = !pasting && !composingRef.current && !compositionCommitPendingRef.current
-        ? barKey !== null ? barKey.chord
-          : physicalChord ?? (hasModifiers(modifiersRef.current) && key !== null ? terminalChord(key, modifiersRef.current) : null)
+        ? (barKey?.chord ?? physicalChord
+          ?? (hasModifiers(modifiersRef.current) && key !== null ? terminalChord(key, modifiersRef.current) : null)
+          // A lone legacy ESC byte is not the Escape key in every negotiated TUI
+          // protocol (e.g. Kitty disambiguated keys). Let Herdr encode the key.
+          ?? (key === "Escape" ? "esc" : null))
         : null;
       // Herdr, rather than xterm's legacy encoder, preserves all modifier bits
       // in the keyboard protocol requested by the program in this pane.
@@ -1769,13 +1772,16 @@ export function PaneTerminal({
     }
   }, [inputLine, coarse, chatView, directTyping, paneId]);
 
-  // the composer's stop button: Escape interrupts the agent's current turn in every
-  // supported TUI (Claude Code, omp, codex) without killing the process the way ^C would
+  // A Stop is a semantic Escape key, not an injected raw ESC byte. The live hidden
+  // xterm may not accept input in Chat mode; more importantly, programs using the
+  // Kitty keyboard protocol require Herdr's own encoding for Escape. Do not send
+  // Ctrl+C as a fallback: it can terminate a shell or an agent process.
   const abortTurn = useCallback(() => {
-    const term = termRef.current;
     const socket = socketRef.current;
-    if (!term || !socket || !socket.connected) return;
-    term.input("\u001b");
+    const pane = paneRef.current;
+    if (!socket || pane === null || !socket.sendKeys(pane, ["esc"])) {
+      setInputError(tRef.current("Not sent: the terminal is not ready for keys."));
+    }
   }, []);
 
   // While the agent runs, append to its held messages. Each requires an explicit send.
@@ -1981,7 +1987,7 @@ export function PaneTerminal({
             <a className="btn" href={`?machine=${encodeURIComponent(machineId)}&pane=${encodeURIComponent(paneId)}`}>{t("Reconnect")}</a>
           </div>
         )}
-        {!chatView && inputError && <div className="terminal-banner" role="status">{inputError}<button type="button" className="btn terminal-banner-action" onClick={() => setInputError(null)}>{t("Dismiss")}</button></div>}
+        {inputError && <div className="terminal-banner" role="alert">{inputError}<button type="button" className="btn terminal-banner-action" onClick={() => setInputError(null)}>{t("Dismiss")}</button></div>}
         {!chatView && !observing && connected && !inputReady && !held && !ended && <div className="terminal-banner" role="status">{t("Waiting for terminal input…")}</div>}
         {/* the chat lens says these itself (ChatView), inline; the pills are the grid's */}
         {paneId !== null && !chatView && ended && !outputError && (

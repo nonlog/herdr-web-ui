@@ -51,6 +51,12 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 
 合并重点检查：`PaneTerminal.tsx` 的粘滞修饰键、IME 和 pending-input；`server/index.ts` 新版 attachment claim 生命周期；协议能力同时包含 `pending-input` 与 `terminal-scroll`；旧 mirror 的输入失效检查；CI 中单独运行 Windows 控制器的双客户端回归。
 
+## Chat Stop 与终端 Esc 中止链路
+
+Chat 的 Stop 按钮不能向隐藏的 xterm 注入原始 `0x1B` 代替按键；普通物理 Esc 和手机按键栏 Esc 也不能一律当作裸字节。Pi、Codex、Claude Code 等 TUI 可能启用 Kitty 键盘协议，Escape 的真实编码要由 Herdr 根据 pane 当前协商协议决定。现在三处均经 WebSocket `keys: ["esc"]` 走 `pane.send_keys`，保留组合键、粘贴文本、IME 及离线不重放的原有约束；不自动发送 Ctrl+C，避免终止进程。连接未就绪时在 Chat/Terminal 显示失败说明。
+
+`scripts/key-bar-customization-demo-regression.ts` 断言物理 Esc、按键栏 Esc 和 Chat Stop 各发送一条语义按键而不是 `input` 原始字节；`scripts/windows-lens-browser-qa.ts` 还在隔离窗格启动声明 Kitty 键盘协议的程序，检查 Herdr 实际传给程序的 Escape 编码。绝不对用户正在运行的 Pi、Codex 或 Claude Code 会话执行中止测试。
+
 ## 构建、验证与部署
 
 **开发过程中的构建验证、发布打包和可下载产物使用 GitHub Actions，不能在 CI 失败时私自回退本机或 VPS 开发构建。正常插件安装、更新所必需的依赖安装和构建允许在目标机器执行。** 这两类操作必须区分，不得把开发构建约束扩大成禁止正常安装。源码检查、git diff 以及不构建项目的小单元测试也允许在本机执行。

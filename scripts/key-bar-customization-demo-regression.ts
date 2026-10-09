@@ -272,6 +272,18 @@ try {
         await dialog.locator(".key-bar-settings").getByRole("button", { name: "Restore defaults", exact: true }).tap();
         await closeSettings(page, dialog);
         assert.deepEqual(await keysOf(page), ["direct", "Escape", "Tab", "Control", "Alt", "Shift", "Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ctrl-c"]);
+        // All three Escape entry points must send a semantic key. A literal 0x1b
+        // loses the negotiated Kitty encoding in an actual Pi/Codex TUI.
+        await input.focus();
+        await expectFrame(page, () => input.press("Escape"), { type: "keys", keys: ["esc"] });
+        await expectFrame(page, () => bar.locator('[data-key="Escape"]').tap(), { type: "keys", keys: ["esc"] });
+        await page.getByTitle("Chat transcript (⌘⇧J)", { exact: true }).click();
+        const stop = page.getByRole("button", { name: "Stop agent", exact: true });
+        await stop.waitFor();
+        await expectFrame(page, () => stop.click(), { type: "keys", keys: ["esc"] });
+        await page.getByTitle("Live terminal (⌘⇧J)", { exact: true }).click();
+        await ready(page);
+        console.log("PASS physical Escape, key-bar Escape and Chat Stop all send the semantic esc key");
         assert.deepEqual(errors, []);
         console.log("PASS an empty key list keeps the keyboard mode toggle usable, persists, and can restore the defaults");
 

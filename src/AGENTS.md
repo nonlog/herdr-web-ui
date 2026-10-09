@@ -4,7 +4,8 @@ React 18 + xterm.js browser client. The render-state machine, xterm lifecycle an
 
 ## ANTI-PATTERNS
 - Never persist the auth token client-side: the HttpOnly cookie is the only storage; no localStorage/sessionStorage anywhere.
-- Key bar taps and Stop go through `term.input()`. PaneTerminal routes held-modifier chords through WS `keys` so Herdr encodes the target pane's keyboard protocol; other input uses WS `input`. Composer and TerminalInput text sends use `socket.submit()` (WS `submit` when advertised, else `input` + `\r`); their text is never modified by held keys. Prompt-card answers use `/api/pane/prompt/answer`.
+- Key-bar taps normally go through `term.input()`; PaneTerminal routes held-modifier chords, unmodified Escape and Chat Stop through WS `keys` so Herdr encodes the target pane's keyboard protocol. Other ordinary terminal input uses WS `input`. Composer and TerminalInput text sends use `socket.submit()` (WS `submit` when advertised, else `input` + `\r`); their text is never modified by held keys. Prompt-card answers use `/api/pane/prompt/answer`.
+- Chat Stop and unmodified physical/key-bar Escape must use WS semantic `keys: ["esc"]` (Herdr's `pane.send_keys`), not raw 0x1b through `term.input` to the controller; programs with Kitty keyboard disambiguation require its negotiated encoding. Never send Ctrl+C as an automatic fallback. Test these paths with a synthetic Kitty TUI, never an active user agent.
 - Never hardcode a color in component CSS: the light theme is only token overrides.
 - `term.reset()` fires only in the paneId effect, never mid-stream.
 - Output ACKs run in xterm's write callback and capture the connection and pane subscription; never queue them across reconnects or pane switches. A 4008 overload close stops automatic reconnect and shows a notice; selecting another pane explicitly reconnects. Normal reconnect replays stored role/attach/geometry once, without a second control-frame queue.

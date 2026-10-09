@@ -3,6 +3,10 @@
 ## [Unreleased - nonlog fork]
 
 ### Fork changes
+- Fix Chat Stop and terminal Escape across Kitty-capable TUIs: both physical
+  Escape and the key bar use the semantic `esc` chord, as does Chat Stop; do not
+  inject a legacy ESC byte or fall back to process-killing Ctrl+C. Add demo
+  and isolated real-Herdr regressions for the complete delivery path.
 - Keep Windows terminal controllers on the native pane's grid on desktop and touch;
   browser resize/focus cannot enlarge the shared PTY and hide its bottom input row.
   Follow native window changes and announce frame geometry before painting or replaying.
