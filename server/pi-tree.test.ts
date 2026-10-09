@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, t
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { piAbandonedTurns, piBranchSegments, piEntryIndex } from "./pi-tree.ts";
+import { MAX_BRANCH_SEGMENTS, piAbandonedTurns, piBranchSegments, piEntryIndex } from "./pi-tree.ts";
 import { transcriptPage, transcriptToolOutput } from "./conversation.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-pi-tree-"));
@@ -49,6 +49,33 @@ describe("pi's entry tree", () => {
     ]);
     expect(branchOf(path)).toEqual([{ start: 0, end: statSync(path).size }]);
     expect(shown(path)).toEqual(["user:first", "assistant:answer one", "user:second", "assistant:answer two"]);
+  });
+
+  it("does not reject a long contiguous branch solely because it exceeds 64 MiB", () => {
+    const path = file([
+      entry("s", null, { type: "session", version: 3, cwd: root }),
+      user("u1", "s", "first"),
+      assistant("a1", "u1", "answer"),
+    ]);
+    // A metadata-only large-range fixture: inflate an indexed record's offsets
+    // instead of allocating a 96 MiB tool result. The branch builder must never
+    // read or copy that payload; transcriptPage separately bounds its page reads.
+    const index = piEntryIndex(path)!;
+    index.entries.at(-1)!.end = 96 * 1024 * 1024;
+    expect(piBranchSegments(path, 96 * 1024 * 1024)).toEqual([{ start: 0, end: 96 * 1024 * 1024 }]);
+  });
+
+  it("refuses excessively fragmented branches without limiting contiguous history", () => {
+    const records: unknown[] = [entry("s", null, { type: "session", version: 3, cwd: root })];
+    let parent = "s";
+    for (let i = 0; i < MAX_BRANCH_SEGMENTS; i++) {
+      const current = `live-${i}`;
+      records.push(user(current, parent, "live"));
+      records.push(assistant(`abandoned-${i}`, "s", "an abandoned answer"));
+      parent = current;
+    }
+    records.push(user("live-final", parent, "still live"));
+    expect(branchOf(file(records))).toBeNull();
   });
 
   it("shows only the branch the leaf stands on after /tree", () => {

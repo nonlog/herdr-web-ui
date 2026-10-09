@@ -10,14 +10,15 @@
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 /**
- * A branch longer than this is not returned at all. The caller treats that as a transcript it
- * cannot read (`branch_unreadable`) and the chat falls back to the pane's terminal output, so an
- * oversized session shows scrollback rather than a projection built by holding that many bytes of
- * paths in memory. The largest branch across 147 real session files here is 23.3 MiB (24,451,068
- * bytes), so the cap sits 2.7x above what pi has been seen to write — close enough that a long-lived
- * pane could reach it, which is why it degrades to the fallback instead of throwing.
+ * Bound the number of disjoint ranges, not the accumulated transcript bytes. A
+ * long-lived Pi session can exceed 64 MiB while its live branch remains one
+ * contiguous range: the conversation reader only materializes bounded pages
+ * (16 MiB for the latest page, up to 64 MiB for a requested older page), and
+ * retaining a range's offsets never allocates its payload. A pathological
+ * branch with many non-contiguous ranges would instead make each page open
+ * thousands of little file slices, so keep that independent resource bound.
  */
-export const MAX_BRANCH_BYTES = 64 * 1024 * 1024;
+export const MAX_BRANCH_SEGMENTS = 4096;
 
 /** One range of the transcript file, in the order it should be read. */
 export interface TranscriptSegment { start: number; end: number }
@@ -160,9 +161,9 @@ export function forgetAllPiIndexes(): void {
  * The active branch: the last entry written back to its root, oldest first, as byte
  * ranges of the file. Adjacent entries merge into one range, so a session no /tree
  * touched reads as the single prefix it is. An id repeated (never pi, but never
- * trusted) keeps its last append; a branch over MAX_BRANCH_BYTES is refused, and the chat falls
- * back to terminal output
- * of projected. Null when the tree cannot be read, or holds no entry at all.
+ * trusted) keeps its last append; only a branch with too many disjoint byte
+ * ranges is refused. A large contiguous branch remains readable one page at a
+ * time. Null when the tree cannot be read, or holds no entry at all.
  */
 export function piBranchSegments(path: string, size: number): TranscriptSegment[] | null {
   const index = piEntryIndex(path);
@@ -175,12 +176,9 @@ export function piBranchSegments(path: string, size: number): TranscriptSegment[
   const chain: PiEntry[] = [];
   const seen = new Set<string>();
   let next: PiEntry | undefined = leaf;
-  let total = 0;
   while (next !== undefined && !seen.has(next.id)) {
     seen.add(next.id);
     chain.push(next);
-    total += next.end - next.start;
-    if (total > MAX_BRANCH_BYTES) return null;
     const parent: PiEntry | undefined = next.parent === null ? undefined : byId.get(next.parent);
     // a parent that never appears (a foreign id, a torn index) ends the walk short:
     // what it still resolves to is shown, the unreadable head is not invented
@@ -190,7 +188,10 @@ export function piBranchSegments(path: string, size: number): TranscriptSegment[
   for (const entry of chain.reverse()) {
     const last = segments[segments.length - 1];
     if (last !== undefined && last.end === entry.start) last.end = entry.end;
-    else segments.push({ start: entry.start, end: entry.end });
+    else {
+      if (segments.length === MAX_BRANCH_SEGMENTS) return null;
+      segments.push({ start: entry.start, end: entry.end });
+    }
   }
   return segments;
 }

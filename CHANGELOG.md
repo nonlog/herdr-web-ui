@@ -3,6 +3,10 @@
 ## [Unreleased - nonlog fork]
 
 ### Fork changes
+- Fix long-running Pi sessions showing `Conversation unavailable`: the Pi entry-tree
+  reader no longer rejects a continuous active branch at 64 MiB, because only
+  bounded conversation pages are materialized. Limit discontiguous ranges
+  instead, and cover both large contiguous and pathological fragmented branches.
 - Fix Chat Stop and terminal Escape across Kitty-capable TUIs: both physical
   Escape and the key bar use the semantic `esc` chord, as does Chat Stop; do not
   inject a legacy ESC byte or fall back to process-killing Ctrl+C. Add demo
