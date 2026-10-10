@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { closeSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, sep, toNamespacedPath } from "node:path";
+import nodePath, { isAbsolute, join, type PlatformPath } from "node:path";
 import type { ConversationPart, ConversationTurn, HerdrPane } from "../shared/protocol.ts";
 import { patchFiles, patchText } from "../shared/patch.ts";
 import { processStartedAt } from "./process-start.ts";
@@ -20,7 +20,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function contextOnly(text: string): boolean {
   const value = text.trim();
-  return (value.startsWith("# AGENTS.md instructions for ") && value.includes("</INSTRUCTIONS>"))
+  return (/^# AGENTS\.md instructions(?: for [^\r\n]+)?\r?\n\s*<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>(?:\s*<environment_context>[\s\S]*<\/environment_context>)?$/.test(value))
     || /^<(environment_context|permissions instructions|turn_aborted|subagent_notification)>[\s\S]*<\/\1>$/.test(value);
 }
 
@@ -453,12 +453,75 @@ export function storedCwds(cwd: string): [string, string] {
   return [cwd, cwd];
 }
 
+/**
+ * A Windows cwd in one spelling for every way Codex and herdr may write it: without `\\?\` and
+ * with an upper-case drive letter (`d:\work` and `\\?\D:\work` are `D:\work`). The rest is
+ * compared as it is: a Windows directory can be case-sensitive, and nothing short of the file
+ * system tells `app` from `App`, so a cwd stored in another letter case finds nothing (#587).
+ */
+export function directoryKey(cwd: string): string {
+  const plain = withoutVerbatimPrefix(cwd);
+  return /^[a-z]:\\/.test(plain) ? plain[0]!.toUpperCase() + plain.slice(1) : plain;
+}
+
+/** Whether two cwds are one directory by `directoryKey`; POSIX ones only when they are equal. */
+export function sameDirectory(left: string, right: string): boolean {
+  if (directoryKey(left) === directoryKey(right)) return true;
+  if (process.platform !== "win32") return false;
+  try {
+    // bigint: a Windows file ID is 64-bit, and two of them can round to one number
+    const a = statSync(left, { bigint: true });
+    const b = statSync(right, { bigint: true });
+    return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+  } catch { return false; }
+}
+
+/** The other Codex panes herdr shows in this pane's directory, in any spelling `sameDirectory` takes. */
+export function codexPeersIn(panes: readonly HerdrPane[], paneId: string, cwd: string): HerdrPane[] {
+  // the agent first: sameDirectory can ask the file system, and only Codex panes need it
+  return panes.filter((pane) => pane.pane_id !== paneId && (pane.agent ?? pane.agent_session?.agent) === "codex"
+    && pane.cwd != null && sameDirectory(pane.cwd, cwd));
+}
+
+/**
+ * Codex's `WHERE` condition for the threads of a directory, and its parameters: each spelling
+ * `storedCwds` gives, with the drive letter in either case. Exact comparisons, so the lookup
+ * stays on Codex's own binary cwd index.
+ */
+export function storedCwdCondition(cwd: string): { where: string; params: string[] } {
+  // Windows resolves an existing directory to its on-disk casing. Herdr may report the
+  // shell's spelling while Codex stores the canonical spelling in its binary cwd index.
+  // Keep both: the original is needed when Codex recorded it before a rename or via a link.
+  let canonical = cwd;
+  if (process.platform === "win32") {
+    try { canonical = realpathSync.native(cwd); } catch { /* A removed cwd still has its reported spelling. */ }
+  }
+  const params = [...new Set([cwd, canonical].flatMap((path) => storedCwds(path)).flatMap((spelling) => {
+    const drive = /^((?:\\\\\?\\)?)([A-Za-z])(:\\.*)$/s.exec(spelling);
+    return drive ? [`${drive[1]}${drive[2]!.toUpperCase()}${drive[3]}`, `${drive[1]}${drive[2]!.toLowerCase()}${drive[3]}`] : [spelling];
+  }))];
+  return { where: `cwd IN (${params.map(() => "?").join(", ")})`, params };
+}
+
+/**
+ * Whether the canonical `file` lies inside the canonical store `root`. Either may carry the
+ * Windows `\\?\` prefix without the other (a prefixed CODEX_HOME, #587), or its drive letter in
+ * another case: it is not another root. Past the drive letter the comparison is exact, as
+ * `directoryKey` has it: a case-sensitive directory's `Sessions` is not `sessions`.
+ */
+export function rolloutInsideStore(root: string, file: string, paths: PlatformPath = nodePath): boolean {
+  const key = (path: string) => directoryKey(paths.normalize(withoutVerbatimPrefix(path)));
+  const base = key(root);
+  const inside = base.endsWith(paths.sep) ? base : `${base}${paths.sep}`;
+  const path = key(file);
+  return path.length > inside.length && path.startsWith(inside);
+}
+
 /** File access is constrained by canonical paths, including symlink targets. */
 export function codexRolloutPath(path: string, codexHome: string): string | null {
   try {
     const canonical = realpathSync(withoutVerbatimPrefix(path));
-    const rel = relative(toNamespacedPath(realpathSync(join(codexHome, "sessions"))), toNamespacedPath(canonical));
-    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || !canonical.endsWith(".jsonl")) return null;
+    if (!rolloutInsideStore(realpathSync(join(codexHome, "sessions")), canonical) || !canonical.endsWith(".jsonl")) return null;
     if (!statSync(canonical).isFile()) return null;
     const metadata = rolloutHeader(canonical);
     // A child Codex can be in the foreground process group too. Its rollout
@@ -864,6 +927,107 @@ export function matchShortCodexAnswers(screen: string, candidates: { path: strin
   return candidates[only]!.path;
 }
 
+interface CodexExchange { user: string; assistant: string }
+interface CodexFirstExchangeCandidate {
+  path: string;
+  text: string;
+  firstUserMessage?: string | null;
+  createdAtMs?: number;
+}
+
+const normalizePrompt = (text: string): string => text.trim().replace(/\s+/g, " ");
+
+/** User/assistant exchanges as recorded, retaining later prompts as competing evidence. */
+function codexExchanges(text: string): CodexExchange[] {
+  const turns = parseCodexTranscript(text, Infinity);
+  const exchanges: CodexExchange[] = [];
+  let user: string | null = null;
+  let assistant: string[] = [];
+  const finish = () => {
+    if (user !== null) exchanges.push({ user, assistant: assistant.join("\n") });
+  };
+  for (const turn of turns) {
+    const prose = turn.parts.flatMap((part) => part.kind === "text" ? [part.text] : []).join("\n");
+    if (turn.role === "user") {
+      finish();
+      user = prose;
+      assistant = [];
+    } else if (user !== null && prose !== "") assistant.push(prose);
+  }
+  finish();
+  return exchanges;
+}
+
+/** The first top-level prompt and its following assistant output, after this TUI's header. */
+function displayedFirstExchange(screen: string): CodexExchange | null {
+  const header = screen.lastIndexOf("OpenAI Codex (v");
+  if (header < 0) return null;
+  const lines = screen.slice(header).split(/\r?\n/);
+  let promptAt = -1;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? "";
+    if (/^•(?:[ \t]|$)/.test(line)) return null;
+    if (/^›[ \t]+/.test(line)) { promptAt = index; break; }
+  }
+  if (promptAt < 0) return null;
+  let answerAt = -1;
+  for (let index = promptAt + 1; index < lines.length; index++) {
+    const line = lines[index] ?? "";
+    if (/^›[ \t]+/.test(line)) return null;
+    if (/^•(?:[ \t]|$)/.test(line)) { answerAt = index; break; }
+  }
+  if (answerAt < 0) return null;
+  const user = lines.slice(promptAt, answerAt).map((line, index) => index === 0 ? line.slice(1) : line).join("\n");
+  const nextPrompt = lines.findIndex((line, index) => index > answerAt && /^›(?:[ \t]|$)/.test(line));
+  const response = lines.slice(answerAt, nextPrompt < 0 ? undefined : nextPrompt)
+    .map((line) => /^•/.test(line) ? line.slice(1) : line).join("\n");
+  return { user, assistant: response };
+}
+
+function matchingCodexExchanges(screen: string, candidates: readonly CodexFirstExchangeCandidate[]): { candidate: CodexFirstExchangeCandidate; index: number }[] {
+  const shown = displayedFirstExchange(screen);
+  if (shown === null) return [];
+  const prompt = normalizePrompt(shown.user);
+  const answer = normalizePrompt(shown.assistant);
+  if (normalizeDisplay(prompt).length < 8 || normalizeDisplay(answer).length < 16) return [];
+  const matches: { candidate: CodexFirstExchangeCandidate; index: number }[] = [];
+  for (const candidate of candidates) {
+    for (const [index, exchange] of codexExchanges(candidate.text).entries()) {
+      const recordedPrompt = normalizePrompt(exchange.user);
+      const recordedAnswer = normalizePrompt(exchange.assistant);
+      if (recordedPrompt === prompt && recordedAnswer !== ""
+        && (answer.includes(recordedAnswer) || recordedAnswer.includes(answer))) {
+        matches.push({ candidate, index });
+      }
+    }
+  }
+  return matches;
+}
+
+/** Match a submitted first prompt and its answer only when no competing exchange explains it. */
+export function matchCodexFirstExchange(
+  screen: string,
+  candidates: readonly CodexFirstExchangeCandidate[],
+  startedAtMs: number,
+): string | null {
+  if (!Number.isFinite(startedAtMs)) return null;
+  if (candidates.filter((candidate) => typeof candidate.createdAtMs === "number"
+    && candidate.createdAtMs >= startedAtMs).length !== 1) return null;
+  const matches = matchingCodexExchanges(screen, candidates);
+  if (matches.length !== 1) return null;
+  const match = matches[0]!;
+  const first = codexExchanges(match.candidate.text)[0];
+  const storedPrompt = normalizePrompt(match.candidate.firstUserMessage ?? "");
+  const shown = displayedFirstExchange(screen);
+  if (match.index !== 0 || first === undefined || shown === null
+    || normalizeDisplay(storedPrompt).length < 8
+    || normalizePrompt(first.user) !== storedPrompt
+    || normalizePrompt(first.assistant) !== normalizePrompt(shown.assistant)
+    || typeof match.candidate.createdAtMs !== "number"
+    || !Number.isFinite(match.candidate.createdAtMs) || match.candidate.createdAtMs < startedAtMs) return null;
+  return match.candidate.path;
+}
+
 /** `codex resume <thread>`: the thread a TUI was started on, straight from its command line. */
 export function resumedThread(argvs: readonly (readonly string[])[]): string | null {
   for (const argv of argvs) {
@@ -877,14 +1041,6 @@ export function resumedThread(argvs: readonly (readonly string[])[]): string | n
 /** The rollout each pane's Codex was last matched to on screen, the processes that were running it, and when. */
 const boundRollouts = new Map<string, { processes: string; path: string; at: number; cwd?: string }>();
 
-const CWD_MATCH = process.platform === "win32" ? "cwd COLLATE NOCASE IN (?, ?)" : "cwd IN (?, ?)";
-function cwdVariants(cwd: string): [string, string] {
-  if (process.platform !== "win32") return storedCwds(cwd);
-  const namespaced = toNamespacedPath(cwd);
-  const plain = namespaced.startsWith("\\\\?\\UNC\\") ? `\\\\${namespaced.slice(8)}` : namespaced.startsWith("\\\\?\\") ? namespaced.slice(4) : namespaced;
-  return [plain, namespaced];
-}
-
 /**
  * Threads begun in this cwd since `since` (seconds) that this pane's Codex may have moved
  * on to (/new), as their rollouts. Only interactive threads count: subagents (often with
@@ -893,9 +1049,10 @@ function cwdVariants(cwd: string): [string, string] {
  */
 function newerThreads(db: Database, cwd: string, since: number, except: string | null, paneId: string, home: string, firsts?: Map<string, string>): string[] {
   const first = db.query("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'first_user_message'").get() !== null ? ", first_user_message" : "";
-  const rows = db.query<{ id: string; rollout_path: string; first_user_message?: string | null }, [string, string, number]>(
-    `SELECT id, rollout_path${first} FROM threads WHERE ${CWD_MATCH} AND archived = 0 AND agent_role IS NULL${interactive(db)} AND created_at >= ?`,
-  ).all(...cwdVariants(cwd), since);
+  const { where, params } = storedCwdCondition(cwd);
+  const rows = db.query<{ id: string; rollout_path: string; first_user_message?: string | null }, (string | number)[]>(
+    `SELECT id, rollout_path${first} FROM threads WHERE ${where} AND archived = 0 AND agent_role IS NULL${interactive(db)} AND created_at >= ?`,
+  ).all(...params, since);
   return theirs(rows.flatMap((row) => {
     if (row.id === except) return [];
     const path = codexRolloutPath(row.rollout_path, home) ?? row.rollout_path;
@@ -919,9 +1076,10 @@ export function codexTranscriptRows(db: Database, cwd: string, otherDirectories 
   // needed it; keep those stores readable by giving their rows a stable local stand-in.
   const id = db.query("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'id'").get() !== null
     ? "id" : "CAST(rowid AS TEXT) AS id";
+  const condition = storedCwdCondition(cwd);
   const rows = db.query<{ id: string; cwd: string; rollout_path: string }, string[]>(
-    `SELECT ${id}, cwd, rollout_path FROM threads WHERE ${otherDirectories ? "1" : CWD_MATCH} AND archived = 0 AND agent_role IS NULL${interactive(db)} ORDER BY updated_at DESC LIMIT ${otherDirectories ? 257 : 33}`,
-  ).all(...(otherDirectories ? [] : cwdVariants(cwd)));
+    `SELECT ${id}, cwd, rollout_path FROM threads WHERE ${otherDirectories ? "1" : condition.where} AND archived = 0 AND agent_role IS NULL${interactive(db)} ORDER BY updated_at DESC LIMIT ${otherDirectories ? 257 : 33}`,
+  ).all(...(otherDirectories ? [] : condition.params));
   // ponytail: bound cross-directory discovery to 256 threads; refuse incomplete evidence rather than guess.
   return otherDirectories && rows.length > 256 ? [] : rows;
 }
@@ -999,9 +1157,7 @@ const CLAIM_CHECK_MS = 5000;
 async function claimedByOtherPanes(paneId: string, cwd: string, threads: string[], own: string[], firsts: ReadonlyMap<string, string>, home: string, sessionPanes?: HerdrPane[]): Promise<Set<string>> {
   const claimed = new Set<string>();
   const key = `${paneId}\0${[...threads].sort().join("\0")}`;
-  const panes = (sessionPanes ?? (await sessionSnapshot()).panes)
-    .filter((pane) => pane.pane_id !== paneId && pane.cwd === cwd && (pane.agent ?? pane.agent_session?.agent) === "codex")
-    .slice(0, 8);
+  const panes = codexPeersIn(sessionPanes ?? (await sessionSnapshot()).panes, paneId, cwd).slice(0, 8);
   // a pane that appeared since is looked at at once
   const last = claimChecks.get(key);
   const seen = panes.map((pane) => pane.pane_id).join();
@@ -1018,7 +1174,9 @@ async function claimedByOtherPanes(paneId: string, cwd: string, threads: string[
     try {
       const theirsNow = boundRollouts.get(pane.pane_id)?.path;
       const screen = await paneRead({ paneId: pane.pane_id, source: "recent", lines: 400, stripAnsi: true });
-      const shown = matchCodexTranscript(screen.text, [...candidates, ...known, ...(theirsNow && !threads.includes(theirsNow) && !own.includes(theirsNow) ? tail(theirsNow) : [])]);
+      const possible = [...new Map([...candidates, ...known, ...(theirsNow && !threads.includes(theirsNow) && !own.includes(theirsNow) ? tail(theirsNow) : [])]
+        .map((candidate) => [candidate.path, candidate])).values()];
+      const shown = matchCodexTranscript(screen.text, possible);
       if (shown === null || !threads.includes(shown)) continue;
       // and the thread's first message shows there too: typed in that pane, not only its answer
       // quoted or pasted there (a thread whose first message is gone from that screen stays unclaimed)
@@ -1038,14 +1196,98 @@ async function claimedByOtherPanes(paneId: string, cwd: string, threads: string[
 
 /** Whether another Codex pane in this cwd was started as `codex resume <thread>`. */
 async function resumedElsewhere(paneId: string, cwd: string, thread: string, sessionPanes?: HerdrPane[]): Promise<boolean> {
-  const panes = (sessionPanes ?? (await sessionSnapshot()).panes)
-    .filter((pane) => pane.pane_id !== paneId && pane.cwd === cwd && (pane.agent ?? pane.agent_session?.agent) === "codex");
+  const panes = codexPeersIn(sessionPanes ?? (await sessionSnapshot()).panes, paneId, cwd);
   for (const pane of panes) {
     try {
       if (resumedThread((await codexProcessesOf(pane.pane_id)).list.map((process) => process.argv ?? [])) === thread) return true;
     } catch { /* a pane closed meanwhile */ }
   }
   return false;
+}
+
+interface CodexThreadRow {
+  rolloutPath: string;
+  firstUserMessage: string | null;
+  createdAtMs: number;
+}
+
+const SHORT_THREAD_LIMIT = 32;
+const SHORT_ROLLOUT_LIMIT = 1024 * 1024;
+
+/** Short matching needs every competing exchange, so incomplete or unsafe rows disable it. */
+function safeShortThreads(rows: readonly CodexThreadRow[], home: string): CodexFirstExchangeCandidate[] | null {
+  if (rows.length === 0 || rows.length > SHORT_THREAD_LIMIT) return null;
+  const candidates: CodexFirstExchangeCandidate[] = [];
+  for (const row of rows) {
+    const path = codexRolloutPath(row.rolloutPath, home);
+    if (path === null) return null;
+    try {
+      const stat = statSync(path);
+      const header = rolloutHeader(path);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > SHORT_ROLLOUT_LIMIT || header === null
+        || Object.keys(record(header.history_base)).length > 0) return null;
+      const text = readRange(path, 0, stat.size);
+      const after = statSync(path);
+      if (Buffer.byteLength(text, "utf8") !== stat.size
+        || after.size !== stat.size || after.ino !== stat.ino || after.mtimeMs !== stat.mtimeMs
+        || !text.endsWith("\n")) return null;
+      const lines = text.slice(0, -1).split(/\r?\n/);
+      if (lines.length === 0 || lines.some((line) => {
+        try { JSON.parse(line); return false; } catch { return true; }
+      })) return null;
+      const exchanges = codexExchanges(text);
+      const stored = normalizePrompt(row.firstUserMessage ?? "");
+      if (stored !== "" && (exchanges[0] === undefined || normalizePrompt(exchanges[0].user) !== stored)) return null;
+      candidates.push({
+        path,
+        text,
+        firstUserMessage: row.firstUserMessage,
+        createdAtMs: row.createdAtMs,
+      });
+    } catch { return null; }
+  }
+  return candidates;
+}
+
+/**
+ * The prompt is not ownership evidence on its own. Require its submitted answer,
+ * compare older conversations too, and decline while another same-directory Codex
+ * pane could own the thread. No weak binding or cached peer claim survives a poll.
+ */
+async function shortThreadFromProcess(
+  paneId: string, cwd: string, home: string, screen: string,
+  processes: readonly { pid: number }[], panes?: HerdrPane[],
+): Promise<string | null> {
+  const starts = processes.map(({ pid }) => processStartedAt(pid));
+  if (starts.length === 0 || starts.some((start) => start === null || !Number.isFinite(start))) return null;
+  const startedAt = Math.min(...starts as number[]);
+  const notBefore = startedAt + 1000;
+  let db: Database | undefined;
+  try {
+    const peers = panes ?? (await sessionSnapshot()).panes;
+    if (peers.some((pane) => pane.pane_id !== paneId
+      && (pane.agent ?? pane.agent_session?.agent) === "codex"
+      && (pane.cwd == null || sameDirectory(pane.cwd, cwd)))) return null;
+    db = new Database(join(home, "state_5.sqlite"), { readonly: true, create: false });
+    const columns = new Set(db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('threads')").all().map((column) => column.name));
+    if (!columns.has("first_user_message") || !columns.has("source")) return null;
+    const created = columns.has("created_at_ms") ? "COALESCE(created_at_ms, created_at * 1000)" : "created_at * 1000";
+    // The 33rd row disables this bounded lookup, never establishes uniqueness.
+    const { where, params } = storedCwdCondition(cwd);
+    const rows = db.query<CodexThreadRow, string[]>(
+      `SELECT rollout_path AS rolloutPath, first_user_message AS firstUserMessage, ${created} AS createdAtMs
+       FROM threads WHERE ${where} AND archived = 0 AND agent_role IS NULL${interactive(db)} LIMIT 33`,
+    ).all(...params);
+    if (rows.length > SHORT_THREAD_LIMIT || rows.some((row) => !Number.isFinite(row.createdAtMs))) return null;
+    // Process starts are only estimated to second precision; require a full second of margin.
+    const begun = rows.filter((row) => row.createdAtMs >= notBefore);
+    if (begun.length !== 1) return null;
+    const candidates = safeShortThreads(rows, home);
+    if (candidates === null) return null;
+    const path = matchCodexFirstExchange(screen, candidates, notBefore);
+    return path !== null && theirs([path], paneId).length === 1 ? path : null;
+  } catch { return null; }
+  finally { db?.close(); }
 }
 
 /**
@@ -1207,5 +1449,7 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
   try {
     cut = candidates.map((candidate) => Object.keys(record(rolloutHeader(candidate.path)?.history_base)).length > 0 || statSync(candidate.path).size > 1024 * 1024);
   } catch { return null; }
-  return matchShortCodexAnswers(screen.text, candidates.map((candidate, index) => ({ ...candidate, cut: cut[index] })));
+  const short = matchShortCodexAnswers(screen.text, candidates.map((candidate, index) => ({ ...candidate, cut: cut[index] })));
+  if (short !== null) return short;
+  return shortThreadFromProcess(paneId, cwd, home, screen.text, codexProcesses, panes);
 }

@@ -49,11 +49,10 @@ interface Props {
   onClose: () => void;
 }
 
-const SHEET_QUERY = "(max-width: 640px)";
+/** where the menu is the bottom sheet; a caller that lays its header out for the sheet reads the same line */
+export const SHEET_QUERY = "(max-width: 640px)";
 const GAP = 4;
 const EDGE = 8;
-/** a popover never grows past this, however much room the screen has */
-const MAX_HEIGHT = 320;
 const POPOVER_ITEMS = '[role="menuitem"], [role="menuitemcheckbox"]';
 // the sheet is modal: its Cancel is one of the stops
 const SHEET_ITEMS = '.row-sheet-item, .row-sheet-cancel';
@@ -69,9 +68,10 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
   useLayoutEffect(() => () => { if (anchor.isConnected) anchor.focus({ preventScroll: true }); }, [anchor]);
 
   // under the button, right edges aligned (left ones for a tab); above it when the screen ends
-  // first. The height is capped to the room on that side and the menu scrolls, as AgentPicker's
-  // list does: a tab's pane picker has one item per pane and is unbounded, and an item below the
-  // fold must not be reachable by keyboard while the pointer cannot see it
+  // first. The height is capped to the room on that side, and only to that: a tab's menu lists
+  // its panes and herdr's layout operations and is tall, so it scrolls, as AgentPicker's list
+  // does, only on a screen too short for it. An item below the fold must not be reachable by
+  // keyboard while the pointer cannot see it
   useLayoutEffect(() => {
     if (sheet) return;
     const menu = surface.current;
@@ -84,7 +84,7 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
     const roomAbove = rect.top - GAP - EDGE;
     const up = below + menu.offsetHeight + EDGE > window.innerHeight && roomAbove > roomBelow;
     const top = up ? Math.max(EDGE, rect.top - GAP - menu.offsetHeight) : below;
-    setPlace({ top, left, maxHeight: Math.max(EDGE, Math.min(MAX_HEIGHT, up ? roomAbove : roomBelow)) });
+    setPlace({ top, left, maxHeight: Math.max(EDGE, up ? roomAbove : roomBelow) });
   }, [align, anchor, onClose, sheet]);
 
   useEffect(() => {
@@ -169,13 +169,16 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
               {subtitle && <span className="row-sheet-subtitle">{subtitle}</span>}
             </div>
           )}
-          {items.map((item) => (
-            <button key={item.id} type="button" className={`row-sheet-item${item.danger ? " is-danger" : ""}${item.divider ? " has-divider" : ""}`} aria-current={item.current ? "true" : undefined} aria-pressed={item.checked} title={item.title} onMouseDown={keepFocus} onClick={() => run(item)}>
-              {item.glyph ?? <item.icon aria-hidden="true" />}
-              <span className="row-sheet-label">{item.label}</span>
-              {item.hint && <span className="row-sheet-hint">{item.hint}</span>}
-            </button>
-          ))}
+          {/* the items scroll between the head and Cancel: a tab's menu is taller than a short phone, and `.modal` hides its overflow */}
+          <div className="row-sheet-items">
+            {items.map((item) => (
+              <button key={item.id} type="button" className={`row-sheet-item${item.danger ? " is-danger" : ""}${item.divider ? " has-divider" : ""}`} aria-current={item.current ? "true" : undefined} aria-pressed={item.checked} title={item.title} onMouseDown={keepFocus} onClick={() => run(item)}>
+                {item.glyph ?? <item.icon aria-hidden="true" />}
+                <span className="row-sheet-label">{item.label}</span>
+                {item.hint && <span className="row-sheet-hint">{item.hint}</span>}
+              </button>
+            ))}
+          </div>
           <button type="button" className="btn row-sheet-cancel" onMouseDown={keepFocus} onClick={onClose}>{t("Cancel")}</button>
         </div>
       </div>,

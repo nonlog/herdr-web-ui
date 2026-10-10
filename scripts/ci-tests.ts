@@ -10,7 +10,7 @@ import { availableParallelism } from "node:os";
 
 const suite = process.argv[2];
 if (suite !== "unit" && suite !== "integration") throw new Error("Usage: bun scripts/ci-tests.ts unit|integration");
-const files = [...new Bun.Glob("{src,shared,server,scripts}/**/*.test.ts").scanSync({ cwd: process.cwd() })].sort();
+const files = [...new Bun.Glob("{src,shared,server,scripts,telemetry}/**/*.test.ts").scanSync({ cwd: process.cwd() })].sort();
 // The legacy updater suite mixes Git-only cases with real bridge restart/rollback cases.
 const needsHerdr = (file: string) => file.endsWith(".contract.test.ts") || file === "server/updater.test.ts" || file.startsWith("server/herdr/") || file.startsWith("server/pty/");
 const selected = files.filter((file) => needsHerdr(file) === (suite === "integration"));
@@ -50,15 +50,20 @@ async function work(session: string): Promise<void> {
     const fileStartedAt = Date.now();
     // Live process/pane probes can poll for 10s; Bun's 5s default would cut them off early.
     // One stream, so a file's output reads in the order it was written.
+    // bun colours its counts when anything in the environment asks for colour (FORCE_COLOR
+    // outranks NO_COLOR), and a count line then reads `\e[0m\e[32m 13 pass\e[0m` — which the
+    // patterns below cannot match. Every file came back unreadable and the run failed with
+    // nothing having failed, so the colour is stripped here rather than trusted away.
     const child = Bun.spawn(["sh", "-c", 'exec "$@" 2>&1', "sh", process.execPath, "test", "--timeout", "15000", `./${file}`], {
       env: { ...process.env, HERDR_TEST_MODE: suite!, HERDR_TEST_SESSION: session },
       stdin: "ignore", stdout: "pipe", stderr: "inherit",
     });
     const [output, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-    const count = (word: keyof typeof totals) => Number(new RegExp(`^\\s*(\\d+) ${word}$`, "m").exec(output)?.[1] ?? 0);
+    const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
+    const count = (word: keyof typeof totals) => Number(new RegExp(`^\\s*(\\d+) ${word}$`, "m").exec(plain)?.[1] ?? 0);
     for (const word of ["pass", "fail", "skip"] as const) totals[word] += count(word);
     // a run that never printed its counts cannot be told from one that ran nothing
-    if (!/^\s*\d+ pass$/m.test(output) && !/^\s*\d+ fail$/m.test(output)) unread.push(file);
+    if (!/^\s*\d+ pass$/m.test(plain) && !/^\s*\d+ fail$/m.test(plain)) unread.push(file);
     if (code !== 0) failed.push(file);
     console.log(`\n--- ${file} (${session}, ${((Date.now() - fileStartedAt) / 1000).toFixed(1)}s, exit ${code})\n${output.trimEnd()}`);
   }

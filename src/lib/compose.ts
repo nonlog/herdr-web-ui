@@ -34,12 +34,13 @@ export function composerPayload(text: string, bracketedPaste: boolean): string {
 /** The server refused the message before any of it reached the pane: nothing was typed. */
 export function submitNotTyped(code: string): boolean {
   return ["agent_blocked", "read_only", "submit_timeout", "agent_not_ready", "pending_input_unsupported", "invalid_delivery", "invalid_submit_text",
-    "invalid_submit_id", "pending_limit", "pending_not_found", "pending_busy", "invalid_pending_action", "pending_target_changed", "pending_lease_lost", "not_attached", "input_not_ready", "attach_held", "pane_not_found", "retired_submit_id"].includes(code);
+    "invalid_submit_id", "pending_limit", "pending_not_found", "pending_busy", "invalid_pending_action", "pending_target_changed", "pending_lease_lost", "not_attached", "input_not_ready", "attach_held", "pane_not_found", "retired_submit_id", "input_draft"].includes(code);
 }
 
 export function submitNote(code: string, message: string): string {
   if (code === "agent_blocked") return t("Not sent: the agent is waiting for an answer in the terminal. Answer it first.");
   if (code === "read_only") return t("Not sent: this view only watches the pane.");
+  if (code === "input_draft") return t("Not sent: Claude Code's input box in the terminal is not empty. Send or clear it there, then send this message.");
   if (code === "pending_input_unsupported") return t("Update this PC to send messages in the next turn. Your draft stayed here.");
   if (code === "submit_timeout") return t("Not sent: it waited too long behind an earlier message, and nothing was typed. Send it again.");
   if (code === "disconnected" || code === "timeout") return t("Not confirmed: the pane did not confirm this message. Check the terminal before sending it again.");
@@ -178,19 +179,51 @@ export function agentDisplayLabel(agent: string | null): string {
     .join(" ");
 }
 
-/** Filter by command prefix and prefer commands the user has selected most often. */
+/**
+ * How well a command matches what was typed after the `/`; lower is better, null is no match.
+ * Plugin and skill names carry a namespace (`superpowers:brainstorming`), so a query is also
+ * tried against each word of the name before it falls back to a substring, a run of letters in
+ * order (`brst`), and the description.
+ */
+function slashMatchTier(command: SlashCommand, needle: string): number | null {
+  if (needle === "") return 0;
+  const name = command.name.toLocaleLowerCase();
+  if (name.startsWith(needle)) return 0;
+  const first = name.indexOf(needle);
+  for (let position = first; position >= 0; position = name.indexOf(needle, position + 1)) {
+    if (position === 0 || /[:\-_./]/u.test(name[position - 1]!)) return 1;
+  }
+  if (first >= 0) return 2;
+  let at = 0;
+  for (const letter of name) {
+    if (needle.startsWith(letter, at)) at += letter.length;
+    if (at === needle.length) return 3;
+  }
+  return needle.length >= 2 && command.description.toLocaleLowerCase().includes(needle) ? 4 : null;
+}
+
+/**
+ * Filter commands by what was typed - prefix first, then a word of the name, a substring, letters
+ * in order, the description - and within a match kind prefer the commands the user selects most.
+ */
 export function rankSlashCommands(
   commands: readonly SlashCommand[],
   query: string,
   usage: Readonly<Partial<Record<string, number>>>,
 ): SlashCommand[] {
   const needle = query.toLocaleLowerCase();
-  return commands
-    .filter((command) => command.name.toLocaleLowerCase().startsWith(needle))
+  const ranked: { command: SlashCommand; tier: number }[] = [];
+  for (const command of commands) {
+    const tier = slashMatchTier(command, needle);
+    if (tier !== null) ranked.push({ command, tier });
+  }
+  return ranked
     .sort((left, right) => {
-      const frequency = (usage[right.name] ?? 0) - (usage[left.name] ?? 0);
-      return frequency || left.name.localeCompare(right.name);
-    });
+      const tier = left.tier - right.tier;
+      const frequency = (usage[right.command.name] ?? 0) - (usage[left.command.name] ?? 0);
+      return tier || frequency || left.command.name.localeCompare(right.command.name);
+    })
+    .map(({ command }) => command);
 }
 
 /** A token count the way a status line reads it: 950, 68k, 1.2M. */

@@ -28,6 +28,8 @@ const CLAUDE_TABS_RE = /^←\s+[☐☒☑✔]/;
 // Claude Code's unnumbered menus (the folder-trust check on a new folder, among others):
 // plain rows, `❯` on the selected one, under this hint
 const CLAUDE_CONFIRM_HINT_RE = /enter to confirm.*esc to (?:cancel|exit|go back)/i;
+/** Claude Code took invisible characters out of a message and holds it in its input (2.1.294) */
+const CLAUDE_HELD_HINT_RE = /^Removed (\d+) invisible characters?\s*·\s*review and press \S+ to send$/i;
 // Claude Code's `/model` list, by the two keys it takes a pick with: Enter saves it as the default
 // for new sessions, `s` keeps it to this session
 const CLAUDE_MODEL_HINT_RE = /enter to set as default.*\bs to use this session only.*esc to cancel/i;
@@ -101,6 +103,7 @@ type Responder =
   | "claude-approval"
   | "claude-plan"
   | "claude-confirm"
+  | "claude-held"
   | "claude-model"
   | "claude-effort"
   | "codex-model"
@@ -509,7 +512,14 @@ function parseClaudeQuestion(screen: string): ParsedPrompt | null {
   const rows = menuRows(lines, Math.max(0, hintIndex - 64), end);
   if (!sequentialRows(rows) || rows.filter((row) => row.selected).length !== 1) return null;
   const chatIndex = rows.findIndex((row) => row.label === "Chat about this");
-  const customIndex = rows.findIndex((row) => /^Type something\.?$/i.test(row.label));
+  let customIndex = rows.findIndex((row) => /^Type something\.?$/i.test(row.label));
+  // typed into, the row shows the draft instead of "Type something.", with the cursor on it or
+  // not (2.1.295): in Claude's own form, where the question is named by its chip or tabs and a
+  // rule parts that row from "Chat about this", it is still the typed answer's
+  const drafted = customIndex < 0 && !preview && chatIndex > 1
+    && lines.slice(rows[chatIndex - 1]!.lineIndex + 1, rows[chatIndex]!.lineIndex).some((line) => isDivider(line))
+    && (claudeTabs(lines, rows[0]!.lineIndex) !== null || claudeChip(lines, rows[0]!.lineIndex) !== null);
+  if (drafted) customIndex = chatIndex - 1;
   if (preview) {
     // its notes are no answer of their own: no typed-answer row, the options are the menu
     if (customIndex >= 0 || chatIndex >= 0) return null;
@@ -533,6 +543,14 @@ function parseClaudeQuestion(screen: string): ParsedPrompt | null {
     selectedIndex: rows.findIndex((row) => row.selected),
     checkedOptionIndices: optionRows.flatMap((row, index) => row.checked ? [index] : []),
     customMenuIndex: preview ? null : customIndex, rejectWithEscapeIndex: null,
+    // an answer typed into the draft would join it, so once the cursor is in the row it is
+    // emptied first, after the cursor and before it (ctrl+k, ctrl+u; measured on 2.1.295)
+    ...(drafted ? {
+      customSteps: (text: string) => [
+        ...keySteps([...navigationKeys(customIndex - rows.findIndex((row) => row.selected)), "ctrl+k", "ctrl+u"]),
+        { text }, ...keySteps([KEY.enter]),
+      ],
+    } : {}),
   });
 }
 
@@ -1167,6 +1185,10 @@ function parseClaudeApproval(screen: string): ParsedPrompt | null {
   const hintIndex = findLastIndex(lines, (_, index) => /esc to cancel/i.test(wrapped(lines, index)));
   const rows = parseNumberedRows(lines, questionIndex + 1, hintIndex > questionIndex ? hintIndex : lines.length);
   if (!sequentialRows(rows) || rows.length < 2 || rows.filter((row) => row.selected).length !== 1) return null;
+  // a hint of its own under the last row and over the last hint, whole or wrapped by a narrow
+  // pane: the panel was answered, and what ends the screen now is another prompt ("Password:"
+  // over a bare "Esc to cancel"); an option's own words may name the keys
+  if (/esc to\s+cancel/i.test(lines.slice(rows.at(-1)!.lineIndex + 1, hintIndex).map(cleanLine).join(" "))) return null;
   let title: string;
   let body: string;
   if (approvalIndex >= 0 && approvalIndex < questionIndex) {
@@ -1183,12 +1205,25 @@ function parseClaudeApproval(screen: string): ParsedPrompt | null {
     const callIndex = findLastIndex(lines.slice(0, questionIndex), (line) => /^●\s+[\w.:-]+(?:\s[\w.:-]+)*(?:\s\(MCP\))?\(/.test(cleanLine(line)));
     const rules = lines.slice(0, questionIndex).flatMap((line, index) => index > callIndex && SOLID_RULE_RE.test(cleanLine(line)) ? [index] : []);
     const ruleIndex = callIndex >= 0 ? rules[0] ?? -1 : rules.at(-1) ?? -1;
-    if (ruleIndex < 0 || questionIndex - ruleIndex > 60) return null;
-    const panel = lines.slice(ruleIndex + 1, questionIndex).map(cleanLine)
-      .filter((line) => line && !isDivider(line) && !/^Tip:/i.test(line));
+    // a long command pushes the panel's rule and tool name off the top of the screen: the
+    // numbered rows and Claude's own key hint under them, with what is left of the panel above
+    // them (its `│` command block and the dashed rule under that), still say it is an approval
+    // the dashed rule is the last divider over the question, the block right above it, and
+    // only the panel's own few lines (never Claude's or the user's text) between it and the question
+    const above = lines.slice(0, questionIndex).map((line) => line.replace(ANSI_RE, "").trim());
+    const dashIndex = findLastIndex(above, (line) => isDivider(line));
+    const scrolled = ruleIndex < 0 && callIndex < 0 && hintIndex > questionIndex && /^esc to cancel\b/i.test(cleanLine(lines[hintIndex]!))
+      && dashIndex >= 1 && questionIndex - dashIndex <= 8 && /^╌{8,}$/.test(above[dashIndex]!) && /^│\s/.test(above[dashIndex - 1]!)
+      && above.slice(dashIndex + 1).every((line) => !/^[●⏺❯>›]/.test(line));
+    if (!scrolled && (ruleIndex < 0 || questionIndex - ruleIndex > 60)) return null;
+    // all of a scrolled panel is the body: a command line changed far above the question is another asking
+    // Claude's own tip is a line of the panel; a `│ Tip:` line is the command's
+    const panel = lines.slice(scrolled ? 0 : ruleIndex + 1, questionIndex)
+      .filter((line) => !/^Tip:/i.test(line.replace(ANSI_RE, "").trim())).map(cleanLine)
+      .filter((line) => line && !isDivider(line));
     if (panel.length === 0) return null;
-    title = panel[0]!;
-    body = panel.slice(1).join("\n");
+    title = scrolled ? "Command approval" : panel[0]!;
+    body = (scrolled ? panel : panel.slice(1)).join("\n");
   }
   return finishPrompt("claude", {
     kind: "approval", title, question: cleanLine(lines[questionIndex]!),
@@ -1201,6 +1236,99 @@ function parseClaudeApproval(screen: string): ParsedPrompt | null {
     responder: "claude-approval", menuLabels: rows.map((row) => row.label), selectedIndex: rows.findIndex((row) => row.selected),
     checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
   });
+}
+
+/**
+ * Claude Code 2.1.294 takes zero-width and other invisible characters out of a message, and instead
+ * of sending it keeps it in its input until it is reviewed. For a moment it says so over the box:
+ *
+ *                       Removed 1 invisible character · review and press Enter to send
+ *   ────────────────
+ *   ❯ helloworld test
+ *   ────────────────
+ *     [Haiku 4.5] │ project
+ *
+ * The chat had sent the message and cleared its box, so it seemed gone. The card shows the
+ * message as Claude now holds it and sends it (Enter) or drops it (Ctrl+C clears the input).
+ * The hint does not stay (a turn's status line takes its row), so the box counts on its own too:
+ * when it still holds what the chat last sent here less only invisible characters (`sent`).
+ * `working`: Claude is under a turn. Ctrl+C then interrupts the turn and leaves the box as it was
+ * (live, 2.1.294: "Interrupted · What should Claude do instead?"), so the card offers Send alone
+ * until the turn ends; Enter under a turn queues the message as it does from the terminal.
+ */
+function parseClaudeHeld(screen: string, sent: string | null, working: boolean): ParsedPrompt | null {
+  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  // the input box: the last rule with only Claude's footer under it, the rule above it, and a ❯ line first
+  const bottom = findLastIndex(lines, (line) => isDivider(line));
+  if (bottom < 0) return null;
+  const footer = lines.slice(bottom + 1).map(cleanLine).filter(Boolean);
+  if (footer.length > 8 || footer.some((line) => line.startsWith("❯"))) return null;
+  let top = bottom - 1;
+  while (top >= 0 && !isDivider(lines[top]!)) top -= 1;
+  if (top < 0 || bottom - top > 40) return null;
+  const box = lines.slice(top + 1, bottom).map((line) => line.replace(/\s+$/, ""));
+  if (!/^\s*❯/.test(box[0] ?? "")) return null;
+  // the box's own lines: the first after its ❯, the rest at the box's indent
+  const message = box.map((line, index) => index === 0 ? line.replace(/^\s*❯\s?/, "") : line.replace(/^ {0,2}/, "")).join("\n").trim();
+  if (!message) return null;
+  let above = top - 1;
+  while (above >= 0 && !cleanLine(lines[above]!)) above -= 1;
+  const hint = above >= 0 ? CLAUDE_HELD_HINT_RE.exec(cleanLine(lines[above]!)) : null;
+  const removed = hint ? Number(hint[1]) : sent !== null ? removedInvisible(sent, message) : 0;
+  if (removed <= 0) return null;
+  const title = removed === 1 ? "Claude Code removed 1 invisible character" : `Claude Code removed ${removed} invisible characters`;
+  // the choices are part of the card's id: a Discard tapped on a card read before the turn began is refused
+  const choices = [{ label: "Send", steps: keySteps([KEY.enter]) }, ...(working ? [] : [{ label: "Discard", steps: keySteps(["ctrl+c"]) }])];
+  return finishPrompt("claude", {
+    kind: "approval", title, question: "The message waits in its input. Send it as it is now?",
+    body: message,
+    options: choices.map(({ label }) => ({ label, description: null })),
+    multi_select: false, custom_option_index: null,
+  }, {
+    responder: "claude-held", menuLabels: choices.map(({ label }) => label), selectedIndex: -1,
+    checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: null,
+    optionSteps: choices.map(({ steps }) => steps),
+  });
+}
+
+/** Characters no one sees: format controls (zero-width spaces and joiners, bidi marks, tags), combining marks, Hangul fillers. */
+export const INVISIBLE_CHAR_RE = /[\p{Cf}\p{Mn}\p{Me}\u115F\u1160\u3164\uFFA0]/u;
+
+/**
+ * How many characters of `sent` the box `shown` lacks, when it lacks only invisible ones (0 when
+ * anything else differs). Whitespace is left out of both: the box wraps a long message.
+ */
+export function removedInvisible(sent: string, shown: string): number {
+  // whitespace, but not U+FEFF, which \s takes for a space and Claude Code counts as invisible
+  const a = [...sent.replace(/[^\S\uFEFF]+/g, "")];
+  const b = [...shown.replace(/[^\S\uFEFF]+/g, "")];
+  let i = 0;
+  let removed = 0;
+  for (const char of a) {
+    if (i < b.length && b[i] === char) { i += 1; continue; }
+    if (!INVISIBLE_CHAR_RE.test(char)) return 0;
+    removed += 1;
+  }
+  return i === b.length ? removed : 0;
+}
+
+/** What the chat last sent to each pane, while it carried invisible characters (noteSubmitted). */
+const heldCandidates = new Map<string, { text: string; at: number }>();
+/** Long enough to read the card and answer it; a message kept past this is the user's own business */
+const HELD_WINDOW_MS = 10 * 60_000;
+
+/** A message the chat just sent to a pane: one with invisible characters may be held by Claude Code. */
+export function noteSubmitted(paneId: string, text: string): void {
+  if (INVISIBLE_CHAR_RE.test(text)) heldCandidates.set(paneId, { text, at: Date.now() });
+  else heldCandidates.delete(paneId);
+}
+
+/** What the chat sent a pane that Claude Code may be holding, for the readers that ask whether it waits. */
+export function heldCandidate(paneId: string): string | null {
+  const entry = heldCandidates.get(paneId);
+  if (!entry) return null;
+  if (Date.now() - entry.at > HELD_WINDOW_MS) { heldCandidates.delete(paneId); return null; }
+  return entry.text;
 }
 
 /**
@@ -1724,8 +1852,12 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // the last row carries the cursor once a move has put it there
   if (prompt.responder === "codex-approval") return ends(/press enter to confirm|esc to cancel|enter continue.*esc back|^(?:[›>❯]\s*)?\d+\.\s+(?:No|Reject|Cancel|Deny)\b/i);
   if (prompt.responder === "omp-approval") return ends(/^(?:[›>❯•]\s*)?(?:Approve|Deny)$|esc.*cancel/i);
-  if (prompt.responder === "claude-approval") return ends(/esc to cancel.*(?:tab|ctrl\+e)|ctrl\+e to explain/i);
+  // Claude Code 2.1.29x ends with "Esc to cancel", optionally followed by its stop-agents
+  // chord. Anchor that suffix so arbitrary trailing text cannot keep an old approval live.
+  if (prompt.responder === "claude-approval") return ends(/esc to cancel.*(?:tab|ctrl\+e)|ctrl\+e to explain|^esc to cancel(?:\s*·\s*ctrl\+x ctrl\+k twice to stop background agents)?$/i);
   if (prompt.responder === "claude-confirm") return ends(CLAUDE_CONFIRM_HINT_RE);
+  // its parser already found the hint over the input box with only the footer under it
+  if (prompt.responder === "claude-held") return true;
   if (prompt.responder === "claude-model") return ends(CLAUDE_MODEL_HINT_RE);
   if (prompt.responder === "claude-effort") return ends(CLAUDE_EFFORT_HINT_RE);
   if (prompt.responder === "codex-model") return ends(/(?:^|\s)enter select\s*·\s*esc back$|(?:^|\s)enter (?:default|apply)\s*·\s*s session\s*·\s*esc back$/i);
@@ -2034,7 +2166,7 @@ function parsePiDialog(screen: string, moved = false): ParsedPrompt | null {
   });
 }
 
-function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null, omoTrusted = true, omoOpen: OmoAsk[] = []): ParsedPrompt | null {
+function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null, omoTrusted = true, omoOpen: OmoAsk[] = [], sent: string | null = null, working = false): ParsedPrompt | null {
   const omo = () => {
     const forms = (ask: OmoAsk | null, trusted: boolean) => [parseOmoQuestion(screen, ask, trusted), parseOmoTyping(screen, ask, trusted), parseOmoReview(screen, ask, trusted)];
     const matched = omoOpen.flatMap((ask) => forms(ask, false)).filter((form) => form !== null);
@@ -2049,7 +2181,7 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
       // `pi` reads pi's own dialogs first: pi's hint is its own, so an omo form never matches
       // it and falls through to omo()'s parsers.
       : agent === "claude"
-        ? [parseClaudeQuestion(screen), parseClaudeSubmit(screen), parseClaudeApproval(screen), parseClaudeConfirm(screen), parseClaudeModel(screen), parseClaudeEffort(screen), ...omo()]
+        ? [parseClaudeQuestion(screen), parseClaudeSubmit(screen), parseClaudeApproval(screen), parseClaudeConfirm(screen), parseClaudeModel(screen), parseClaudeEffort(screen), parseClaudeHeld(screen, sent, working), ...omo()]
         : agent === "pi"
           ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "omo" || agent === ""
@@ -2083,8 +2215,9 @@ export function codexQueuedPrompt(screen: string, unanswered: QueuedQuestion[], 
  * `omoOpen`: every question the session has open (openOmoAsks), for omo's widget of the ones
  * asked without waiting.
  */
-export function parseInteractivePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null, omoTrusted = true, omoOpen: OmoAsk[] = []): InteractivePrompt | null {
-  const parsed = parsePrompt(agent, screen, omoAsk, omoTrusted, omoOpen);
+/** `sent`: what the chat last sent to the pane, and `working`: whether its agent is under a turn, for a message Claude Code holds back (parseClaudeHeld) */
+export function parseInteractivePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null, omoTrusted = true, omoOpen: OmoAsk[] = [], sent: string | null = null, working = false): InteractivePrompt | null {
+  const parsed = parsePrompt(agent, screen, omoAsk, omoTrusted, omoOpen, sent, working);
   return parsed ? publicPrompt(parsed) : null;
 }
 
@@ -2556,6 +2689,16 @@ function sgrRuns(line: string): [string, boolean, boolean][] {
  * one line.
  */
 export function parseClaudeSuggestion(ansi: string): string | null {
+  const grey = claudeGreyInput(ansi);
+  return grey === null || CLAUDE_TIP_RE.test(grey) ? null : grey;
+}
+
+/**
+ * What Claude Code's input box shows in grey while it is empty (a suggested prompt, or the
+ * new-session tip), null when the box holds typed text or nothing. Only an ANSI read tells grey
+ * text from a message: as plain text both are `❯ words`.
+ */
+function claudeGreyInput(ansi: string): string | null {
   const lines = ansi.split("\n").map((line) => line.replace(/\r$/, ""));
   const plain = lines.map((line) => line.replace(ANSI_RE, "").replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, ""));
   let index = plain.length - 1;
@@ -2578,7 +2721,106 @@ export function parseClaudeSuggestion(ansi: string): string | null {
   // a cursor over typed text has nothing grey after it
   if (cursor && !sgrRuns(lines[index]!).some(([run, dim]) => dim && run.trim() !== "")) return null;
   const suggestion = text.replace(/\u00a0/g, " ").trim();
-  return suggestion === "" || CLAUDE_TIP_RE.test(suggestion) ? null : suggestion;
+  return suggestion === "" ? null : suggestion;
+}
+
+/**
+ * Claude Code's input box: the rows between the screen's last two rules (a named session labels
+ * its rule). "clipped" when only the bottom rule is on screen, as under a draft taller than the
+ * pane; null when the screen has no rule at all.
+ */
+function claudeInputBox(screen: string): { plain: string[]; raw: string[] } | "clipped" | null {
+  const raw = screen.split("\n").map((line) => line.replace(/\r$/, ""));
+  const plain = raw.map((line) => line.replace(ANSI_RE, "").replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "").trimEnd());
+  const rule = (line: string): boolean => SOLID_RULE_RE.test(line.trim()) || LABELED_RULE_RE.test(line.trim());
+  let end = plain.length - 1;
+  while (end >= 0 && !rule(plain[end]!)) end--;
+  if (end < 0) return null;
+  let start = end - 1;
+  while (start >= 0 && !rule(plain[start]!)) start--;
+  if (start < 0) return "clipped";
+  return { plain: plain.slice(start + 1, end), raw: raw.slice(start + 1, end) };
+}
+
+/**
+ * Whether Claude Code's input box is not known to be empty, so that a paste would land in what is
+ * there and the Enter after it send both, or run it as a command: typed text, bash mode (`!`), a
+ * box clipped by the pane, or a box that is not a `❯` input. Claude's own grey text (a suggested
+ * prompt, its tip, on any number of rows) and its drawn cursor are not a draft. The box is read
+ * from the live screen (`live`, a detection read, as the other pending checks); only the viewport
+ * read carries colors (`colors`), and the caller passes it only once it is verified to show that
+ * live screen (null otherwise): equal words do not prove it, since an older box in a scrolled
+ * viewport, or a grey suggestion the user then typed out, reads the same. Without verified colors a
+ * box that is not empty is a draft. False when the screen shows no rule at all.
+ */
+export function claudeInputDraft(live: string, colors: string | null): boolean {
+  const box = claudeInputBox(live);
+  if (box === null) return false;
+  if (box === "clipped" || !box.plain[0]?.startsWith("❯")) return true;
+  if (box.plain.join("\n").slice(1).replace(/\u00a0/g, " ").trim() === "") return false;
+  // a paste or an image Claude folded into a placeholder is content, however it is colored
+  if (/\[(?:Pasted text #\d+|Image #\d+)/.test(box.plain.join(" "))) return true;
+  if (colors === null) return true;
+  const shown = claudeInputBox(colors);
+  if (shown === null || shown === "clipped" || shown.plain.join("\n") !== box.plain.join("\n")) return true;
+  let prompt = false;
+  let first = true;
+  let cursor = false;
+  let grey = false;
+  for (const row of shown.raw) {
+    for (const [run, dim, inverse] of sgrRuns(row)) {
+      for (const character of run) {
+        if (!prompt) { prompt = character === "❯"; continue; }
+        if (character.trim() === "" || character === "\u00a0") continue;
+        if (dim) grey = true;
+        // the cursor Claude draws itself sits inverse on the first grey character
+        else if (first && inverse) cursor = true;
+        else return true;
+        first = false;
+      }
+    }
+  }
+  // a cursor over a typed character has nothing grey after it
+  return cursor && !grey;
+}
+
+/**
+ * Whether a colored viewport read shows the live screen, so claudeInputDraft may take its colors:
+ * the viewport at the bottom of the pane's history before and after the colored read, or, only when
+ * herdr reports no scroll for either read, the viewport's whole text equal to the live screen; and
+ * the live screen the same before and after it. A scroll known for one read and not the other is
+ * no proof.
+ */
+export function viewportShowsLive(scrollBefore: { offset_from_bottom: number } | null, scrollAfter: { offset_from_bottom: number } | null,
+  colors: string, before: string, live: string): boolean {
+  const lines = (text: string): string => text.replace(ANSI_RE, "").replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
+    .split(/\r?\n/).map((line) => line.trimEnd()).join("\n").trimEnd();
+  const atBottom = scrollBefore !== null && scrollAfter !== null
+    ? scrollBefore.offset_from_bottom === 0 && scrollAfter.offset_from_bottom === 0
+    : scrollBefore === null && scrollAfter === null && lines(colors) === lines(live);
+  return atBottom && live === before;
+}
+
+/** Whether a card is the one for a message Claude Code holds back (parseClaudeHeld). */
+export function isClaudeHeld(prompt: InteractivePrompt): boolean {
+  return parsedByPublicPrompt.get(prompt)?.responder === "claude-held";
+}
+
+/**
+ * Whether a held-message card was read off Claude's own grey text. Claude's hint outlasts the
+ * message for a moment (sent or cleared in the terminal), over a box that is empty again and shows
+ * its tip or a suggested prompt: Enter there sends Claude's suggestion and Ctrl+C asks to leave
+ * Claude. A read that fails or shows no box says nothing, and the card stays.
+ * herdr gives colors for the viewport alone (an ANSI read of "detection", the live screen the card
+ * is read from, carries no escapes: measured on 0.9.3), and a viewport scrolled into the history
+ * can show an older box. So the grey text counts only when it is the very text the card took for
+ * the message.
+ */
+export async function claudeHeldIsGrey(paneId: string, prompt: InteractivePrompt): Promise<boolean> {
+  if (!isClaudeHeld(prompt)) return false;
+  const same = (text: string | null): boolean => text !== null && normalizeText(text) === normalizeText(prompt.body ?? "");
+  return paneRead({ paneId, source: "visible", format: "ansi", timeoutMs: SUGGESTION_READ_MS })
+    .then((read) => same(claudeGreyInput(read.text)), () => false);
 }
 
 async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: string; status: string; prompt: InteractivePrompt | null; pane: HerdrPane; panes: HerdrPane[] }> {
@@ -2587,6 +2829,7 @@ async function readPrompt(paneId: string, codexHome?: string): Promise<{ agent: 
   for (const logged of fallbackLogged) if (!panes.some((candidate) => candidate.pane_id === logged)) fallbackLogged.delete(logged);
   for (const known of askings.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) askings.delete(known);
   for (const known of answerTurns.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) answerTurns.delete(known);
+  for (const known of heldCandidates.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) heldCandidates.delete(known);
   const pane = panes.find((candidate) => candidate.pane_id === paneId);
   if (!pane) throw new HerdrError("pane_not_found", `pane ${paneId} not found`);
   const agent = pane.agent ?? "";
@@ -2655,7 +2898,8 @@ async function readKnownPrompt(
   // a pane herdr names claude, or not at all, is omo's only on evidence: herdr reports it waiting
   // on the user, or the session's pending call is the form on screen
   const omoTrusted = (agent !== "claude" && agent !== "") || pane.agent_status === "blocked";
-  const prompt = parseInteractivePrompt(agent, screen, omoAsks[0] ?? null, omoTrusted, omoAsks);
+  const prompt = parseInteractivePrompt(agent, screen, omoAsks[0] ?? null, omoTrusted, omoAsks, agent === "claude" ? heldCandidate(paneId) : null, pane.agent_status === "working");
+  if (prompt && await claudeHeldIsGrey(paneId, prompt)) return { prompt: null, screen };
   if (!prompt && agent === "gjc") {
     const fallback = parseFallbackPrompt(agent, screen);
     if (parsedByPublicPrompt.get(fallback)?.responder === "fallback-gjc-menu") return { prompt: fallback, screen };
@@ -3002,6 +3246,8 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         if (queueOpened && !answered) await closeOpenQuestion(body.pane_id).catch(() => undefined);
         // answered, or as good as: the same prompt on the screen after this is asked anew
         if (committed) askingEnded(body.pane_id);
+        // sent or dropped from its card: the same words in the box after this are a new message
+        if (committed && parsedByPublicPrompt.get(target)?.responder === "claude-held") heldCandidates.delete(body.pane_id);
       }
       // answered from the chat, the queue closes again: the next question waits collapsed, and
       // the main prompt (where a message typed in the chat goes) has the input back

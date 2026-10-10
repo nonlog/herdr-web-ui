@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, toNamespacedPath } from "node:path";
-import { codexCallFailed, codexHistoryTail, codexHomeInPsLine, codexRolloutPath, codexTranscriptRows, processCodexHome, forgetHistoryChains, matchCodexTranscript, matchShortCodexAnswers, parseCodexTranscript, resumedThread, storedCwds, unansweredCodexQuestions, withoutVerbatimPrefix } from "./codex.ts";
+import { join, posix, toNamespacedPath, win32 } from "node:path";
+import { codexCallFailed, codexHistoryTail, codexHomeInPsLine, codexRolloutPath, codexTranscriptRows, processCodexHome, forgetHistoryChains, matchCodexFirstExchange, matchCodexTranscript, matchShortCodexAnswers, parseCodexTranscript, codexPeersIn, resumedThread, rolloutInsideStore, sameDirectory, storedCwdCondition, storedCwds, unansweredCodexQuestions, withoutVerbatimPrefix } from "./codex.ts";
+import type { HerdrPane } from "../shared/protocol.ts";
 import { splitTurn } from "../src/lib/workBlocks.ts";
 
 const ts = "2026-09-22T01:00:00.000Z";
@@ -222,6 +223,32 @@ describe("Codex conversation records", () => {
     expect(turns[1]?.parts).toEqual([{ kind: "text", text: "Fixed", phase: "final_answer" }]);
   });
 
+  it("hides complete directory-less AGENTS envelopes in event and model records", () => {
+    for (const newline of ["\n", "\r\n"]) {
+      const injected = ["# AGENTS.md instructions", "", "<INSTRUCTIONS>", "Synthetic rules", "</INSTRUCTIONS>"].join(newline);
+      const turns = parseCodexTranscript(jsonl(
+        message("user", injected), event({ type: "user_message", message: injected }),
+        message("user", "Check fixture"), message("assistant", "Ready", "final_answer"),
+      ));
+      expect(turns.map((turn) => turn.role)).toEqual(["user", "assistant"]);
+      expect(turns[0]?.parts).toEqual([{ kind: "text", text: "Check fixture" }]);
+    }
+  });
+
+  it("preserves incomplete, similar and user-extended AGENTS messages", () => {
+    for (const text of [
+      "# AGENTS.md instructions\nExplain this",
+      "# AGENTS.md instructions-extra\n<INSTRUCTIONS>example</INSTRUCTIONS>",
+      "# AGENTS.md instructions\nexample</INSTRUCTIONS>",
+      "# AGENTS.md instructions\n<INSTRUCTIONS>example</INSTRUCTIONS>\nPlease explain why this rule is wrong.",
+      "# AGENTS.md instructions for /project\n<INSTRUCTIONS>example</INSTRUCTIONS>\nPlease explain.",
+    ]) {
+      for (const record of [message("user", text), event({ type: "user_message", message: text })]) {
+        expect(parseCodexTranscript(jsonl(record))[0]?.parts).toEqual([{ kind: "text", text }]);
+      }
+    }
+  });
+
   it("pairs duplicate display/model records in either order but keeps genuine repeated prompts", () => {
     for (const reverse of [false, true]) {
       const pair = [message("user", "continue"), event({ type: "user_message", message: "continue" })];
@@ -425,6 +452,82 @@ describe("Codex rollout resolution", () => {
     // a POSIX cwd is looked up as it is, and only so
     expect(storedCwds("/home/user/app")).toEqual(["/home/user/app", "/home/user/app"]);
     expect(storedCwds("\\\\.\\pipe\\x")).toEqual(["\\\\.\\pipe\\x", "\\\\.\\pipe\\x"]);
+  });
+
+  it("keeps a rollout inside a store whose root alone carries the \\\\?\\ prefix, or whose rollout alone does (#587)", () => {
+    const root = "D:\\codex\\sessions";
+    const rollout = "D:\\codex\\sessions\\2026\\10\\10\\rollout.jsonl";
+    expect(rolloutInsideStore(`\\\\?\\${root}`, rollout, win32)).toBe(true);
+    expect(rolloutInsideStore(root, `\\\\?\\${rollout}`, win32)).toBe(true);
+    expect(rolloutInsideStore("\\\\?\\UNC\\host\\share\\codex\\sessions", "\\\\host\\share\\codex\\sessions\\x.jsonl", win32)).toBe(true);
+    for (const outside of ["D:\\codex\\other.jsonl", "\\\\?\\D:\\codex\\sessions\\..\\other.jsonl", "E:\\codex\\sessions\\x.jsonl", root]) {
+      expect(rolloutInsideStore(`\\\\?\\${root}`, outside, win32)).toBe(false);
+    }
+    // only the prefix and the drive letter's case are one spelling: past it a case-sensitive
+    // directory may be another one, and a sibling that shares the name's start is outside
+    expect(rolloutInsideStore("\\\\?\\c:\\codex\\sessions", "C:\\codex\\sessions\\x.jsonl", win32)).toBe(true);
+    for (const outside of ["C:\\codex\\Sessions\\other.jsonl", "C:\\Codex\\sessions\\other.jsonl", "C:\\codex\\sessions2\\x.jsonl"]) {
+      expect(rolloutInsideStore("\\\\?\\C:\\codex\\sessions", outside, win32)).toBe(false);
+      expect(rolloutInsideStore("C:\\codex\\sessions", outside, win32)).toBe(false);
+    }
+    // POSIX paths are compared as they are
+    expect(rolloutInsideStore("/home/u/.codex/sessions", "/home/u/.codex/sessions/x.jsonl", posix)).toBe(true);
+    for (const outside of ["/home/u/.codex/x.jsonl", "/home/u/.codex/sessions", "/home/u/.Codex/sessions/x.jsonl", "/home/u/.codex/sessions2/x.jsonl", "/home/u/.codex/sessions/../x.jsonl"]) {
+      expect(rolloutInsideStore("/home/u/.codex/sessions", outside, posix)).toBe(false);
+    }
+  });
+
+  const threadsDb = () => {
+    const db = new Database(":memory:");
+    // Codex's own cwd index (state migration 0027), binary collation
+    db.run("CREATE TABLE threads (id TEXT, cwd TEXT, archived INTEGER, updated_at_ms INTEGER)");
+    db.run("CREATE INDEX idx_threads_archived_cwd_updated_at_ms ON threads(archived, cwd, updated_at_ms DESC, id DESC)");
+    const rows: [string, string][] = [["a", "\\\\?\\d:\\work\\app"], ["b", "d:\\work\\app"], ["c", "D:\\work\\app2"], ["d", "/home/u/app"], ["e", "/home/u/App"], ["f", "\\\\?\\UNC\\host\\share\\app"], ["g", "\\\\?\\d:\\Work\\app"], ["h", "D:\\WORK\\APP"]];
+    for (let n = 0; n < 33; n++) rows.push([`x${String(n).padStart(2, "0")}`, "D:\\work\\App"]);
+    for (const [id, cwd] of rows) db.run("INSERT INTO threads VALUES (?, ?, 0, ?)", [id, cwd, id.startsWith("x") ? 2 : 1]);
+    return db;
+  };
+
+  it("finds the threads of a Windows cwd stored with another drive-letter case, never another directory's (#587)", () => {
+    const db = threadsDb();
+    try {
+      const ids = (cwd: string) => {
+        const { where, params } = storedCwdCondition(cwd);
+        return db.query<{ id: string }, string[]>(`SELECT id FROM threads WHERE ${where} ORDER BY updated_at_ms DESC, id LIMIT 32`).all(...params).map((row) => row.id).sort();
+      };
+      expect(ids("D:\\work\\app")).toEqual(["a", "b"]);
+      expect(ids("\\\\?\\D:\\work\\app")).toEqual(["a", "b"]);
+      expect(ids("d:\\work\\app")).toEqual(["a", "b"]);
+      // another letter case past the drive may be another, case-sensitive directory: no answer
+      // rather than its conversation, and its 33 newer threads do not crowd out the 32
+      expect(ids("D:\\work\\App")).toHaveLength(32);
+      expect(ids("D:\\work\\App").every((id) => id.startsWith("x"))).toBe(true);
+      expect(ids("\\\\host\\share\\app")).toEqual(["f"]);
+      expect(ids("\\\\HOST\\share\\app")).toEqual([]);
+      expect(ids("/home/u/app")).toEqual(["d"]);
+      expect(ids("/home/u/APP")).toEqual([]);
+    } finally { db.close(); }
+  });
+
+  it("looks threads up on Codex's binary cwd index, not by a scan of every thread (#587)", () => {
+    const db = threadsDb();
+    try {
+      for (const cwd of ["D:\\work\\app", "/home/u/app"]) {
+        const { where, params } = storedCwdCondition(cwd);
+        const plan = db.query<{ detail: string }, string[]>(`EXPLAIN QUERY PLAN SELECT id FROM threads WHERE ${where} AND archived = 0 ORDER BY updated_at_ms DESC LIMIT 33`)
+          .all(...params).map((row) => row.detail).join("\n");
+        expect(plan).toMatch(/SEARCH threads USING (?:COVERING )?INDEX idx_threads_archived_cwd_updated_at_ms \(archived=\? AND cwd=\?\)/);
+      }
+    } finally { db.close(); }
+  });
+
+  it("counts a Codex pane in another spelling of the same Windows directory as a peer, by the same rule as the queries (#587)", () => {
+    const pane = (pane_id: string, cwd: string | null) => ({ pane_id, workspace_id: "w", tab_id: "t", terminal_id: pane_id, agent: "codex", agent_status: "idle", cwd, focused: false, revision: 0 }) as HerdrPane;
+    const panes = [pane("self", "D:\\work\\app"), pane("drive", "d:\\work\\app"), pane("prefixed", "\\\\?\\d:\\work\\app"), pane("sibling", "D:\\work\\App"), pane("unknown", null), { ...pane("shell", "D:\\work\\app"), agent: "shell" } as HerdrPane];
+    expect(codexPeersIn(panes, "self", "D:\\work\\app").map((peer) => peer.pane_id)).toEqual(["drive", "prefixed"]);
+    expect(codexPeersIn([pane("self", "/home/u/app"), pane("posix", "/home/u/App"), pane("twin", "/home/u/app")], "self", "/home/u/app").map((peer) => peer.pane_id)).toEqual(["twin"]);
+    expect(sameDirectory("d:\\work\\app", "\\\\?\\D:\\work\\app")).toBe(true);
+    expect(sameDirectory("D:\\work\\app", "D:\\Work\\app")).toBe(false);
   });
 
   /** Rollouts as Codex 0.156 writes them: one record per line, ordinals running on from the cut a rollout starts at. */
@@ -711,6 +814,62 @@ describe("Codex rollout resolution", () => {
   it("does not bind using user context, tool output or a previous session above the welcome card", () => {
     expect(matchCodexTranscript(answer, [{ path: "user", text: jsonl(message("user", answer)) }])).toBeNull();
     expect(matchCodexTranscript(`${answer}\nOpenAI Codex (v1.0)\nNew session`, [{ path: "old", text: jsonl(message("assistant", answer)) }])).toBeNull();
+  });
+});
+
+describe("Codex submitted first exchange", () => {
+  const started = Date.parse("2026-10-03T00:00:00Z");
+  const prompt = "Check fixture";
+  const answer = "The fixture is ready for inspection.";
+  const screen = `OpenAI Codex (v1.0)\n\n› ${prompt}\n\n• ${answer}\n\n› `;
+  const row = (path = "new", createdAtMs = started, firstUserMessage = prompt, reply = answer) => ({
+    path, createdAtMs, firstUserMessage,
+    text: jsonl(message("user", firstUserMessage), message("assistant", reply, "final_answer")),
+  });
+
+  it("matches a complete first prompt and one answer, including whitespace wrapping", () => {
+    expect(matchCodexFirstExchange(screen, [row()], started)).toBe("new");
+    expect(matchCodexFirstExchange(screen.replace(prompt, "Check\n  fixture"), [row()], started)).toBe("new");
+    expect(matchCodexFirstExchange(screen, [row(), row("old", started - 60_000, "Other fixture", "Different answer")], started)).toBe("new");
+  });
+
+  it("requires exact prompt punctuation and the full answer", () => {
+    for (const shown of [
+      screen.replace(prompt, "Check-fixture"), screen.replace(prompt, "Check fixture again"),
+      screen.replace(answer, "The fixture is ready"), screen.replace(answer, "Ready"),
+    ]) expect(matchCodexFirstExchange(shown, [row()], started)).toBeNull();
+  });
+
+  it("rejects composers, indented quotes, later turns and a missing welcome card", () => {
+    for (const shown of [
+      `OpenAI Codex (v1.0)\n› ${prompt}`,
+      screen.replace(`› ${prompt}`, `    › ${prompt}`),
+      screen.replace(`› ${prompt}`, `• Earlier output\n› ${prompt}`),
+      screen.replace(`› ${prompt}`, `› Earlier prompt\n• Earlier reply\n› ${prompt}`),
+      screen.slice(screen.indexOf("›")),
+      `${screen}\nOpenAI Codex (v1.0)\n› Other fixture`,
+    ]) expect(matchCodexFirstExchange(shown, [row()], started)).toBeNull();
+  });
+
+  it("keeps older later exchanges and longer answers as competing evidence", () => {
+    const old = {
+      ...row("old", started - 60_000, "Original request", "Original reply"),
+      text: jsonl(message("user", "Original request"), message("assistant", "Original reply"),
+        message("user", prompt), message("assistant", answer)),
+    };
+    expect(matchCodexFirstExchange(screen, [row(), old], started)).toBeNull();
+    expect(matchCodexFirstExchange(screen, [old], started)).toBeNull();
+    expect(matchCodexFirstExchange(screen, [row(), row("old", started - 60_000, prompt, `${answer} More details.`)], started)).toBeNull();
+    expect(matchCodexFirstExchange(screen, [row(), row("other")], started)).toBeNull();
+  });
+
+  it("does not admit pre-start timestamps, missing prompt metadata or tiny answers", () => {
+    for (const time of [started - 1, Infinity, NaN]) {
+      expect(matchCodexFirstExchange(screen, [row("new", time)], started)).toBeNull();
+    }
+    for (const time of [Infinity, NaN]) expect(matchCodexFirstExchange(screen, [row()], time)).toBeNull();
+    expect(matchCodexFirstExchange(screen, [{ ...row(), firstUserMessage: "" }], started)).toBeNull();
+    expect(matchCodexFirstExchange(screen.replace(answer, "Ready"), [row("new", started, prompt, "Ready")], started)).toBeNull();
   });
 });
 

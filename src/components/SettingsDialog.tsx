@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
-import { ArrowLeft, Bell, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Gauge, Info, Keyboard, MessageSquare, Mic, Monitor, Palette, Plus, Smartphone, SquareTerminal, Star, X, type LucideIcon } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import { ArrowLeft, Bell, Check, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Gauge, Info, Keyboard, MessageSquare, Mic, Monitor, Palette, Plug, Plus, Smartphone, SquareTerminal, Star, X, type LucideIcon } from "lucide-react";
 
 import "./SettingsDialog.css";
 
 import type { AppActions } from "../lib/actions.ts";
 import { useInstallPrompt } from "../lib/install.ts";
-import { SHORTCUTS, formatKeys, shortcutKeys, shortcutConflict } from "../lib/shortcuts.ts";
-import { CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_WIDTHS, chatFontSize, DEFAULT_SETTINGS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, TERMINAL_WHEEL_SPEED_MAX, TERMINAL_WHEEL_SPEED_MIN, VOICE_BUTTONS, useSettings, forgetPaneViews, type VoiceButton } from "../lib/settings.ts";
-import { LANGUAGE_NAMES, LANGUAGE_SETTINGS, useT } from "../lib/i18n.ts";
+import { SHORTCUTS, formatKeys, isMacPlatform, shortcutDisplayKeys, shortcutKeys, shortcutConflict } from "../lib/shortcuts.ts";
+import { isReservedShortcutKey } from "../lib/shortcutBindings.ts";
+import { CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_WIDTHS, chatFontSize, DEFAULT_SETTINGS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN, TERMINAL_WHEEL_SPEED_MAX, TERMINAL_WHEEL_SPEED_MIN, DICTATION_LANGUAGES, VOICE_BUTTONS, useSettings, forgetPaneViews, type DictationLanguage, type VoiceButton } from "../lib/settings.ts";
+import { LANGUAGE_NAMES, LANGUAGE_SETTINGS, useLocale, useT } from "../lib/i18n.ts";
 import { useFocusTrap } from "../lib/useFocusTrap.ts";
 import { KeyBarSettings } from "./KeyBarSettings.tsx";
 import { onSettingsHistory, recordSettings, settingsEntry, settingsLevels, type SettingsLevel } from "../lib/settingsHistory.ts";
@@ -17,16 +18,20 @@ import type { UpdatesModel } from "../lib/updates.ts";
 import type { MachineSettings } from "../../shared/machines.ts";
 import { fetchRemoteAccess, fetchVoiceStatus, machineRequest, saveVoiceConfig } from "../lib/api.ts";
 import { isLoopbackHost, phonePlan } from "../lib/phone.ts";
-import type { HealthAuth, ProviderUsage, RemoteAccess } from "../../shared/protocol.ts";
+import type { AgentIntegration, HealthAuth, PluginActions, ProviderUsage, RemoteAccess } from "../../shared/protocol.ts";
+import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
+import { loadIntegrations, outcomeFor, type IntegrationsResult } from "../lib/integrations.ts";
 import type { VoiceStatus } from "../../shared/voice.ts";
-import { VOICE_CONFIG_EVENT } from "../lib/voice.ts";
+import { dictationLocale, VOICE_CONFIG_EVENT } from "../lib/voice.ts";
 import { moveInOrder, orderProviders, PROVIDER_MARK, PROVIDER_NAME, usageName, useUsage } from "../lib/usage.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { DevicesPanel } from "./DevicesPanel.tsx";
 import { PhonePanel } from "./PhonePanel.tsx";
+import { copyText } from "../lib/clipboard.ts";
 import { PushTestControls } from "./PushTestControls.tsx";
 import { previewAlertSound, unlockAlertSound } from "../lib/alertSound.ts";
 import { HerdrUpdateControls, UpdateControls } from "./UpdateControls.tsx";
+import { TelemetryControls } from "./TelemetryControls.tsx";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -90,7 +95,7 @@ function FontFamilyInput({ value, label, onCommit }: { value: string; label: str
 }
 
 
-type SettingsPage = "appearance" | "chat" | "terminal" | "alerts" | "voice" | "usage" | "shortcuts" | "devices" | "remote" | "about";
+type SettingsPage = "appearance" | "chat" | "terminal" | "alerts" | "voice" | "usage" | "shortcuts" | "devices" | "remote" | "integrations" | "about";
 
 /** The pages in the order the list shows them: what is looked at first, then what is set once. */
 const PAGES: readonly { id: SettingsPage; icon: LucideIcon }[] = [
@@ -103,6 +108,7 @@ const PAGES: readonly { id: SettingsPage; icon: LucideIcon }[] = [
   { id: "shortcuts", icon: Keyboard },
   { id: "devices", icon: Smartphone },
   { id: "remote", icon: Monitor },
+  { id: "integrations", icon: Plug },
   { id: "about", icon: Info },
 ];
 
@@ -193,6 +199,9 @@ function ChatPage() {
         <SettingsRow label={t("Chat font")} description={t("Message text; code stays monospace. Comma-separated, tried in order. A font this device does not have falls back to the default.")} wide>
           <FontFamilyInput value={settings.chatFontFamily} label={t("Chat font")} onCommit={(chatFontFamily) => update({ chatFontFamily })} />
         </SettingsRow>
+        <SettingsRow label={t("Highlight code")} description={t("Colors code by its language. Off, code is plain text.")}>
+          <Toggle label={t("Highlight code")} checked={settings.highlightCode} onChange={(highlightCode) => update({ highlightCode })} />
+        </SettingsRow>
       </SettingsGroup>
 
       <SettingsGroup title={t("Composer")}>
@@ -260,8 +269,11 @@ function TerminalPage({ keyBarButtonRef, onEditKeyBar }: { keyBarButtonRef: RefO
       <SettingsRow label={t("Key bar")} description={t("Keys, order and custom combinations for the terminal.")}>
         <button type="button" ref={keyBarButtonRef} className="btn" onClick={onEditKeyBar}>{t("Edit key bar")}</button>
       </SettingsRow>
-      <SettingsRow label={t("Clipboard from a pane")} description={t("Off: nothing running in a pane can set this device's clipboard. On: a program in a pane that asks to copy has its text put there, as a copy you made yourself would.")}>
-        <Toggle label={t("Clipboard from a pane")} checked={settings.terminalOsc52} onChange={(terminalOsc52) => update({ terminalOsc52 })} />
+      <SettingsRow label={t("Clipboard from a pane")} description={t("A program in a pane that copies (vim, tmux, Claude Code) puts its text on this device's clipboard, as a copy you made yourself would. Turn it off if a pane runs output you do not trust: it could replace what you paste next.")}>
+        <Toggle label={t("Clipboard from a pane")} checked={settings.paneClipboard} onChange={(paneClipboard) => update({ paneClipboard })} />
+      </SettingsRow>
+      <SettingsRow label={t("Use alongside herdr's own window")} description={t("Turn this on if this PC also shows herdr in a terminal window. A second after you switch to another window, this tab only watches the pane, so herdr's window keeps the pane at its own size instead of this window's. Click the tab to type again. While it watches, the pane is drawn at herdr's size and may not fill this window.")}>
+        <Toggle label={t("Use alongside herdr's own window")} checked={settings.releasePaneAway} onChange={(releasePaneAway) => update({ releasePaneAway })} />
       </SettingsRow>
     </SettingsGroup>
   );
@@ -294,6 +306,26 @@ function AlertsPage({ onEnableNotifications }: { onEnableNotifications: () => Pr
         }} />
       </SettingsRow>
     </SettingsGroup>
+  );
+}
+
+/** A language tag's name in the UI language (`hu-HU` is "Hungarian (Hungary)"), or the tag where the browser cannot name it. */
+function languageName(names: Intl.DisplayNames | null, tag: string): string {
+  try { return names?.of(tag) ?? tag; } catch { return tag; }
+}
+
+function DictationLanguageSelect() {
+  const { settings, resolvedLanguage, update } = useSettings();
+  const t = useT();
+  const locale = useLocale();
+  const names = useMemo(() => { try { return new Intl.DisplayNames([locale], { type: "language" }); } catch { return null; } }, [locale]);
+  const auto = languageName(names, dictationLocale("auto", settings.language, resolvedLanguage, navigator.languages));
+  const choices = useMemo(() => DICTATION_LANGUAGES.map((tag) => ({ tag, name: languageName(names, tag) })).sort((a, b) => a.name.localeCompare(b.name, locale)), [names, locale]);
+  return (
+    <select id="settings-voice-language" className="select settings-select" value={settings.voiceLanguage} onChange={(event) => update({ voiceLanguage: event.target.value as DictationLanguage })}>
+      <option value="auto">{t("Auto ({language})", { language: auto })}</option>
+      {choices.map(({ tag, name }) => <option key={tag} value={tag}>{name}</option>)}
+    </select>
   );
 }
 
@@ -334,6 +366,11 @@ function VoicePage() {
         <SettingsRow label={t("Microphone button")} description={<>{t("Auto: in the chat on a desktop, where dictation can work. On: on a phone and in the terminal input line too.")}{micProblem !== null && <span className="voice-error">{micProblem}</span>}</>} wide>
           <Segmented label={t("Microphone button")} value={settings.voiceInput} onChange={(voiceInput) => void chooseVoiceInput(voiceInput)} options={VOICE_BUTTONS.map((voiceInput) => ({ value: voiceInput, label: t(voiceInput === "auto" ? "Auto" : voiceInput === "on" ? "On" : "Off") }))} />
         </SettingsRow>
+        {settings.voiceInput !== "off" && (
+          <SettingsRow label={t("Dictation language")} description={t("Auto listens for the app's language, or for the browser's when the app is not translated into it")} htmlFor="settings-voice-language">
+            <DictationLanguageSelect />
+          </SettingsRow>
+        )}
       </SettingsGroup>
 
       {settings.voiceInput !== "off" && (
@@ -453,33 +490,110 @@ function UsagePage() {
   );
 }
 
+/**
+ * herdr's own integrations (`integration.list`), read only: installing one writes into an agent's
+ * hooks or settings, which this app leaves to the user, so a row shows the command to run instead.
+ */
+function IntegrationsPage() {
+  const t = useT();
+  const api = useMachineApi();
+  const machineId = useMachineId();
+  const [result, setResult] = useState<IntegrationsResult | null>(null);
+  useEffect(() => {
+    let live = true;
+    void loadIntegrations(api.fetchIntegrations).then((outcome) => { if (live) setResult({ machineId, outcome }); });
+    return () => { live = false; };
+  }, [api, machineId]);
+  const outcome = outcomeFor(result, machineId);
+  const note = t("herdr's integrations let it resume each agent's session after a restart. This page only reads them: run a command in a terminal on the PC herdr runs on, then reopen this page.");
+  if (outcome === null) return <SettingsGroup note={note}><p className="settings-item settings-hint" role="status">{t("Loading…")}</p></SettingsGroup>;
+  if (outcome.kind === "unsupported") return <SettingsGroup><p className="settings-item settings-hint" role="status">{t("This PC's bridge does not offer agent integrations yet. It will after its next runtime update.")}</p></SettingsGroup>;
+  if (outcome.kind === "error") return <SettingsGroup note={note}><p className="settings-item settings-hint" role="alert">{outcome.message}</p></SettingsGroup>;
+  const { integrations } = outcome;
+  // agents on the PC's PATH first, in herdr's order: the rest can wait until one is installed
+  const groups = [
+    { title: undefined, rows: integrations.filter((integration) => integration.available) },
+    { title: t("Not found on this PC"), rows: integrations.filter((integration) => !integration.available) },
+  ].filter((group) => group.rows.length > 0);
+  return (
+    <>
+      {groups.map((group, index) => (
+        <SettingsGroup key={group.title ?? "found"} title={group.title} note={index === 0 ? note : undefined}>
+          {group.rows.map((integration) => <IntegrationRow key={integration.target} integration={integration} />)}
+        </SettingsGroup>
+      ))}
+    </>
+  );
+}
+
+function IntegrationRow({ integration }: { integration: AgentIntegration }) {
+  const t = useT();
+  const commandRef = useRef<HTMLElement>(null);
+  const [copied, setCopied] = useState(false);
+  // the latest Copy owns the label: an earlier press's timer must not clear it early
+  const copiedTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), []);
+  const name = integration.label;
+  if (integration.state === "current") {
+    return (
+      <SettingsRow label={name} description={t("Installed")}>
+        <Check className="settings-integration-check" aria-hidden="true" />
+      </SettingsRow>
+    );
+  }
+  // the label is the name `herdr integration install` takes (antigravity_cli is antigravity-cli)
+  const command = `herdr integration install ${name}`;
+  const copy = async (): Promise<void> => {
+    if (!(await copyText(command, commandRef.current))) return;
+    setCopied(true);
+    window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => setCopied(false), 1600);
+  };
+  const state = integration.state === "outdated" ? t("Installed, but older than this herdr: run this to update it") : t("Not installed");
+  return (
+    <SettingsRow label={name} description={<>{state}<code ref={commandRef} className="settings-integration-command">{command}</code></>}>
+      <button type="button" className="btn" aria-label={t("Copy the command for {name}", { name })} onClick={() => void copy()}>{t(copied ? "Copied" : "Copy")}</button>
+    </SettingsRow>
+  );
+}
+
 const SHORTCUT_KEYS: readonly string[] = [..."abcdefghijklmnopqrstuvwxyz0123456789,", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
 
 function ShortcutsPage() {
   const { settings, update } = useSettings();
   const t = useT();
+  const platformIsMac = isMacPlatform();
   return (
     <>
-      <SettingsGroup className="settings-shortcuts" note={t("Some keys are reserved by the browser. Changes apply to this device.")}>
-        {SHORTCUTS.map((shortcut) => (
-          <SettingsRow key={shortcut.id} label={t(shortcut.label)}>
-            {shortcut.id === "voice" ? <span className="settings-keys">{formatKeys(shortcut.keys).map((key) => <kbd className="kbd" key={key}>{key}</kbd>)}</span> : (
-              <select className="select settings-select settings-shortcut-select" aria-label={t(shortcut.label)} value={Object.hasOwn(settings.shortcutOverrides, shortcut.id) ? settings.shortcutOverrides[shortcut.id] ?? "off" : "default"} onChange={(event) => {
-                const next = { ...settings.shortcutOverrides };
-                if (event.target.value === "default") delete next[shortcut.id];
-                else next[shortcut.id] = event.target.value === "off" ? null : event.target.value;
-                update({ shortcutOverrides: next });
-              }}>
-                <option value="default" title={t("Default")} disabled={shortcutConflict(shortcut.id, shortcutKeys(shortcut.id, {}), settings.shortcutOverrides)}>{compactKeys(shortcut.keys)}</option>
-                <option value="off" title={t("Send keys to terminal")}>{t("Off")}</option>
-                {SHORTCUT_KEYS.map((key) => {
-                  const conflict = shortcutConflict(shortcut.id, [key], settings.shortcutOverrides);
-                  return <option key={key} value={key} disabled={conflict}>{compactKeys(["Mod", "Shift", key])}{conflict ? " — " + t("Already assigned") : ""}</option>;
-                })}
-              </select>
-            )}
-          </SettingsRow>
-        ))}
+      <SettingsGroup className="settings-shortcuts" note={<>{t("Bindings apply to this browser and device; Mod+Shift is fixed.")} {t("Text selection in focused fields stays native; Tab/list keys are UI-local, not global shortcuts.")} {t("The mobile key bar sends terminal keys, not app actions.")}</>}>
+        {SHORTCUTS.map((shortcut) => {
+          const displayedKeys = shortcutDisplayKeys(shortcut.id, settings.shortcutOverrides);
+          const selectedKey = displayedKeys[displayedKeys.length - 1];
+          const selectedReserved = selectedKey !== undefined && isReservedShortcutKey(selectedKey, platformIsMac);
+          const defaultKeys = shortcutDisplayKeys(shortcut.id, {});
+          const defaultKey = defaultKeys[defaultKeys.length - 1];
+          const defaultReserved = defaultKey !== undefined && isReservedShortcutKey(defaultKey, platformIsMac);
+          return (
+            <SettingsRow key={shortcut.id} label={t(shortcut.label)} wide={shortcut.id !== "voice"} description={selectedReserved ? t("Your browser or operating system may intercept {keys}.", { keys: compactKeys(displayedKeys) }) : undefined}>
+              {shortcut.id === "voice" ? <span className="settings-keys">{formatKeys(shortcut.keys).map((key) => <kbd className="kbd" key={key}>{key}</kbd>)}</span> : (
+                <select className="select settings-select settings-shortcut-select" aria-label={t(shortcut.label)} value={Object.hasOwn(settings.shortcutOverrides, shortcut.id) ? settings.shortcutOverrides[shortcut.id] ?? "off" : "default"} onChange={(event) => {
+                  const next = { ...settings.shortcutOverrides };
+                  if (event.target.value === "default") delete next[shortcut.id];
+                  else next[shortcut.id] = event.target.value === "off" ? null : event.target.value;
+                  update({ shortcutOverrides: next });
+                }}>
+                  <option value="default" title={t("Default")} disabled={shortcutConflict(shortcut.id, shortcutKeys(shortcut.id, {}), settings.shortcutOverrides)}>{compactKeys(defaultKeys)}{defaultReserved ? ` — ${t("Reserved")}` : ""}</option>
+                  <option value="off" title={t("Send keys to terminal")}>{t("Off")}</option>
+                  {SHORTCUT_KEYS.map((key) => {
+                    const conflict = shortcutConflict(shortcut.id, [key], settings.shortcutOverrides);
+                    const reserved = isReservedShortcutKey(key, platformIsMac);
+                    return <option key={key} value={key} disabled={conflict}>{compactKeys(["Mod", "Shift", key])}{reserved ? ` — ${t("Reserved")}` : ""}{conflict ? " — " + t("Already assigned") : ""}</option>;
+                  })}
+                </select>
+              )}
+            </SettingsRow>
+          );
+        })}
       </SettingsGroup>
       <div className="settings-actions">
         <button type="button" className="btn" onClick={() => update({ shortcutOverrides: {} })}>{t("Reset shortcuts")}</button>
@@ -539,17 +653,44 @@ function RemotePcsPage({ actions, pcSettings, pcSettingsError, onPcSettings }: {
   );
 }
 
+/**
+ * The herdr plugins of the PC on screen and what each can do, to read only: installing, enabling
+ * and removing a plugin stay with herdr. Nothing is drawn where there is none to list.
+ */
+function PluginsGroup() {
+  const t = useT();
+  const api = useMachineApi();
+  const [plugins, setPlugins] = useState<PluginActions[]>([]);
+  useEffect(() => {
+    let current = true;
+    void api.fetchPluginActions().then((list) => { if (current) setPlugins(list); }, () => { if (current) setPlugins([]); });
+    return () => { current = false; };
+  }, [api]);
+  if (plugins.length === 0) return null;
+  return (
+    <SettingsGroup title={t("herdr plugins")} note={t("Run a plugin's actions from the command palette.")} className="settings-plugins">
+      {plugins.map((plugin) => (
+        <SettingsRow key={plugin.plugin_id} label={`${plugin.name} ${plugin.version}`} description={plugin.actions.length > 0 ? plugin.actions.map((action) => action.title).join(" · ") : t("No actions")}>
+          <span className="settings-hint">{plugin.enabled ? t("Enabled") : t("Disabled")}</span>
+        </SettingsRow>
+      ))}
+    </SettingsGroup>
+  );
+}
+
 function AboutPage({ updates, herdrVersion, bridgesFollow }: { updates: UpdatesModel; herdrVersion: string | null; bridgesFollow: boolean }) {
   const t = useT();
   return (
     <>
       <UpdateControls updates={updates} bridgesFollow={bridgesFollow} />
       <HerdrUpdateControls enabled herdrVersion={herdrVersion} />
+      <PluginsGroup />
+      <TelemetryControls />
       <SettingsGroup title={t("About")} className="settings-about">
         <div className="settings-row">
           <div className="settings-row-text">
             <span className="settings-label">herdr web ui</span>
-            <a className="settings-link" href="https://devswha.github.io/herdr-web-ui/" target="_blank" rel="noreferrer">devswha.github.io/herdr-web-ui</a>
+            <a className="settings-link" href="https://herdrweb.dev/" target="_blank" rel="noreferrer">herdrweb.dev</a>
           </div>
           <a className="btn" href="https://github.com/devswha/herdr-web-ui" target="_blank" rel="noreferrer"><Star aria-hidden="true" />{t("Star on GitHub")}</a>
         </div>
@@ -591,7 +732,7 @@ function OpenSettingsDialog({ section = null, onClose, actions, updates, auth, h
   const surface = useFocusTrap<HTMLElement>(true, { initialFocus: backRef });
   const shown = useRef<{ page: SettingsPage | null; keyBar: boolean } | null>(null);
   const label = (id: SettingsPage): string => t(id === "appearance" ? "Appearance" : id === "chat" ? "Chat" : id === "terminal" ? "Terminal" : id === "alerts" ? "Alerts" : id === "voice" ? "Voice input"
-    : id === "usage" ? "Subscription usage" : id === "shortcuts" ? "Shortcuts" : id === "devices" ? "Phone & devices" : id === "remote" ? "Remote PCs" : "About");
+    : id === "usage" ? "Subscription usage" : id === "shortcuts" ? "Shortcuts" : id === "devices" ? "Phone & devices" : id === "remote" ? "Remote PCs" : id === "integrations" ? "Agent integrations" : "About");
   const openPage = (id: SettingsPage): void => { setKeyBarOpen(false); setChosen(id); };
   const openKeyBar = (): void => {
     settingsScrollRef.current = settingsBodyRef.current?.scrollTop ?? 0;
@@ -669,6 +810,7 @@ function OpenSettingsDialog({ section = null, onClose, actions, updates, auth, h
       case "shortcuts": return <ShortcutsPage />;
       case "devices": return <DevicesPage auth={auth} />;
       case "remote": return <RemotePcsPage actions={actions} pcSettings={pcSettings} pcSettingsError={pcSettingsError} onPcSettings={(patch) => void updatePcSettings(patch)} />;
+      case "integrations": return <IntegrationsPage />;
       case "about": return <AboutPage updates={updates} herdrVersion={herdrVersion} bridgesFollow={pcSettings?.auto_update_bridges === true} />;
       default: return null;
     }

@@ -1,10 +1,13 @@
-import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 
 import { foldCode, mathNestsTooDeep, parseMarkdown, type InlineNode, type ListBlock, type MarkdownBlock } from "../lib/markdown.ts";
 import { codeIsFilePath, OpenFileContext, splitFilePaths } from "../lib/filePaths.ts";
 import { fileUriPath } from "../lib/terminalFileLinks.ts";
+import { CHAT_HIGHLIGHT_LIMIT, languageForFence } from "../lib/highlight.ts";
+import { HighlightedCode } from "./HighlightedCode.tsx";
 import { useT } from "../lib/i18n.ts";
+import { copyText } from "../lib/clipboard.ts";
 
 type Katex = typeof import("katex").default;
 /** KaTeX is a fifth of the app's script: the first expression loads it (lib/katex.ts), and every later one has it at once. */
@@ -88,13 +91,21 @@ function Inline({ nodes, interactive = true }: { nodes: InlineNode[]; interactiv
   })}</>;
 }
 
+/** A list, nested lists and tables in its items; a task item's box stands in for its bullet. */
 function List({ block }: { block: ListBlock }) {
   const Tag = block.ordered ? "ol" : "ul";
+  const t = useT();
+  const id = useId();
   return (
     <Tag className="markdown-list" start={block.ordered ? block.start : undefined}>
       {block.items.map((item, index) => (
-        <li key={index}>
-          <Inline nodes={item.content} />
+        <li key={index} className={item.checked === undefined ? undefined : "markdown-task"}>
+          {/* a task's box shows its state; the agent's text owns it, so it cannot be ticked here. Drawn,
+              not an <input>: a disabled checkbox is greyed by the browser and ignores the accent. It is
+              named by the item's text, or, with none (`- [ ]`), as an empty task */}
+          {item.checked !== undefined && <span className="markdown-task-box" role="checkbox" aria-checked={item.checked} aria-disabled="true"
+            aria-labelledby={item.content.length === 0 ? undefined : `${id}-${index}`} aria-label={item.content.length === 0 ? t("Empty task") : undefined}>{item.checked && <Check aria-hidden="true" />}</span>}
+          {item.checked === undefined ? <Inline nodes={item.content} /> : <span id={`${id}-${index}`}><Inline nodes={item.content} /></span>}
           {item.blocks !== undefined && <Blocks blocks={item.blocks} />}
         </li>
       ))}
@@ -105,14 +116,16 @@ function List({ block }: { block: ListBlock }) {
 function CodeBlock({ language, value }: { language: string; value: string }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const block = useRef<HTMLDivElement>(null);
   // no inner scroll: a long block folds, with a visible "Show all" row
   const fold = useMemo(() => foldCode(value), [value]);
   const copy = async (): Promise<void> => {
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
+    const ok = await copyText(value);
+    setCopied(ok);
+    setCopyFailed(!ok);
+    if (ok) window.setTimeout(() => setCopied(false), 1500);
   };
   const folding = useRef(false);
   const toggle = (): void => {
@@ -136,7 +149,8 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
           {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
         </button>
       </div>
-      <pre><code>{fold !== null && !expanded ? fold.head : value}</code></pre>
+      {copyFailed && <p className="markdown-code-error" role="alert">{t("Couldn't copy. Select the text and copy it manually.")}</p>}
+      <HighlightedCode code={fold !== null && !expanded ? fold.head : value} language={languageForFence(language)} limit={CHAT_HIGHLIGHT_LIMIT} />
       {fold !== null && (
         <button type="button" className="markdown-code-more" aria-expanded={expanded} onClick={toggle}>
           {expanded ? t("Show less") : t("Show all {n} lines", { n: fold.lines })}

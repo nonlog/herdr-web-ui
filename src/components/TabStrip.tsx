@@ -5,19 +5,31 @@
  * focused there, else its first. The app shows one pane at a time, so a tab with several panes
  * carries a picker of them beside its name.
  *
+ * The menu also moves the tab's pane (the one the tab opens) to another tab, a new tab or
+ * another workspace, as herdr's `pane move`: MovePaneMenu lists the places under the same button.
+ *
  * A tab is renamed and closed here, as herdr's prefix+shift+t and prefix+shift+x. With a mouse:
  * an x on the tab under the pointer and on the open one, a double-click on the name to type a
  * new one, a right-click for the menu. On a touch screen the open tab's chevron opens the same
  * menu as a sheet. With keys: F2 and Delete on a focused tab. A close asks first only when it
  * costs more than the tab: an agent still at work in it, or the workspace's last tab.
+ *
+ * The same menu carries herdr's layout operations for the pane the tab opens (the open pane on
+ * the open tab): split right and down (prefix+v, prefix+-), zoom (prefix+z), swap with a neighbour
+ * (prefix+shift+hjkl) and the resize mode's moves, as wider / narrower / taller / shorter, plus
+ * pane clear. Swap and resize items exist only for the sides the pane has a neighbour on, read
+ * from the layout rects (lib/layoutMap.ts), and a tab of several panes heads the menu with the
+ * layout map. A split keeps the user's pane, as herdr's --no-focus does.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
-import { ChevronDown, Pencil, Plus, Terminal, X } from "lucide-react";
+import { ChevronDown, ChevronsDownUp, ChevronsLeftRight, ChevronsRightLeft, ChevronsUpDown, Columns2, Eraser, FolderInput, Maximize2, Minimize2, MoveDown, MoveLeft, MoveRight, MoveUp, Pencil, Plus, Rows2, Terminal, X, type LucideIcon } from "lucide-react";
 
 import "./TabStrip.css";
 
-import type { HerdrTab, PaneInfo, SessionSnapshot, WorkspaceInfo } from "../../shared/protocol.ts";
-import { ApiError } from "../lib/api.ts";
+import type { HerdrPane, HerdrTab, PaneDirection, PaneInfo, PaneLayoutSnapshot, SessionSnapshot, WorkspaceInfo } from "../../shared/protocol.ts";
+import { ApiError, routeMissing } from "../lib/api.ts";
+import { paneNeighbors, resizeMove, zoomMode, type ResizeIntent } from "../lib/layoutMap.ts";
+import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { useFacesArrived } from "../lib/fontFaces.ts";
 import { focusWorkspaceListToggle } from "../lib/focus.ts";
 import { useT } from "../lib/i18n.ts";
@@ -26,13 +38,28 @@ import { STRIP_AT_REST, stripPlaced, stripScrolled, stripSelected, type StripScr
 import { PANE_TABPANEL_ID, paneTabPanelLabel } from "../lib/paneRegion.ts";
 import { rosterPanes } from "../lib/dagPane.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
-import { knownStatus } from "../lib/status.ts";
+import { paneStatus, rollupStatus } from "../lib/status.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { displayPaneTitle } from "./Sidebar.tsx";
-import { RowMenu, type RowMenuItem } from "./RowMenu.tsx";
+import { MovePaneMenu } from "./MovePaneMenu.tsx";
+import { RowMenu, SHEET_QUERY, type RowMenuItem } from "./RowMenu.tsx";
+import { LayoutMap } from "./LayoutMap.tsx";
 
 const said = (reason: unknown): string => reason instanceof ApiError ? reason.detail : reason instanceof Error ? reason.message : String(reason);
+
+const SWAP_ITEMS: { direction: PaneDirection; label: string; icon: LucideIcon }[] = [
+  { direction: "left", label: "Swap left", icon: MoveLeft },
+  { direction: "right", label: "Swap right", icon: MoveRight },
+  { direction: "up", label: "Swap up", icon: MoveUp },
+  { direction: "down", label: "Swap down", icon: MoveDown },
+];
+const RESIZE_ITEMS: { intent: ResizeIntent; label: string; icon: LucideIcon }[] = [
+  { intent: "wider", label: "Wider", icon: ChevronsLeftRight },
+  { intent: "narrower", label: "Narrower", icon: ChevronsRightLeft },
+  { intent: "taller", label: "Taller", icon: ChevronsUpDown },
+  { intent: "shorter", label: "Shorter", icon: ChevronsDownUp },
+];
 
 /** the pane each tab was last seen on, per PC: a tab clicked again opens where it was left */
 const lastViewed = new Map<string, string>();
@@ -43,14 +70,20 @@ export interface TabStripProps {
   selectedPane: PaneInfo;
   onSelectPane: (paneId: string) => void;
   onNewTab: () => void;
+  /** a pane this strip moved, under the id it answers to now (a new one when it left the workspace) */
+  onPaneMoved: (previousPaneId: string, paneId: string) => void;
+  /** herdr took a layout call from here: the snapshot is read again now, not at the next push's debounce */
+  onLayoutChanged: () => void;
 }
 
-export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNewTab }: TabStripProps) {
+export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNewTab, onPaneMoved, onLayoutChanged }: TabStripProps) {
   const t = useT();
   const machineId = useMachineId();
-  const { closeTab, renameTab } = useMachineApi();
+  const { closeTab, renameTab, splitPane, zoomPane, swapPane, resizePane, clearPane } = useMachineApi();
+  const sheet = useMediaQuery(SHEET_QUERY);
   const strip = useRef<HTMLDivElement>(null);
   const [picker, setPicker] = useState<{ anchor: HTMLElement; tab: HerdrTab } | null>(null);
+  const [moving, setMoving] = useState<{ anchor: HTMLElement; pane: PaneInfo } | null>(null);
   const [editing, setEditing] = useState<{ tabId: string; value: string } | null>(null);
   // the name just sent, shown until herdr's snapshot carries it
   const [sent, setSent] = useState<{ tabId: string; label: string } | null>(null);
@@ -77,6 +110,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   useEffect(() => {
     const here = (tabId: string): boolean => tabs.some((tab) => tab.tab_id === tabId);
     if (picker && !here(picker.tab.tab_id)) setPicker(null);
+    if (moving && !panes.some((pane) => pane.pane_id === moving.pane.pane_id)) setMoving(null);
     if (editing && !here(editing.tabId)) setEditing(null);
     if (confirm && !here(confirm.tab.tab_id)) setConfirm(null);
     if (sent && tabs.find((tab) => tab.tab_id === sent.tabId)?.label.trim() === sent.label) setSent(null);
@@ -197,7 +231,8 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   };
   const requestClose = (tab: HerdrTab): void => {
     setError(null);
-    const busy = panesOf(tab).some((pane) => { const status = knownStatus(pane.agent_status); return status === "working" || status === "blocked"; });
+    // a turn that waits on its background work would lose that work too
+    const busy = panesOf(tab).some((pane) => { const status = paneStatus(pane as HerdrPane); return status === "working" || status === "blocked" || status === "waiting"; });
     if (tabs.length > 1 && !busy) {
       void close(tab).catch((reason: unknown) => setError(t("Close failed: {reason}", { reason: said(reason) })));
       return;
@@ -235,11 +270,66 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     setPicker(picker?.tab.tab_id === tab.tab_id ? null : { anchor: event.currentTarget, tab });
   };
 
-  // a tab's menu: its panes when it has several, then its name and its close
+  const layoutOf = (tab: HerdrTab): PaneLayoutSnapshot | undefined => snapshot.layouts?.find((layout) => layout.tab_id === tab.tab_id);
+  // herdr says in words why a layout call changed nothing: the pane has no neighbour on that
+  // side, no border that could move that way, or the tab has one pane
+  const unchanged = (reason: string | null): string => {
+    switch (reason) {
+      case "no_neighbor": return t("No pane on that side to swap with");
+      case "unchanged": return t("The pane cannot be resized that way");
+      case "single_pane": return t("The tab has only one pane");
+      default: return t("The layout did not change");
+    }
+  };
+  // a layout call: herdr's answer comes back through the snapshot, read again at once (a menu
+  // opened right after must act on the layout as it is now), so only a refusal or an unchanged
+  // layout has anything to say here
+  const layoutCall = (call: Promise<{ changed: boolean; reason: string | null } | PaneInfo | void>): void => {
+    setError(null);
+    void call
+      .then((result) => {
+        onLayoutChanged();
+        if (result && "changed" in result && !result.changed) setError(unchanged(result.reason));
+      })
+      // a PC whose bridge is from before these routes answers 404 for the route itself: said plainly
+      .catch((reason: unknown) => setError(routeMissing(reason) ? t("This PC's bridge does not offer this yet") : t("Layout change failed: {reason}", { reason: said(reason) })));
+  };
+
+  // a tab's menu: its panes when it has several, herdr's layout operations on the pane it
+  // opens, then its name, where its pane can move, and its close
   const pickerItems = (tab: HerdrTab): RowMenuItem[] => {
     // the tab may have changed under the open menu: the items act on what it is now
     const now = tabs.find((candidate) => candidate.tab_id === tab.tab_id) ?? tab;
     const own = panesOf(now);
+    const anchor = picker?.anchor;
+    const target = paneFor(now);
+    const layout = layoutOf(now);
+    const layoutItems: RowMenuItem[] = [];
+    if (target) {
+      const id = target.pane_id;
+      layoutItems.push(
+        { id: "split-right", label: t("Split right"), icon: Columns2, divider: own.length > 1, run: () => layoutCall(splitPane(id, "right")) },
+        { id: "split-down", label: t("Split down"), icon: Rows2, run: () => layoutCall(splitPane(id, "down")) },
+      );
+      if (layout && own.length > 1) {
+        // the mode the item names, never a toggle (lib/layoutMap.ts): herdr focuses the pane and
+        // then sets the tab's flag, so `on` for another pane of a zoomed tab answers already_zoomed
+        // with the tab now showing this pane alone. That is what the item said, not a refusal: the
+        // answer counts as done when the tab's state is the one asked for
+        const mode = zoomMode(layout, id);
+        const unzoom = mode === "off";
+        layoutItems.push({ id: "zoom", label: t(unzoom ? "Unzoom pane" : "Zoom pane"), icon: unzoom ? Minimize2 : Maximize2, checked: unzoom, run: () => layoutCall(zoomPane(id, mode).then((answer) => ({ ...answer, changed: answer.zoomed === !unzoom }))) });
+        const beside = paneNeighbors(layout, id);
+        layoutItems.push(...SWAP_ITEMS.filter((item) => beside[item.direction]).map((item, index) => ({
+          id: `swap-${item.direction}`, label: t(item.label), icon: item.icon, divider: index === 0, run: () => layoutCall(swapPane(id, item.direction)),
+        })));
+        const moves = RESIZE_ITEMS.map((item) => ({ item, move: resizeMove(layout, id, item.intent) })).filter((entry) => entry.move !== null);
+        layoutItems.push(...moves.map(({ item, move }, index) => ({
+          id: `resize-${item.intent}`, label: t(item.label), icon: item.icon, divider: index === 0, run: () => layoutCall(resizePane(move!.paneId, move!.direction)),
+        })));
+      }
+      layoutItems.push({ id: "clear", label: t("Clear pane"), icon: Eraser, divider: true, run: () => layoutCall(clearPane(id)) });
+    }
     return [
       ...(own.length > 1 ? own.map((pane) => ({
         id: pane.pane_id,
@@ -249,9 +339,27 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
         current: pane.pane_id === selectedPane.pane_id,
         run: () => onSelectPane(pane.pane_id),
       })) : []),
-      { id: "rename-tab", label: t("Rename tab"), icon: Pencil, divider: own.length > 1, run: () => beginRename(now) },
+      ...layoutItems,
+      { id: "rename-tab", label: t("Rename tab"), icon: Pencil, divider: true, run: () => beginRename(now) },
+      // the pane the tab opens: the open one on the open tab
+      { id: "move-pane", label: t("Move pane to…"), icon: FolderInput, run: () => { if (anchor && target) setMoving({ anchor, pane: target }); } },
       { id: "close-tab", label: t("Close tab"), icon: X, danger: true, divider: true, run: () => requestClose(now) },
     ];
+  };
+
+  // the menu's head for a tab of several panes: the layout map, with the pane the menu acts on
+  // marked; the sheet keeps its title above it, the popover has no title to keep
+  const pickerHeader = (tab: HerdrTab, title: string) => {
+    const now = tabs.find((candidate) => candidate.tab_id === tab.tab_id) ?? tab;
+    const own = panesOf(now);
+    const layout = layoutOf(now);
+    if (!layout || own.length < 2) return undefined;
+    return (
+      <>
+        {sheet && <span className="row-sheet-title">{title}</span>}
+        <LayoutMap layout={layout} panes={own} selectedPaneId={paneFor(now)?.pane_id ?? null} onSelect={(paneId) => { setPicker(null); onSelectPane(paneId); }} />
+      </>
+    );
   };
 
   // the pane region every tab governs, as App names it. App gives that region the tabpanel role
@@ -264,7 +372,8 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
         {tabs.map((tab) => {
           const active = tab.tab_id === selectedPane.tab_id;
           const own = panesOf(tab);
-          const status = knownStatus(tab.agent_status);
+          // Settle each pane's wait before rolling up, so a sibling's RUN or DONE stays visible.
+          const status = rollupStatus(own.map((pane) => paneStatus(pane as HerdrPane)));
           const pickerOpen = picker?.tab.tab_id === tab.tab_id;
           const name = nameOf(tab);
           return (
@@ -308,7 +417,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
                   // the middle button closes a tab, as it does a browser's
                   onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); requestClose(tab); } }}
                 >
-                  {(status === "working" || status === "blocked" || status === "done") && <span className="tab-strip-dot" data-status={status} aria-hidden="true" />}
+                  {(status === "working" || status === "blocked" || status === "waiting" || status === "done") && <span className="tab-strip-dot" data-status={status} aria-hidden="true" />}
                   <span className="tab-strip-label">{name}</span>
                 </button>
               )}
@@ -326,7 +435,11 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
         </button>
         {error && <span className="tab-strip-error" role="alert">{error}</span>}
       </div>
-      {picker && <RowMenu anchor={picker.anchor} title={panesOf(picker.tab).length > 1 ? t("Panes in {tab}", { tab: nameOf(picker.tab) }) : nameOf(picker.tab)} items={pickerItems(picker.tab)} align="start" onClose={() => setPicker(null)} />}
+      {moving && <MovePaneMenu anchor={moving.anchor} align="start" snapshot={snapshot} pane={moving.pane} paneTitle={displayPaneTitle(moving.pane)} onMoved={(moved) => onPaneMoved(moved.previous_pane_id, moved.pane.pane_id)} onError={(reason) => setError(t("Move failed: {reason}", { reason }))} onClose={() => setMoving(null)} />}
+      {picker && (() => {
+        const title = panesOf(picker.tab).length > 1 ? t("Panes in {tab}", { tab: nameOf(picker.tab) }) : nameOf(picker.tab);
+        return <RowMenu anchor={picker.anchor} title={title} header={pickerHeader(picker.tab, title)} items={pickerItems(picker.tab)} align="start" onClose={() => setPicker(null)} />;
+      })()}
       {confirm && <ConfirmDialog title={confirm.title} body={confirm.body} confirmLabel={t("Close tab")} onConfirm={async () => { await close(confirm.tab); setConfirm(null); }} onClose={() => setConfirm(null)} />}
     </>
   );

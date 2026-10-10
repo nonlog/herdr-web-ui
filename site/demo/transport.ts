@@ -11,8 +11,11 @@
  * type; agent panes show one notice instead of a TUI. A message sent from a chat gets a demo answer.
  * What does not: files, images, push and remote PCs, which need a real machine.
  */
-import type { AgentStatus, ConversationTurn, Machine, MachineEvent, PendingMessage, ServerMessage, SessionSnapshot, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
+import type { AgentIntegration, AgentStatus, ConversationTurn, IntegrationsResponse, Machine, MachineEvent, PaneDirection, PaneMoved, PaneResized, PaneSplit, PaneSwapped, PaneZoomed, PendingMessage, PluginActionResult, PluginActions, PluginActionsResponse, ServerMessage, SessionSnapshot, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
 import { VOICE_DEFAULTS, type VoiceStatus } from "../../shared/voice.ts";
+import { isAgentName } from "../../shared/agent-name.ts";
+import { neighborPane } from "../../src/lib/layoutMap.ts";
+import { closeLayoutPane, resizeLayout, splitLayout, swapLayoutPanes } from "../../src/lib/layoutTree.ts";
 import { rollupStatus } from "../../src/lib/status.ts";
 import { CHATS, PROMPT, SPECS } from "./fixtures.ts";
 import machinesFixture from "./fixtures/machines.json";
@@ -26,8 +29,16 @@ const PROMPT_ANSWER_TURN_MS = 2600;
 const CHAT_ANSWER_MS = 2400;
 /** the recording's gaps, capped so the replay stays brisk */
 const MAX_FRAME_GAP_MS = 500;
+/** Settings → Agent integrations: one of each state, in herdr's order */
+const integrationsFixture: AgentIntegration[] = [
+  ["pi", "pi", true, "not_installed"], ["omp", "omp", false, "not_installed"], ["claude", "claude", true, "current"],
+  ["codex", "codex", true, "outdated"], ["copilot", "copilot", false, "not_installed"], ["opencode", "opencode", true, "not_installed"],
+  ["cursor", "cursor-agent", false, "not_installed"], ["antigravity_cli", "agy", false, "not_installed"],
+].map(([target, command, available, state]) => ({ target: target as string, label: (target as string).replace("_", "-"), command: command as string, available: available as boolean, state: state as string }));
 
 type Pane = SessionSnapshot["panes"][number];
+type Tab = SessionSnapshot["tabs"][number];
+type Layout = SessionSnapshot["layouts"][number];
 type SseListener = (event: MessageEvent) => void;
 
 // ---- state -----------------------------------------------------------------------------------
@@ -60,11 +71,12 @@ const replying = new Set(snapshot().panes.filter((pane) => pane.agent && pane.ag
 let stateSeq = Math.max(0, ...(local.snapshot?.agents ?? []).map((agent) => agent.state_change_seq ?? 0));
 const nextStateSeq = (): number => ++stateSeq;
 /** herdr lists an agent pane under `agents` too, with the counter the sidebar's Activity order reads */
+// taken once, as the pane, tab and workspace templates are: the last agent can be closed in a demo
+const agentTemplate = local.snapshot?.agents[0] ? structuredClone(local.snapshot.agents[0]) : null;
 function addAgent(pane: Pane): void {
   const snap = snapshot();
-  const template = snap.agents[0];
-  if (!pane.agent || !template || snap.agents.some((agent) => agent.pane_id === pane.pane_id)) return;
-  snap.agents.push({ ...structuredClone(template), pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id, terminal_id: pane.terminal_id,
+  if (!pane.agent || !agentTemplate || snap.agents.some((agent) => agent.pane_id === pane.pane_id)) return;
+  snap.agents.push({ ...structuredClone(agentTemplate), pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id, terminal_id: pane.terminal_id,
     agent: pane.agent, agent_status: pane.agent_status, cwd: pane.cwd, foreground_cwd: pane.foreground_cwd, state_change_seq: nextStateSeq() });
 }
 
@@ -97,6 +109,12 @@ const omoRuns = () => [
  * here instead, which keeps adding an agent to the demo to a change in `fixtures.ts` alone. Panes
  * the fixtures do record are left exactly as they were recorded.
  */
+/** herdr lays a new tab out as its one pane over the whole area: the demo's layout for it, so the layout operations find the pane. */
+function addDemoLayout(workspaceId: string, tabId: string, paneId: string): void {
+  const area = { x: 0, y: 0, width: 120, height: 40 };
+  snapshot().layouts.push({ workspace_id: workspaceId, tab_id: tabId, zoomed: false, area, focused_pane_id: paneId, panes: [{ pane_id: paneId, focused: true, rect: { ...area } }], splits: [] });
+}
+
 function backfillPanes(): void {
   const snap = snapshot();
   const recorded = new Set<string>(keyOfPane.values());
@@ -111,6 +129,7 @@ function backfillPanes(): void {
     addAgent(pane);
     snap.tabs.push({ ...structuredClone(snap.tabs[0]!), tab_id: `${id}:t1`, workspace_id: id, label: spec.label, number: 1, agent_status: pane.agent_status, focused: false, pane_count: 1 });
     snap.workspaces.push({ ...structuredClone(template), workspace_id: id, label: spec.label, number: snap.workspaces.length + 1, active_tab_id: `${id}:t1`, agent_status: pane.agent_status, focused: false, pane_count: 1, tab_count: 1 });
+    addDemoLayout(id, `${id}:t1`, pane.pane_id);
     keyOfPane.set(pane.pane_id, spec.key);
   }
   // the fixture's own order is kept; a backfilled pane joins at the end of the list
@@ -158,6 +177,7 @@ function createDemoWorkspace(cwd: string, label: string, agent: string | null, w
   addAgent(pane);
   snap.tabs.push({ ...structuredClone(newTabTemplate), tab_id: `${id}:t1`, workspace_id: id, label, number: 1, agent_status: pane.agent_status, focused: false, pane_count: 1 });
   snap.workspaces.push({ ...structuredClone(newWorkspaceTemplate), workspace_id: id, label, number: snap.workspaces.length + 1, active_tab_id: `${id}:t1`, agent_status: pane.agent_status, focused: false, pane_count: 1, tab_count: 1, worktree: worktree ?? worktreeMetadata(repositoryAt(cwd)) });
+  addDemoLayout(id, `${id}:t1`, pane.pane_id);
   if (agent) {
     keyOfPane.set(pane.pane_id, pane.pane_id);
     chats.set(pane.pane_id, { turns: [], metadata: { model: agent === "codex" ? "gpt-5.6-sol" : "claude-opus-5-5", reasoning_effort: "medium" } });
@@ -189,6 +209,166 @@ function closeDemoWorkspaces(ids: Set<string>): void {
 
 const sseListeners = new Set<SseListener>();
 const sockets = new Set<DemoSocket>();
+
+// herdr names an unnamed tab by its place in the row and moves that name up when an earlier tab
+// closes; a renamed tab keeps its name. The demo tracks which tabs still carry the automatic name.
+const autoTabs = new Set<string>();
+function relabelAutoTabs(workspaceId: string): void {
+  // a tab that is gone is forgotten, so a later tab given its ID keeps the name it was created with
+  const live = new Set(snapshot().tabs.map((tab) => tab.tab_id));
+  for (const id of autoTabs) if (!live.has(id)) autoTabs.delete(id);
+  let place = 0;
+  for (const tab of snapshot().tabs) {
+    if (tab.workspace_id !== workspaceId) continue;
+    place += 1;
+    if (autoTabs.has(tab.tab_id)) tab.label = String(place);
+  }
+}
+
+function recountDemoWorkspace(workspaceId: string): void {
+  const snap = snapshot();
+  const workspace = snap.workspaces.find((candidate) => candidate.workspace_id === workspaceId);
+  if (!workspace) return;
+  const panes = snap.panes.filter((pane) => pane.workspace_id === workspaceId);
+  const tabs = snap.tabs.filter((tab) => tab.workspace_id === workspaceId);
+  for (const tab of tabs) {
+    const own = panes.filter((pane) => pane.tab_id === tab.tab_id);
+    tab.pane_count = own.length;
+    tab.agent_status = rollupStatus(own.map((pane) => pane.agent_status));
+  }
+  workspace.pane_count = panes.length;
+  workspace.tab_count = tabs.length;
+  workspace.agent_status = rollupStatus(panes.map((pane) => pane.agent_status));
+  if (!tabs.some((tab) => tab.tab_id === workspace.active_tab_id)) workspace.active_tab_id = tabs[0]?.tab_id ?? workspace.active_tab_id;
+}
+
+/** a tab's layout as herdr reports one: the fixture's where it has one, else its panes side by side */
+function demoLayout(tabId: string): Layout {
+  const snap = snapshot();
+  const existing = snap.layouts.find((layout) => layout.tab_id === tabId);
+  if (existing) return existing;
+  const own = snap.panes.filter((pane) => pane.tab_id === tabId);
+  const width = Math.floor(120 / Math.max(1, own.length));
+  return {
+    workspace_id: own[0]?.workspace_id ?? "", tab_id: tabId, zoomed: false, area: { x: 0, y: 0, width: 120, height: 40 },
+    focused_pane_id: own.find((pane) => pane.focused)?.pane_id ?? own[0]?.pane_id ?? "",
+    panes: own.map((pane, index) => ({ pane_id: pane.pane_id, focused: pane.focused, rect: { x: index * width, y: 0, width, height: 40 } })),
+    splits: [],
+  };
+}
+
+// herdr's `pane move`: the pane into another tab, a new tab or a new workspace, under a new id
+// when it leaves its workspace; the tab and workspace it emptied close behind it
+function moveDemoPane(pane: Pane, destination: Record<string, unknown>, focus = false): PaneMoved | Response {
+  const snap = snapshot();
+  const previous = { pane_id: pane.pane_id, workspace_id: pane.workspace_id, tab_id: pane.tab_id };
+  const makeTab = (workspaceId: string, label: string): Tab => {
+    const number = Math.max(0, ...snap.tabs.filter((tab) => tab.workspace_id === workspaceId).map((tab) => tab.number)) + 1;
+    const tab: Tab = { ...structuredClone(newTabTemplate), tab_id: `${workspaceId}:t${number}`, workspace_id: workspaceId, label, number, agent_status: pane.agent_status, focused: false, pane_count: 0 };
+    snap.tabs.push(tab);
+    if (label === "") autoTabs.add(tab.tab_id); else autoTabs.delete(tab.tab_id);
+    return tab;
+  };
+  let targetTab: Tab;
+  let createdTab: Tab | null = null;
+  let createdWorkspace: WorkspaceInfo | null = null;
+  switch (destination["type"]) {
+    case "tab": {
+      const tab = snap.tabs.find((candidate) => candidate.tab_id === destination["tab_id"]);
+      if (!tab) return error("tab_not_found", "no such tab", 404);
+      if (tab.tab_id === pane.tab_id) {
+        return { changed: false, reason: "same_tab", previous_pane_id: pane.pane_id, previous_workspace_id: pane.workspace_id, previous_tab_id: pane.tab_id, pane, focused_pane_id: snap.focused_pane_id ?? pane.pane_id, target_layout: demoLayout(tab.tab_id) };
+      }
+      targetTab = tab;
+      break;
+    }
+    case "new_tab": {
+      const workspace = snap.workspaces.find((candidate) => candidate.workspace_id === (destination["workspace_id"] ?? pane.workspace_id));
+      if (!workspace) return error("workspace_not_found", "no such workspace", 404);
+      targetTab = createdTab = makeTab(workspace.workspace_id, String(destination["label"] ?? ""));
+      break;
+    }
+    case "new_workspace": {
+      const id = `w${(nextWorkspace++).toString(36)}`;
+      const cwd = pane.cwd ?? pane.foreground_cwd ?? "/home/demo";
+      const label = String(destination["label"] ?? "") || cwd.split("/").pop() || id;
+      createdWorkspace = { ...structuredClone(newWorkspaceTemplate), workspace_id: id, label, number: snap.workspaces.length + 1, active_tab_id: `${id}:t1`, agent_status: pane.agent_status, focused: false, pane_count: 0, tab_count: 1, worktree: worktreeMetadata(repositoryAt(cwd)) };
+      snap.workspaces.push(createdWorkspace);
+      targetTab = createdTab = makeTab(id, String(destination["tab_label"] ?? ""));
+      break;
+    }
+    default:
+      return error("invalid_destination", "destination.type must be \"tab\", \"new_tab\" or \"new_workspace\"", 400);
+  }
+  const crossing = targetTab.workspace_id !== previous.workspace_id;
+  const paneId = crossing ? `${targetTab.workspace_id}:p${(nextWorkspace++).toString(36)}` : pane.pane_id;
+  if (crossing) {
+    movedPaneIds.set(previous.pane_id, paneId);
+    const key = keyOfPane.get(previous.pane_id);
+    if (key !== undefined) { keyOfPane.delete(previous.pane_id); keyOfPane.set(paneId, key); }
+    if (replying.delete(previous.pane_id)) replying.add(paneId);
+    for (const agent of snap.agents) if (agent.pane_id === previous.pane_id) agent.pane_id = paneId;
+    for (const socket of sockets) socket.holdPending(previous.pane_id, "pane_not_found", "This demo pane moved to another workspace. Copy the message before discarding it.");
+  }
+  pane.pane_id = paneId;
+  pane.workspace_id = targetTab.workspace_id;
+  pane.tab_id = targetTab.tab_id;
+  const source = snap.layouts.find((layout) => layout.tab_id === previous.tab_id);
+  if (source) {
+    source.panes = source.panes.filter((candidate) => candidate.pane_id !== previous.pane_id);
+    if (source.focused_pane_id === previous.pane_id) source.focused_pane_id = source.panes[0]?.pane_id ?? "";
+    for (const candidate of source.panes) candidate.focused = candidate.pane_id === source.focused_pane_id;
+  }
+  const target = snap.layouts.find((layout) => layout.tab_id === targetTab.tab_id);
+  if (target) {
+    const beside = target.panes.find((candidate) => candidate.pane_id === target.focused_pane_id) ?? target.panes[target.panes.length - 1];
+    const half = beside ? Math.floor(beside.rect.width / 2) : target.area.width;
+    if (beside) beside.rect.width -= half;
+    target.panes.push({ pane_id: paneId, focused: false, rect: beside ? { x: beside.rect.x + beside.rect.width, y: beside.rect.y, width: half, height: beside.rect.height } : { ...target.area } });
+  }
+  let closedTabId: string | null = null;
+  let closedWorkspaceId: string | null = null;
+  if (!snap.panes.some((candidate) => candidate.tab_id === previous.tab_id)) {
+    closedTabId = previous.tab_id;
+    snap.tabs = snap.tabs.filter((tab) => tab.tab_id !== previous.tab_id);
+    autoTabs.delete(previous.tab_id);
+    snap.layouts = snap.layouts.filter((layout) => layout.tab_id !== previous.tab_id);
+    if (!snap.tabs.some((tab) => tab.workspace_id === previous.workspace_id)) {
+      closedWorkspaceId = previous.workspace_id;
+      snap.workspaces = snap.workspaces.filter((workspace) => workspace.workspace_id !== previous.workspace_id);
+    }
+  }
+  relabelAutoTabs(previous.workspace_id);
+  relabelAutoTabs(targetTab.workspace_id);
+  recountDemoWorkspace(previous.workspace_id);
+  recountDemoWorkspace(targetTab.workspace_id);
+  if (focus) {
+    snap.focused_pane_id = paneId;
+    snap.focused_tab_id = targetTab.tab_id;
+    snap.focused_workspace_id = targetTab.workspace_id;
+  } else {
+    // the pane ID changed (crossed workspaces): keep tracking it without moving tab/workspace focus
+    if (snap.focused_pane_id === previous.pane_id) snap.focused_pane_id = paneId;
+    // focus was not asked to follow, but it cannot stay on a tab or workspace that closed behind
+    // the pane: a pane still there takes it, one outside the destination when there is one
+    if (!snap.tabs.some((tab) => tab.tab_id === snap.focused_tab_id) || !snap.workspaces.some((workspace) => workspace.workspace_id === snap.focused_workspace_id)) {
+      const heir = snap.panes.find((candidate) => candidate.workspace_id === previous.workspace_id && candidate.pane_id !== paneId)
+        ?? snap.panes.find((candidate) => candidate.workspace_id !== targetTab.workspace_id)
+        ?? pane;
+      snap.focused_pane_id = heir.pane_id;
+      snap.focused_tab_id = heir.tab_id;
+      snap.focused_workspace_id = heir.workspace_id;
+    }
+  }
+  for (const candidate of snap.panes) candidate.focused = candidate.pane_id === snap.focused_pane_id;
+  for (const tab of snap.tabs) tab.focused = tab.tab_id === snap.focused_tab_id;
+  snap.workspaces.forEach((workspace, index) => { workspace.number = index + 1; workspace.focused = workspace.workspace_id === snap.focused_workspace_id; });
+  return {
+    changed: true, previous_pane_id: previous.pane_id, previous_workspace_id: previous.workspace_id, previous_tab_id: previous.tab_id, pane,
+    created_tab: createdTab, created_workspace: createdWorkspace, closed_tab_id: closedTabId, closed_workspace_id: closedWorkspaceId,
+    focused_pane_id: snap.focused_pane_id ?? paneId, target_layout: demoLayout(targetTab.tab_id),
+  };
+}
 
 function emitSse(event: MachineEvent): void {
   const message = new MessageEvent("message", { data: JSON.stringify(event) });
@@ -225,8 +405,12 @@ function agentOf(paneId: string): string {
 
 const now = () => new Date().toISOString();
 
+/** the id a pane answers to after a move took it to another workspace, for a mock turn begun under the old one */
+const movedPaneIds = new Map<string, string>();
+
 /** The bridge takes one accepted pending message when the current mock turn finishes. */
 function finishDemoTurn(paneId: string, status: "idle" | "done" = "done"): void {
+  while (movedPaneIds.has(paneId)) paneId = movedPaneIds.get(paneId)!;
   replying.delete(paneId);
   if (!paneOf(paneId)) return;
   setStatus(paneId, status);
@@ -317,6 +501,14 @@ function usageReport(): UsageReport {
   ] };
 }
 
+/** One fictional plugin, so the palette's Plugin actions group and Settings have something to show. */
+const PLUGINS: PluginActions[] = [
+  { plugin_id: "example.layout", name: "Layout", version: "0.1.0", description: "Apply project layouts", enabled: true, actions: [
+    { action_id: "apply", title: "Apply layout", description: "Arrange this workspace's panes", contexts: ["workspace"] },
+    { action_id: "save", title: "Save layout", description: null, contexts: ["workspace"] },
+  ] },
+];
+
 async function route(url: URL, method: string, init: RequestInit | undefined, input: RequestInfo | URL): Promise<Response> {
   const path = url.pathname;
   const query = url.searchParams;
@@ -330,10 +522,13 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   if (path === "/api/machines") return json({ machines });
   if (path === "/api/session") return json({ snapshot: snapshot() });
   if (path === "/api/agents") return json(agentsFixture);
+  if (path === "/api/integrations") return json({ integrations: integrationsFixture } satisfies IntegrationsResponse);
   if (path === "/api/updates") return json({ managed: false, auto_update: false, phase: "idle", current_revision: null, latest_revision: null, current_version: __APP_VERSION__, latest_version: null, available: false, checked_at: null, blocked_reason: null, error: null }, 200, { "cache-control": "no-store" });
   if (path === "/api/updates/notes") return json({ revision: null, releases: [], omitted: 0 }, 200, { "cache-control": "no-store" });
   if (path === "/api/updates/installed") return json({ revision: null, version: null, previous_version: null, installed_at: null, releases: [], omitted: 0 }, 200, { "cache-control": "no-store" });
   // the demo has no herdr to update: the controls stay hidden
+  // the demo sends no counts: a server without telemetry answers 404, and the app shows neither its notice nor its switch
+  if (path === "/api/telemetry") return json({ error: { code: "not_found", message: "This server sends no telemetry" } }, 404, { "cache-control": "no-store" });
   if (path === "/api/herdr/update") return json({ supported: false, phase: "idle", server_version: null, binary_version: null, stale: false, output: null, finished_at: null }, 200, { "cache-control": "no-store" });
   if (path === "/api/access") return json({ port: 7317, tailscale: { state: "running", dns_name: "workstation.example.ts.net", serving_url: "https://workstation.example.ts.net", serve_command: null, serve_url: null } });
   if (path === "/api/usage") return json(usageReport(), 200, { "cache-control": "no-store" });
@@ -408,7 +603,7 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const chat = key ? chats.get(key) : undefined;
     const agent = agentOf(paneId);
     if (!chat) return json({ source: "scrollback", turns: [] });
-    const source = agent === "claude" ? "claude-transcript" : agent === "codex" ? "codex-transcript" : agent === "gjc" ? "gjc-transcript" : agent === "omo" ? "omo-transcript" : agent === "pi" ? "pi-transcript" : "omp-transcript";
+    const source = agent === "claude" ? "claude-transcript" : agent === "codex" ? "codex-transcript" : agent === "gjc" ? "gjc-transcript" : agent === "omo" ? "omo-transcript" : agent === "pi" ? "pi-transcript" : agent === "devin" ? "devin-transcript" : "omp-transcript";
     return json({ source, turns: chat.turns, metadata: chat.metadata, cursor: null });
   }
   if (path === "/api/pane/prompt") return json({ prompt: keyOfPane.get(paneId) === "web" && promptOpen ? { ...PROMPT, id: promptId } : null });
@@ -420,17 +615,43 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     return json({ ok: true });
   }
   if (path === "/api/pane/commands") return json(commandsFixture);
+  if (path === "/api/pane/find") return error("find_unavailable", "History search needs a real herdr pane; the demo only replays terminal output.", 404);
   if (path === "/api/pane/omo-tasks") return json(keyOfPane.get(paneId) === OMO_TASKS_PANE ? { tasks: omoTasks(), runs: omoRuns() } : { tasks: [], runs: [] });
   if (path === "/api/pane/files") {
     const q = (query.get("q") ?? "").toLowerCase();
     return json({ files: DEMO_FILES.filter((file) => file.toLowerCase().includes(q)).slice(0, Number(query.get("limit") ?? 20)) });
   }
   if (path === "/api/pane/input" || path === "/api/pane/keys") return json({ ok: true });
+  if (path === "/api/plugins/actions") return json({ plugins: PLUGINS } satisfies PluginActionsResponse);
+  if (path === "/api/plugin/action") {
+    // nothing here is ever left running, so no run is asked about again
+    if (method === "GET") return error("plugin_log_not_found", "plugin log not found", 404);
+    const body = await bodyOf(init, input);
+    const known = PLUGINS.some((plugin) => plugin.plugin_id === body["plugin_id"] && plugin.actions.some((action) => action.action_id === body["action_id"]));
+    if (!known) return error("plugin_action_not_found", "plugin action not found", 404);
+    // the demo runs nothing: the action reads as done
+    return json({ log_id: "demo", status: "succeeded", exit_code: 0, output: null, opened_pane_id: null } satisfies PluginActionResult);
+  }
   if (path === "/api/pane/rename") {
     const body = await bodyOf(init, input);
     const pane = paneOf(String(body["pane_id"] ?? ""));
     if (!pane) return error("not_found", "no such pane", 404);
     pane.label = String(body["label"] ?? "") || null;
+    structureChanged();
+    return json({ ok: true });
+  }
+  if (path === "/api/agent/rename") {
+    const body = await bodyOf(init, input);
+    const paneId = String(body["pane_id"] ?? "");
+    const name = body["name"];
+    if (name !== null && typeof name !== "string") return error("invalid_name", "name must be a string, or null to clear it", 400);
+    const agent = snapshot().agents.find((entry) => entry.pane_id === paneId);
+    if (!agent) return error("agent_not_found", `agent target ${paneId} not found`, 404);
+    // herdr's refusals, in its words and with the status the server gives them
+    if (name !== null && !isAgentName(name)) return error("invalid_agent_name", "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)", 404);
+    const holder = name === null ? undefined : snapshot().agents.find((entry) => entry.name === name && entry.pane_id !== paneId);
+    if (holder) return error("agent_name_taken", `agent name ${name} is already used; candidates: pane_id=${holder.pane_id} workspace_id=${holder.workspace_id}`, 404);
+    agent.name = name;
     structureChanged();
     return json({ ok: true });
   }
@@ -451,11 +672,14 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const pane = paneOf(String(body["pane_id"] ?? ""));
     if (!pane) return error("not_found", "no such pane", 404);
     const snap = snapshot();
+    const closedLayout = snap.layouts.find((layout) => layout.tab_id === pane.tab_id);
+    if (closedLayout) closeLayoutPane(closedLayout, pane.pane_id);
     for (const socket of sockets) socket.holdPending(pane.pane_id, "pane_not_found", "This demo pane closed. Copy the message before discarding it.");
     replying.delete(pane.pane_id);
     snap.panes = snap.panes.filter((candidate) => candidate.pane_id !== pane.pane_id);
     const survivingPanes = snap.panes.filter((candidate) => candidate.workspace_id === pane.workspace_id);
     snap.tabs = snap.tabs.filter((tab) => tab.workspace_id !== pane.workspace_id || survivingPanes.some((candidate) => candidate.tab_id === tab.tab_id));
+    relabelAutoTabs(pane.workspace_id);
     const survivingTabs = snap.tabs.filter((tab) => tab.workspace_id === pane.workspace_id);
     snap.workspaces = snap.workspaces.filter((workspace) => workspace.workspace_id !== pane.workspace_id || survivingPanes.length > 0);
     const focused = snap.panes.find((candidate) => candidate.pane_id === snap.focused_pane_id)
@@ -499,6 +723,97 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     structureChanged();
     return json({ ok: true });
   }
+  if (path === "/api/pane/move") {
+    const body = await bodyOf(init, input);
+    const pane = paneOf(String(body["pane_id"] ?? ""));
+    if (!pane) return error("pane_not_found", "source pane not found", 404);
+    const destination = body["destination"];
+    if (!destination || typeof destination !== "object" || Array.isArray(destination)) return error("invalid_destination", "destination must be an object", 400);
+    const focus = body["focus"];
+    if (focus !== undefined && typeof focus !== "boolean") return error("invalid_focus", "focus must be a boolean", 400);
+    const moved = moveDemoPane(pane, destination as Record<string, unknown>, focus === true);
+    if (moved instanceof Response) return moved;
+    structureChanged();
+    return json(moved satisfies PaneMoved);
+  }
+  // herdr's layout operations on the demo's own layouts: a split halves the pane's rect for a new
+  // shell pane, a zoom flips the tab's flag (after focusing the pane, as herdr does), a swap
+  // exchanges two rects, a resize moves the ratio of the split the border belongs to and lays its
+  // panes out again (src/lib/layoutTree.ts), and a clear blanks the pane's screen on every socket attached to it
+  if (path === "/api/pane/split" || path === "/api/pane/zoom" || path === "/api/pane/swap" || path === "/api/pane/resize" || path === "/api/pane/clear") {
+    const body = await bodyOf(init, input);
+    const pane = paneOf(String(body["pane_id"] ?? ""));
+    const snap = snapshot();
+    const layout = pane ? snap.layouts.find((candidate) => candidate.tab_id === pane.tab_id) : undefined;
+    const cell = layout?.panes.find((candidate) => candidate.pane_id === pane?.pane_id);
+    if (!pane || !layout || !cell) return error("pane_not_found", "pane not found", 404);
+    if (path === "/api/pane/clear") {
+      for (const socket of sockets) socket.clearScreen(pane.pane_id);
+      return json({ ok: true });
+    }
+    if (path === "/api/pane/split") {
+      const direction = body["direction"];
+      if (direction !== "right" && direction !== "down") return error("invalid_direction", "direction must be right or down", 400);
+      const focus = body["focus"] === true;
+      const serial = (nextWorkspace++).toString(36);
+      const made: Pane = { ...structuredClone(pane), pane_id: `${pane.workspace_id}:p${serial}`, terminal_id: `${pane.workspace_id}:term${serial}`, label: null, title: null, agent: null, agent_session: null, agent_status: "unknown", focused: focus, terminal_title: null, terminal_title_stripped: null, revision: 1 };
+      if (!splitLayout(layout, pane.pane_id, { pane_id: made.pane_id, focused: focus, rect: cell.rect }, direction)) {
+        return error("split_failed", "The demo pane is too small to split.", 400);
+      }
+      snap.panes.push(made);
+      if (focus) {
+        layout.focused_pane_id = made.pane_id;
+        for (const candidate of layout.panes) candidate.focused = candidate.pane_id === made.pane_id;
+        for (const candidate of snap.panes) if (candidate.tab_id === pane.tab_id) candidate.focused = candidate.pane_id === made.pane_id;
+        snap.focused_pane_id = made.pane_id;
+      }
+      const tab = snap.tabs.find((candidate) => candidate.tab_id === pane.tab_id);
+      if (tab) tab.pane_count += 1;
+      const workspace = snap.workspaces.find((candidate) => candidate.workspace_id === pane.workspace_id);
+      if (workspace) workspace.pane_count += 1;
+      structureChanged();
+      return json({ ok: true, pane: made } satisfies PaneSplit);
+    }
+    if (path === "/api/pane/zoom") {
+      const mode = body["mode"] ?? "toggle";
+      if (mode !== "toggle" && mode !== "on" && mode !== "off") return error("invalid_mode", "mode must be toggle, on or off", 400);
+      // herdr focuses the pane before it reads the mode, or counts the panes: a zoomed tab then
+      // shows this pane alone even when the flag's answer is already_zoomed
+      const moved = layout.focused_pane_id !== pane.pane_id;
+      if (moved) {
+        layout.focused_pane_id = pane.pane_id;
+        for (const candidate of layout.panes) candidate.focused = candidate.pane_id === pane.pane_id;
+        for (const candidate of snap.panes) if (candidate.tab_id === pane.tab_id) candidate.focused = candidate.pane_id === pane.pane_id;
+        snap.focused_pane_id = pane.pane_id;
+      }
+      const answer = (zoomed: boolean, changed: boolean, reason: string | null) => {
+        if (moved || changed) structureChanged();
+        return json({ ok: true, zoomed, changed, reason } satisfies PaneZoomed);
+      };
+      if (layout.panes.length < 2) return answer(layout.zoomed, false, "single_pane");
+      const zoomed = mode === "toggle" ? !layout.zoomed : mode === "on";
+      if (zoomed === layout.zoomed) return answer(zoomed, false, zoomed ? "already_zoomed" : "already_unzoomed");
+      layout.zoomed = zoomed;
+      return answer(zoomed, true, null);
+    }
+    const direction = body["direction"];
+    if (direction !== "left" && direction !== "right" && direction !== "up" && direction !== "down") return error("invalid_direction", "direction must be left, right, up or down", 400);
+    const beside = (side: PaneDirection) => { const id = neighborPane(layout, pane.pane_id, side); return id === null ? undefined : layout.panes.find((candidate) => candidate.pane_id === id); };
+    if (path === "/api/pane/swap") {
+      const other = beside(direction);
+      if (!other) return json({ ok: true, changed: false, reason: "no_neighbor", target_pane_id: null } satisfies PaneSwapped);
+      swapLayoutPanes(layout, pane.pane_id, other.pane_id);
+      structureChanged();
+      return json({ ok: true, changed: true, reason: null, target_pane_id: other.pane_id } satisfies PaneSwapped);
+    }
+    const amount = body["amount"];
+    if (amount !== undefined && (typeof amount !== "number" || !(amount > 0) || amount > 0.5)) return error("invalid_amount", "amount must be a number above 0 and at most 0.5", 400);
+    const resized = resizeLayout(layout, pane.pane_id, direction, amount ?? 0.05);
+    if (!resized) return json({ ok: true, changed: false, reason: "unchanged" } satisfies PaneResized);
+    layout.panes = resized;
+    structureChanged();
+    return json({ ok: true, changed: true, reason: null } satisfies PaneResized);
+  }
   if (path === "/api/tab/rename") {
     const body = await bodyOf(init, input);
     const tab = snapshot().tabs.find((t) => t.tab_id === body["tab_id"]);
@@ -506,6 +821,7 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const label = String(body["label"] ?? "").trim();
     if (label === "") return error("missing_label", "label is required", 400);
     tab.label = label;
+    autoTabs.delete(tab.tab_id);
     structureChanged();
     return json({ ok: true });
   }
@@ -520,6 +836,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     }
     snap.panes = snap.panes.filter((p) => p.tab_id !== tab.tab_id);
     snap.tabs = snap.tabs.filter((t) => t.tab_id !== tab.tab_id);
+    autoTabs.delete(tab.tab_id);
+    relabelAutoTabs(tab.workspace_id);
     snap.layouts = snap.layouts.filter((l) => l.tab_id !== tab.tab_id);
     // a workspace's last tab takes the workspace with it
     if (!snap.tabs.some((t) => t.workspace_id === tab.workspace_id)) snap.workspaces = snap.workspaces.filter((w) => w.workspace_id !== tab.workspace_id);
@@ -574,7 +892,11 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const pane: Pane = { ...structuredClone(template), pane_id: `${id}:p${(nextWorkspace++).toString(36)}`, tab_id: tabId, terminal_id: `${id}:term${number}`, workspace_id: id, label: null, title: null, agent, agent_session: null, agent_status: agent ? "working" : "unknown", cwd, foreground_cwd: cwd, focused: false, terminal_title: null, terminal_title_stripped: null, revision: 1 };
     snap.panes.push(pane);
     addAgent(pane);
-    snap.tabs.push({ ...structuredClone(snap.tabs[0]!), tab_id: tabId, workspace_id: id, label: String(body["label"] ?? "") || String(number), number, agent_status: pane.agent_status, focused: false, pane_count: 1 });
+    snap.tabs.push({ ...structuredClone(snap.tabs[0]!), tab_id: tabId, workspace_id: id, label: String(body["label"] ?? ""), number, agent_status: pane.agent_status, focused: false, pane_count: 1 });
+    addDemoLayout(id, tabId, pane.pane_id);
+    if (String(body["label"] ?? "") === "") autoTabs.add(tabId);
+    else autoTabs.delete(tabId);
+    relabelAutoTabs(id);
     workspace.tab_count = tabs.length + 1;
     workspace.pane_count = siblings.length + 1;
     if (agent) {
@@ -763,6 +1085,9 @@ class DemoSocket extends EventTarget {
       case "take-over":
         this.push({ type: "error", code: "unsupported", message: "The demo has no competing terminal attachments.", pane_id: message.pane_id });
         break;
+      // Nor a read-only view: the site's page never lets go of its pane, and a watch ends at once.
+      case "watch": if (message.pane_id) this.push({ type: "watch-end", pane_id: message.pane_id }); break;
+      case "unwatch": break;
       case "detach":
         if (message.pane_id) {
           this.attached.delete(message.pane_id);
@@ -912,6 +1237,11 @@ class DemoSocket extends EventTarget {
     return pending !== undefined && this.deliverPending(paneId, pending);
   }
 
+  /** herdr's pane.clear: the screen goes blank with the cursor at home; what the program writes next shows again */
+  clearScreen(paneId: string): void {
+    if (this.attached.has(paneId)) this.push({ type: "pty-data", pane_id: paneId, data: "\x1b[2J\x1b[H" });
+  }
+
   private attach(paneId: string): void {
     this.attached.add(paneId);
     this.publishPending(paneId);
@@ -987,7 +1317,7 @@ for (const name of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"] as const) Object.
 setTimeout(() => {
   const chat = chats.get("api");
   const paneId = panesFixture.api;
-  const turn = chat?.turns.findLast((turn) => turn.role === "assistant" && !turn.end_ts);
+  const turn = chat?.turns.filter((turn) => turn.role === "assistant" && !turn.end_ts).at(-1);
   if (!chat || !turn || turn.role !== "assistant") return;
   turn.parts.push(
     { kind: "tool", name: "Bash", summary: "bun test metrics", input: JSON.stringify({ command: "bun test metrics" }, null, 2), output: " 6 pass\n 0 fail\nRan 6 tests across 1 file. [201ms]" },

@@ -4,7 +4,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { FONT_FAMILY_MAX_CHARS } from "./fontFamily.ts";
 import { DEFAULT_KEY_BAR_ITEMS, migrateKeyBarItems } from "./keyBar.ts";
-import { alertPrefs, CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_LANE_MAX_REM, CHAT_LANE_MIN, CHAT_WIDTHS, chatFontSize, chatLaneLength, chatLaneWidth, DEFAULT_SETTINGS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, quickReplyButtons, sanitizeSettings, terminalTheme, forgetPaneViews, VOICE_BUTTONS, wantsVoiceInput } from "./settings.ts";
+import { alertPrefs, CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_LANE_MAX_REM, CHAT_LANE_MIN, CHAT_WIDTHS, chatFontSize, chatLaneLength, chatLaneWidth, DEFAULT_SETTINGS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, quickReplyButtons, sanitizeSettings, terminalTheme, forgetPaneViews, DICTATION_LANGUAGES, VOICE_BUTTONS, wantsVoiceInput } from "./settings.ts";
+
+it("keeps a tab's pane while out of use until this device turns the pause on", () => {
+  expect(DEFAULT_SETTINGS.releasePaneAway).toBe(false);
+  expect(sanitizeSettings({}).releasePaneAway).toBe(false);
+  expect(sanitizeSettings({ releasePaneAway: true }).releasePaneAway).toBe(true);
+  expect(sanitizeSettings({ releasePaneAway: "true" }).releasePaneAway).toBe(false);
+});
 
 it("keeps the screen wake lock off until this device explicitly enables it", () => {
   expect(DEFAULT_SETTINGS.keepScreenOn).toBe(false);
@@ -26,6 +33,27 @@ it("keeps sidebar rows on two lines unless one line was chosen", () => {
   for (const sidebarRows of [null, true, "three", 2]) {
     expect(sanitizeSettings({ sidebarRows }).sidebarRows).toBe("two");
   }
+});
+
+describe("clipboard from a pane", () => {
+  it("is on in a fresh install", () => {
+    expect(DEFAULT_SETTINGS.paneClipboard).toBe(true);
+    expect(sanitizeSettings({}).paneClipboard).toBe(true);
+  });
+
+  it("turns on for a 0.4.1 record, whose false was saved with any other change", () => {
+    const loaded = sanitizeSettings(JSON.parse(JSON.stringify({ theme: "light", terminalOsc52: false })));
+    expect(loaded.paneClipboard).toBe(true);
+    expect(loaded).not.toHaveProperty("terminalOsc52");
+  });
+
+  it("stays off once turned off, across a save and a reload", () => {
+    const chosen = sanitizeSettings({ ...sanitizeSettings({ terminalOsc52: false }), paneClipboard: false });
+    const reloaded = sanitizeSettings(JSON.parse(JSON.stringify(chosen)));
+    expect(reloaded.paneClipboard).toBe(false);
+    expect(sanitizeSettings({ ...reloaded, theme: "dark" }).paneClipboard).toBe(false);
+    expect(sanitizeSettings({ paneClipboard: "false" }).paneClipboard).toBe(true);
+  });
 });
 
 it("drops the folder grouping an older version stored", () => {
@@ -292,6 +320,13 @@ describe("microphone button", () => {
     for (const voiceInput of [null, 1, "yes", "ON"]) expect(sanitizeSettings({ voiceInput }).voiceInput).toBe("auto");
   });
 
+  it("listens for the browser's language until another is chosen from the list", () => {
+    expect(DEFAULT_SETTINGS.voiceLanguage).toBe("auto");
+    expect(sanitizeSettings({}).voiceLanguage).toBe("auto");
+    for (const voiceLanguage of DICTATION_LANGUAGES) expect(sanitizeSettings({ voiceLanguage }).voiceLanguage).toBe(voiceLanguage);
+    for (const voiceLanguage of [null, 1, "", "hu", "hu-hu", "xx-XX", "auto "]) expect(sanitizeSettings({ voiceLanguage }).voiceLanguage).toBe("auto");
+  });
+
   it("is asked for in the chat off a phone on auto, everywhere when on and nowhere when off", () => {
     expect(wantsVoiceInput("auto", "chat", false)).toBe(true);
     expect(wantsVoiceInput("auto", "chat", true)).toBe(false);
@@ -438,9 +473,11 @@ it("sanitizes input modes and shortcut overrides without accepting arbitrary com
 });
 
 describe("key bar settings", () => {
-  it("migrates existing optional keys without restoring keys a new layout removed", () => {
+  it("uses the new default for fresh partial records and migrates explicit legacy records", () => {
     expect(DEFAULT_SETTINGS.keyBarItems).toEqual(DEFAULT_KEY_BAR_ITEMS);
     expect(sanitizeSettings({}).keyBarItems).toEqual(DEFAULT_KEY_BAR_ITEMS);
+    expect(sanitizeSettings({ theme: "light" }).keyBarItems).toEqual(DEFAULT_KEY_BAR_ITEMS);
+    expect(sanitizeSettings({ keyBarExtras: ["alt"] }).keyBarItems).toEqual(migrateKeyBarItems(["alt"]));
     expect(sanitizeSettings({ keyBarExtras: ["home-end", "slash", "unknown"] }).keyBarItems).toEqual(migrateKeyBarItems(["home-end", "slash"]));
     expect(sanitizeSettings({ keyBarExtras: [], keyBarItems: [] }).keyBarItems).toEqual([]);
     expect(sanitizeSettings({ keyBarExtras: ["alt"], keyBarItems: [] }).keyBarItems).toEqual([]);
@@ -471,4 +508,11 @@ describe("default lens", () => {
     expect(forgetPaneViews(storage)).toBe(2);
     expect([...data.keys()]).toEqual(["herdr-web-ui:settings"]);
   });
+});
+
+it("highlights code unless turned off, and keeps a stored choice only when it is a boolean", () => {
+  expect(DEFAULT_SETTINGS.highlightCode).toBe(true);
+  expect(sanitizeSettings({ highlightCode: false }).highlightCode).toBe(false);
+  expect(sanitizeSettings({ highlightCode: "no" }).highlightCode).toBe(true);
+  expect(sanitizeSettings({}).highlightCode).toBe(true);
 });

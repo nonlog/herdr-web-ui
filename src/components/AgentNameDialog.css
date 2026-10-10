@@ -1,0 +1,33 @@
+.agent-name-modal {
+  width: min(100%, 440px);
+}
+
+.agent-name-lead {
+  margin: 0 0 var(--space-4);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+/* the name is typed as a command argument: the field and the command read in the same face */
+.agent-name-input,
+.agent-name-command {
+  font-family: var(--font-mono);
+}
+
+.agent-name-command {
+  color: var(--text);
+}
+
+.agent-name-input[aria-invalid="true"],
+.agent-name-input[aria-invalid="true"]:focus {
+  border-color: var(--status-blocked);
+}
+
+.agent-name-error {
+  color: var(--status-blocked);
+  overflow-wrap: anywhere;
+}
+
+.agent-name-modal .modal-body > .agent-name-error {
+  margin: 0;
+}

@@ -1,4 +1,272 @@
 {
+  "0.4.5": {
+    "en": {
+      "improved": [
+        "Desktop tabs keep updating unless you opt in to sharing panes with herdr's own window."
+      ],
+      "fixed": [
+        "Claude background counts recover from transcript changes and temporary lookup failures.",
+        "Delayed Claude history keeps the turn's background wait; day-old task badges expire.",
+        "Claude completion cards no longer repeat within a chat page after incremental updates.",
+        "Selecting chat code preserves its trailing newlines, with highlighting on or off."
+      ]
+    },
+    "ko": {
+      "improved": [
+        "herdr 창과 패널을 함께 쓰는 옵션을 켜지 않으면 다른 창으로 이동해도 터미널 갱신을 유지합니다."
+      ],
+      "fixed": [
+        "Claude 백그라운드 작업 수가 기록 변경이나 일시적인 조회 실패 후에도 갱신됩니다.",
+        "Claude 기록을 늦게 찾아도 턴의 백그라운드 대기를 유지하고 하루 지난 작업 배지는 만료됩니다.",
+        "채팅을 갱신할 때 같은 페이지에 Claude 완료 카드가 중복으로 나타나지 않습니다.",
+        "코드 강조 설정과 관계없이 채팅 코드를 선택할 때 마지막 줄바꿈을 보존합니다."
+      ]
+    },
+    "ja": {
+      "improved": [
+        "herdrのウィンドウとペインを共有する設定を有効にしない限り、別のウィンドウに移っても表示を更新します。"
+      ],
+      "fixed": [
+        "Claudeのバックグラウンド件数が、記録の変更や一時的な取得失敗の後も更新されます。",
+        "Claudeの履歴取得が遅れてもターンの待機状態を保ち、1日経ったタスクのバッジは消えます。",
+        "チャットの差分更新で、同じページにClaudeの完了カードが重複しなくなりました。",
+        "コードの色分け設定にかかわらず、チャットのコード選択で末尾の改行を保持します。"
+      ]
+    },
+    "zh": {
+      "improved": [
+        "除非开启与 herdr 窗口共用窗格的设置，否则切换窗口后桌面标签页仍会持续更新。"
+      ],
+      "fixed": [
+        "Claude 后台任务数在记录变化或临时查询失败后仍能恢复更新。",
+        "延迟找到 Claude 历史记录时仍保留回合的后台等待，超过一天的任务徽标会过期。",
+        "增量更新聊天时，同一页中不再出现重复的 Claude 完成卡片。",
+        "无论是否开启代码高亮，选择聊天代码时都会保留末尾换行。"
+      ]
+    }
+  },
+  "0.4.4": {
+    "en": {
+      "new": [
+        "Follow Claude Code subagents and background commands directly in chat.",
+        "Choose a dictation language and give each PC's installed app its own name.",
+        "Reorder workspaces by touch and read highlighted code and task lists in chat."
+      ],
+      "improved": [
+        "Find slash commands by name fragments, descriptions or matching letters."
+      ],
+      "fixed": [
+        "Claude turns waiting for background work no longer announce an early finish.",
+        "Inactive browser tabs release panes so herdr's terminal view keeps its size.",
+        "Fast typing around chat completions keeps every key and selection in place.",
+        "Open worktrees from linked checkouts and read short, identifiable Codex sessions."
+      ]
+    },
+    "ko": {
+      "new": [
+        "Claude Code의 하위 에이전트와 백그라운드 명령을 채팅에서 확인할 수 있습니다.",
+        "받아쓰기 언어를 선택하고 PC마다 설치된 앱에 다른 이름을 붙일 수 있습니다.",
+        "터치로 작업 공간 순서를 바꾸고 채팅에서 코드 강조와 작업 목록을 볼 수 있습니다."
+      ],
+      "improved": [
+        "이름 일부, 설명, 순서대로 맞는 글자로 슬래시 명령을 찾을 수 있습니다."
+      ],
+      "fixed": [
+        "백그라운드 작업을 기다리는 Claude 턴이 완료 알림을 너무 일찍 보내지 않습니다.",
+        "사용하지 않는 브라우저 탭이 패널 연결을 놓아 herdr 터미널 화면 크기를 유지합니다.",
+        "채팅 자동 완성 전후에 빠르게 입력해도 글자 순서와 선택 영역이 유지됩니다.",
+        "연결된 체크아웃에서 워크트리를 열고 식별 가능한 짧은 Codex 세션을 읽습니다."
+      ]
+    },
+    "ja": {
+      "new": [
+        "Claude Codeのサブエージェントとバックグラウンドコマンドをチャットで確認できます。",
+        "音声入力の言語を選び、PCごとにインストールしたアプリに別の名前を付けられます。",
+        "タッチでワークスペースを並べ替え、チャットでコードの色分けとタスクリストを確認できます。"
+      ],
+      "improved": [
+        "名前の一部、説明、順に一致する文字からスラッシュコマンドを探せます。"
+      ],
+      "fixed": [
+        "バックグラウンド処理を待つClaudeのターンが、早すぎる完了通知を出さなくなりました。",
+        "使っていないブラウザータブがペインを解放し、herdrのターミナル表示サイズを保ちます。",
+        "チャットの補完前後に素早く入力しても、文字の順序と選択範囲が維持されます。",
+        "リンクされたチェックアウトからワークツリーを開き、識別できる短いCodexセッションを読めます。"
+      ]
+    },
+    "zh": {
+      "new": [
+        "可在聊天中查看 Claude Code 子代理和后台命令。",
+        "可选择听写语言，并为每台电脑上安装的应用设置不同的名称。",
+        "可通过触摸调整工作区顺序，并在聊天中查看代码高亮和任务列表。"
+      ],
+      "improved": [
+        "可通过名称片段、描述或按顺序匹配的字母查找斜杠命令。"
+      ],
+      "fixed": [
+        "等待后台任务的 Claude 回合不再过早发出完成通知。",
+        "未使用的浏览器标签页会释放窗格，保持 herdr 终端的显示尺寸。",
+        "在聊天补全前后快速输入时，字符顺序和选区不再被打乱。",
+        "可从关联的检出目录打开工作树，并读取能够明确识别的短 Codex 会话。"
+      ]
+    }
+  },
+  "0.4.3": {
+    "en": {
+      "improved": [
+        "omp panes started with a profile, or running for a long time, show their chat",
+        "A remote PC lists a pane's new agent at once, after its bridge is updated"
+      ],
+      "fixed": [
+        "Claude panes show their chat on Macs with a non-US time format, such as Korean",
+        "A queued chat message is no longer pasted over what you are typing in Claude Code's box",
+        "Arrow keys work in less, git log and man, and clicks reach programs that read the mouse",
+        "Claude Code 2.1.29x approvals and questions show as cards again",
+        "Copy buttons in the chat work on plain-HTTP LAN addresses",
+        "An alert chimes once across open tabs, and is still heard if that tab closes",
+        "A tab left open in the background no longer resizes the pane you are using elsewhere",
+        "The plugin finds Bun when herdr starts from a GUI app; reinstall the plugin through herdr"
+      ]
+    },
+    "ko": {
+      "improved": [
+        "프로필로 시작했거나 오래 실행 중인 omp pane도 채팅에서 대화로 보입니다",
+        "원격 PC pane의 새 에이전트가 바로 보입니다. 그 PC의 브리지를 업데이트한 뒤부터입니다"
+      ],
+      "fixed": [
+        "시간 형식이 미국식이 아닌 Mac(한국어 포함)에서도 Claude pane이 채팅으로 보입니다",
+        "대기 중인 채팅 메시지가 Claude Code 입력란에 쓰던 글 위에 붙여 넣어지지 않습니다",
+        "less, git log, man에서 화살표 키가 동작하고, 마우스를 읽는 프로그램에 클릭이 전달됩니다",
+        "Claude Code 2.1.29x의 승인과 질문이 다시 카드로 보입니다",
+        "채팅의 복사 버튼이 일반 HTTP LAN 주소에서도 동작합니다",
+        "알림 하나는 열린 탭들 사이에서 한 번만 울리고, 그 탭이 닫혀도 들립니다",
+        "뒤에 열어 둔 탭이 다른 곳에서 쓰는 pane의 크기를 바꾸지 않습니다",
+        "herdr를 GUI 앱에서 시작해도 플러그인이 Bun을 찾습니다. herdr로 플러그인을 다시 설치하세요"
+      ]
+    },
+    "ja": {
+      "improved": [
+        "プロファイル付きで起動した omp や長く動いている omp のペインも、チャットで会話として表示されます",
+        "リモート PC のペインに新しいエージェントがすぐ表示されます。その PC のブリッジ更新後から有効です"
+      ],
+      "fixed": [
+        "時刻の形式が米国式でない Mac(韓国語を含む)でも、Claude のペインがチャットで表示されます",
+        "待機中のチャットメッセージが、Claude Code の入力欄で書きかけの文の上に貼り付けられません",
+        "less、git log、man で矢印キーが効き、マウスを読むプログラムにクリックが届きます",
+        "Claude Code 2.1.29x の承認と質問が、再びカードで表示されます",
+        "チャットのコピーボタンが、プレーン HTTP の LAN アドレスでも動きます",
+        "ひとつの通知は開いたタブ全体で一度だけ鳴り、そのタブが閉じても聞こえます",
+        "裏で開いたままのタブが、別の場所で使っているペインのサイズを変えません",
+        "herdr を GUI アプリから起動してもプラグインが Bun を見つけます。herdr でプラグインを再インストールしてください"
+      ]
+    },
+    "zh": {
+      "improved": [
+        "以配置文件启动或长时间运行的 omp 窗格也会在聊天中显示为对话",
+        "远程 PC 窗格中的新代理会立即显示,需先更新该 PC 的 bridge"
+      ],
+      "fixed": [
+        "时间格式不是美式的 Mac(包括韩语)上,Claude 窗格也能在聊天中显示",
+        "排队的聊天消息不再粘贴到你在 Claude Code 输入框中正在输入的文字上",
+        "less、git log、man 中方向键可用,点击也能传到读取鼠标的程序",
+        "Claude Code 2.1.29x 的批准和提问再次显示为卡片",
+        "聊天中的复制按钮在纯 HTTP 局域网地址上也能使用",
+        "同一提醒在所有打开的标签页中只响一次,该标签页关闭后仍能听到",
+        "在后台打开的标签页不再改变你在别处使用的窗格大小",
+        "herdr 从图形界面应用启动时插件也能找到 Bun;请通过 herdr 重新安装插件"
+      ]
+    }
+  },
+  "0.4.2": {
+    "en": {
+      "new": [
+        "Installs and updates are counted anonymously; Settings → About shows it and turns it off",
+        "Clicking an agent's notification opens that pane on its chat, where the answer is",
+        "Devin CLI panes show their conversation in the chat",
+        "OpenCode 2 panes read as a conversation in the chat; OpenCode 1.x keeps the terminal text",
+        "A message Claude Code holds back for invisible characters shows a card to send or discard"
+      ],
+      "improved": [
+        "The phone key bar starts with Esc, Tab and Ctrl+C; saved layouts keep their order",
+        "Settings → Shortcuts explains the app's keys and marks keys the browser or OS keeps",
+        "vim, tmux and Claude Code in a pane copy to your clipboard again, no trip to Settings",
+        "The website moved to herdrweb.dev and reads in Simplified Chinese; old links still work",
+        "GitHub releases open with short patch notes like these"
+      ],
+      "fixed": [
+        "Typing Korean in Safari no longer loses syllables, also after switching from English",
+        "An unknown slash command in a Claude Code chat shows Claude's answer instead of vanishing",
+        "Palette shortcut hints follow your bindings, and shortcuts work on non-Latin keyboards",
+        "Quiet opened finishes works even if the browser kept a damaged record of opened agents"
+      ]
+    },
+    "ko": {
+      "new": [
+        "앱이 설치와 업데이트를 익명으로 집계합니다. 설정 → 정보에서 내용을 보고 끌 수 있습니다",
+        "에이전트 알림을 누르면 답이 있는 그 pane의 채팅이 열립니다",
+        "Devin CLI pane이 채팅에서 대화로 보입니다",
+        "OpenCode 2 pane이 채팅에서 대화로 보입니다. OpenCode 1.x는 터미널 텍스트를 그대로 씁니다",
+        "Claude Code가 보이지 않는 문자 때문에 보류한 메시지는 보내기·버리기 카드로 보입니다"
+      ],
+      "improved": [
+        "폰 키 바가 Esc, Tab, Ctrl+C로 시작합니다. 저장한 배치는 순서를 그대로 유지합니다",
+        "설정 → 단축키가 앱 키를 설명하고, 브라우저나 OS가 쓰는 키를 표시합니다",
+        "pane 안 vim, tmux, Claude Code가 설정을 거치지 않고 다시 클립보드에 복사합니다",
+        "웹사이트가 herdrweb.dev로 옮겼고 중국어 간체로도 읽을 수 있습니다. 옛 링크도 그대로 됩니다",
+        "GitHub 릴리스가 이런 짧은 패치 노트로 시작합니다"
+      ],
+      "fixed": [
+        "Safari에서 한글을 입력할 때 음절이 사라지지 않습니다. 영어에서 전환한 뒤에도 마찬가지입니다",
+        "Claude Code 채팅에서 모르는 슬래시 명령을 보내면 사라지지 않고 Claude의 답이 보입니다",
+        "팔레트의 단축키 표시가 바꾼 키를 따르고, 라틴 문자가 아닌 자판에서도 단축키가 됩니다",
+        "브라우저에 열어 본 기록이 깨져 있어도 '열어 본 완료 표시 끄기'가 제대로 동작합니다"
+      ]
+    },
+    "ja": {
+      "new": [
+        "インストールと更新を匿名で数えます。設定 → 情報で内容を確認し、オフにできます",
+        "エージェントの通知をクリックすると、答えのあるそのペインのチャットが開きます",
+        "Devin CLI のペインがチャットで会話として表示されます",
+        "OpenCode 2 のペインがチャットで会話として読めます。OpenCode 1.x は端末のテキストのままです",
+        "見えない文字のせいで Claude Code が保留したメッセージは、送信・破棄のカードで表示されます"
+      ],
+      "improved": [
+        "スマホのキーバーが Esc、Tab、Ctrl+C から始まります。保存した並びはそのままです",
+        "設定 → ショートカットがアプリのキーを説明し、ブラウザや OS が使うキーを示します",
+        "ペイン内の vim、tmux、Claude Code が、設定を経ずに再びクリップボードへコピーできます",
+        "ウェブサイトは herdrweb.dev に移り、簡体字中国語でも読めます。古いリンクも使えます",
+        "GitHub のリリースが、このような短いパッチノートで始まります"
+      ],
+      "fixed": [
+        "Safari で韓国語を入力しても音節が消えません。英語から切り替えた後も同じです",
+        "Claude Code のチャットで未知のスラッシュコマンドを送っても消えず、Claude の答えが表示されます",
+        "パレットのショートカット表示が変更したキーに従い、非ラテン配列でもショートカットが効きます",
+        "開いた記録がブラウザで壊れていても、「開いた完了の印を消す」が正しく動きます"
+      ]
+    },
+    "zh": {
+      "new": [
+        "应用会匿名统计安装和更新次数;在 设置 → 关于 中可查看内容并关闭",
+        "点击代理的通知会打开该窗格的聊天,答案就在那里",
+        "Devin CLI 窗格在聊天中显示为对话",
+        "OpenCode 2 窗格在聊天中显示为对话;OpenCode 1.x 仍显示终端文本",
+        "Claude Code 因不可见字符而暂留的消息会显示为卡片,可发送或丢弃"
+      ],
+      "improved": [
+        "手机按键栏以 Esc、Tab 和 Ctrl+C 开头;已保存的布局保持原有顺序",
+        "设置 → 快捷键 会说明应用的按键,并标出浏览器或系统占用的按键",
+        "窗格中的 vim、tmux 和 Claude Code 无需进入设置即可再次复制到剪贴板",
+        "网站迁移到 herdrweb.dev,并提供简体中文版;旧链接仍然有效",
+        "GitHub 发布页以这样的简短更新说明开头"
+      ],
+      "fixed": [
+        "在 Safari 中输入韩文不再丢失音节,从英文切换后也是如此",
+        "在 Claude Code 聊天中发送未知的斜杠命令不再消失,而是显示 Claude 的回答",
+        "命令面板的快捷键提示跟随你改过的绑定,非拉丁键盘布局下快捷键也可用",
+        "即使浏览器中已打开的记录损坏,“清除已打开的完成标记”也能正常工作"
+      ]
+    }
+  },
   "0.4.1": {
     "en": {
       "new": [

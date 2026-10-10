@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import type { PaneInfo } from "../../shared/protocol.ts";
-import { activityOrder, anySeen, carrySeen, forgetSeen, isSeenDone, liveSeqs, loadSeen, markSeen, newSeqMemory, persistableSeen, pruneSeen, saveSeen, seedSeen, shownStatus, stateSeqs } from "./sidebarOrder.ts";
+import { activityOrder, anySeen, carrySeen, forgetSeen, isSeenDone, liveSeqs, loadSeen, markSeen, newSeqMemory, persistableSeen, pruneSeen, saveSeen, seedSeen, seenAfterRestart, shownStatus, stateSeqs } from "./sidebarOrder.ts";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "./settings.ts";
 
 const pane = (id: string, agent_status: string, workspace_id = `w-${id}`) => ({ pane_id: id, workspace_id, agent_status }) as PaneInfo;
@@ -144,6 +144,14 @@ describe("activity order", () => {
 describe("opened finishes", () => {
   const seqs = new Map([["a", 10], ["b", 12]]);
 
+  it("shows BG over a quiet opened finish until its background hold ends", () => {
+    const held = { ...pane("a", "done"), background_wait: true as const };
+    expect(shownStatus(held, seqs, { a: 10 })).toBe("waiting");
+    expect(shownStatus(held, seqs, null)).toBe("waiting");
+    expect(shownStatus({ ...held, agent_status: "blocked" }, seqs, { a: 10 })).toBe("blocked");
+    expect(shownStatus(pane("a", "done"), seqs, { a: 10 })).toBe("idle");
+  });
+
   it("counts a DONE as looked at while its counter is still the one recorded", () => {
     expect(isSeenDone(pane("a", "done"), seqs, { a: 10 })).toBe(true);
     expect(isSeenDone(pane("a", "done"), seqs, { a: 9 })).toBe(false);
@@ -186,6 +194,26 @@ describe("opened finishes", () => {
     const kept = { a: 2, b: 3 };
     expect(pruneSeen(kept, panes, new Map([["a", 2], ["b", 3]]))).toBe(kept);
   });
+
+  it("forgets the whole record once herdr restarted, also an entry equal to the new counter (#591)", () => {
+    const roster = (seqs: Record<string, number>) => ({
+      panes: Object.keys(seqs).map((id) => pane(id, "done")),
+      agents: Object.entries(seqs).map(([pane_id, state_change_seq]) => ({ pane_id, state_change_seq })),
+    }) as never;
+    const memory = newSeqMemory();
+    liveSeqs(roster({ a: 2, b: 100 }), memory);
+    const handled = memory.restarts;
+    // herdr restarts and keeps the pane ids: B's counter went back, A has a new DONE at 2 again
+    const seqs = liveSeqs(roster({ a: 2, b: 1 }), memory);
+    expect(memory.restarts).toBe(handled + 1);
+    const record = pruneSeen(seenAfterRestart({ a: 2, b: 100 }, memory.restarts, handled), [pane("a", "done"), pane("b", "done")], seqs);
+    expect(record).toEqual({});
+    expect(shownStatus(pane("a", "done"), seqs, record)).toBe("done");
+    // no restart since the record was kept: it stays, the same object
+    const kept = { a: 2 };
+    liveSeqs(roster({ a: 2, b: 1 }), memory);
+    expect(seenAfterRestart(kept, memory.restarts, memory.restarts)).toBe(kept);
+  });
 });
 
 it("defaults to herdr's order and herdr's DONE, and accepts only known values", () => {
@@ -221,6 +249,15 @@ describe("records in storage", () => {
     expect(loadSeen("box")).toBeNull();
     expect(loadSeen("local")).toEqual({ a: 3 });
     expect(data.has("herdr-web-ui:settings")).toBe(true);
+  });
+
+  it("counts only a record it can read as the setting having been on here (#529 review)", () => {
+    const data = fake();
+    data.set("herdr-web-ui:seen:local", "not json");
+    data.set("herdr-web-ui:seen:box", "[1, 2]");
+    expect(anySeen()).toBe(false);
+    data.set("herdr-web-ui:seen:box", "{}");
+    expect(anySeen()).toBe(true);
   });
 
   it("reads a damaged record as none, keeping only numbers", () => {

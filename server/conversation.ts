@@ -7,7 +7,9 @@
  * - Claude Code: herdr's agent.get names the session id, the transcript lives
  *   at ~/.claude/projects/<project>/<session>.jsonl (claude-store.ts finds it).
  * - omp: herdr's agent.get hands us the session jsonl path outright under
- *   ~/.omp/agent/sessions/<cwd-slug>/ — same shape of truth, one less hop.
+ *   ~/.omp/agent/sessions/<cwd-slug>/, or ~/.omp/profiles/<name>/agent/sessions/<cwd-slug>/
+ *   for `omp --profile <name>` — same shape of truth, one less hop. When herdr names none, the
+ *   pane's omp process does, as gjc's does (omp.ts).
  * - omo: herdr knows nothing about its store and its label for the pane flips
  *   between `pi` and `claude` as omo spawns model CLIs, so the pane's process
  *   tree routes it and process/session evidence selects a unique transcript
@@ -21,6 +23,9 @@
  *   parseOmpTranscript reads, but its file is an entry tree, not a log: /tree
  *   moves the leaf and appends beside the path it left (pi-tree.ts), so the
  *   stream is projected onto the branch the leaf stands on before it is read.
+ * - OpenCode: herdr's integration reports the session id, and OpenCode 2 keeps the
+ *   session in its own SQLite store (opencode.ts), read by `seq` rather than by
+ *   byte offset: its cursors name rows, and it pages and caches on its own.
  *
  * This module turns those files into the conversation the chat lens renders;
  * the pty stays the input path. Pure parsing lives in parseClaudeTranscript /
@@ -36,16 +41,21 @@ import type { ConversationMetadata, ConversationPart, ConversationTurn, HerdrPan
 import { herdrRpc, sessionSnapshot } from "./herdr/client.ts";
 import { codexHistorySegments, createCodexTranscriptParser, codexOutputText, codexTranscriptPath, defaultCodexHome, forgetAllCodexState, forgetCodexStateFor, paneCodexHome, parseCodexTranscript, readRange } from "./codex.ts";
 import { CODEX_IMAGE_REF, codexTranscriptImage } from "./codex-images.ts";
-import { claudeProcessSession, claudeTranscriptFile, defaultClaudeConfigDir, forgetClaudeSessionFile, forgetClaudeSessions, isClaudeProcess, processClaudeConfigDir } from "./claude-store.ts";
+import { AmbiguousClaudeStore, claudeProcessSession, claudeTranscriptFile, defaultClaudeConfigDir, forgetClaudeSessionFile, forgetClaudeSessions, isClaudeProcess, processClaudeConfigDir } from "./claude-store.ts";
 import { forgetGjcPane, forgetGjcState, gjcPidUnderShell, gjcTranscriptForPane, isGjcProcess, storeRelative } from "./gjc-runtime.ts";
 import { isOmoProcess, omoSessionForPane } from "./omo.ts";
-import { piTranscriptPath, unwrittenSession } from "./pi.ts";
+import { processStartedAt } from "./process-start.ts";
+import { ompHeldTranscript } from "./omp.ts";
+import { forgetOpencodeRead, forgetOpencodeState, OPENCODE_IMAGE_REF, opencodeConversation, opencodeDatabasePath, opencodeImage, opencodeReadKey, opencodeSessionId, opencodeToolOutput } from "./opencode.ts";
+import { piTranscriptInStore, piTranscriptPath, unwrittenSession } from "./pi.ts";
 import { forgetAllPiIndexes, forgetPiIndex, piAbandonedTurns, piBranchSegments } from "./pi-tree.ts";
+import { defaultDevinDbPath, DevinHistoryUnavailable, devinConversation, forgetDevinState } from "./devin.ts";
 import { trimOutput } from "./tool-output.ts";
 import { parseConversationMetadata } from "./conversation-metadata.ts";
 
 import { invokedSkill } from "./skill-activity.ts";
-import { isContextClear, MAX_TURNS, parseOmpTranscript, piImageBlock, piMessage, piResults, toolSummary } from "./transcript-records.ts";
+import { agentTaskResult, isContextClear, MAX_TURNS, parseOmpTranscript, piImageBlock, piMessage, piResults, toolSummary } from "./transcript-records.ts";
+import { forgetSubagents, lineNotifications, subagentDetails, taskNotification, type SubagentDetail } from "./claude-subagents.ts";
 
 export { isOmoProcess } from "./omo.ts";
 
@@ -109,8 +119,42 @@ function localCommandOutput(content: unknown): string {
     if (text.length > 0) streams.push(text);
     at = next;
   }
-  const text = streams.join("\n");
+  return capNotice(streams.join("\n"));
+}
+
+/** Lines of one notice Claude Code writes as separate entries, a moment apart. */
+const NOTICE_JOIN_MS = 1000;
+
+/** A notice Claude Code writes as plain text: no terminal codes, and not past a notice's length. */
+function noticeText(raw: string): string {
+  return capNotice(stripTerminalControls(raw).trim());
+}
+
+/** A notice is not a log: past the cap the rest stays in the terminal, also for lines joined into one. */
+function capNotice(text: string): string {
   return text.length > LOCAL_COMMAND_MAX_CHARS ? `${text.slice(0, LOCAL_COMMAND_MAX_CHARS)}\u2026` : text;
+}
+
+/** The notice a turn is, when it is nothing else. */
+function loneNotice(turn: ConversationTurn | undefined): Extract<ConversationPart, { kind: "notice" }> | null {
+  const part = turn?.parts.length === 1 ? turn.parts[0] : undefined;
+  return part?.kind === "notice" ? part : null;
+}
+
+/** Were these two entries written together? Never when either has no readable time. */
+function writtenTogether(a: string | null | undefined, b: string | null | undefined): boolean {
+  return a != null && b != null && Math.abs(Date.parse(a) - Date.parse(b)) <= NOTICE_JOIN_MS;
+}
+
+/**
+ * Claude Code versions differ in where a refused command goes: a `local_command` answer, an
+ * `informational` entry, and nothing says one never writes both. The same words from the other
+ * kind, written together, are one answer; a notice repeating its own kind is kept.
+ */
+function saidByOtherKind(turn: ConversationTurn | undefined, text: string, ts: string | null, kind: "local-command" | "informational"): boolean {
+  const said = loneNotice(turn);
+  if (said === null || said.source === kind || (said.source !== "local-command" && said.source !== "informational")) return false;
+  return writtenTogether(turn?.ts, ts) && (said.text === text || said.text.split("\n").includes(text));
 }
 
 /**
@@ -171,13 +215,14 @@ export function unwrapPastes(text: string): string {
 interface TranscriptEntry {
   type?: string;
   subtype?: string;
+  operation?: string;
   /** a `system` entry's own text; a message's is under `message` */
   content?: unknown;
   timestamp?: string;
   uuid?: string;
   isMeta?: boolean;
   isCompactSummary?: boolean;
-  message?: { role?: string; content?: unknown };
+  message?: { role?: string; content?: unknown; stop_reason?: unknown };
   attachment?: { type?: unknown; prompt?: unknown; commandMode?: unknown; origin?: { kind?: unknown } };
 }
 
@@ -194,11 +239,32 @@ const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
  * Splits one transcript file's contents into turns. Adjacent assistant entries
  * merge into a single turn (text parts + tool parts); each tool_use is followed
  * by a user tool_result entry, which is folded into the tool part it answers.
+ *
+ * A subagent that ended (its `<task-notification>`) is drawn as a task_result in the user's seat,
+ * once however many records carry it; `options.subagents` holds what the subagents' own files say
+ * of them, by agent id, since the parser reads no files. Other notifications stay hidden.
  */
-export function parseClaudeTranscript(text: string, maxTurns = MAX_TURNS): ConversationTurn[] {
+export function parseClaudeTranscript(text: string, maxTurns = MAX_TURNS, options: { subagents?: ReadonlyMap<string, SubagentDetail>; noticed?: Set<string> } = {}): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
   /** tool parts still waiting for their result, by tool_use id */
   const pending = new Map<string, Extract<ConversationPart, { kind: "tool" }>>();
+  /** the agent's last entry called a tool: its turn is not over, whatever is written meanwhile */
+  let atWork = false;
+  /** where a notice goes: before the turn at work it was written in, else at the end */
+  const noticeAt = (): number => atWork && turns.at(-1)?.role === "assistant" ? turns.length - 1 : turns.length;
+  /** the notifications already drawn: a completion is recorded in up to three places */
+  const noticed = options.noticed ?? new Set<string>();
+  /** True when the block was a notification (shown or not): it is no turn of anyone's typing. */
+  const notified = (block: string, ts: string | null): boolean => {
+    const notice = taskNotification(block);
+    if (notice === null) return false;
+    const key = `${notice.taskId}\0${notice.toolUseId ?? ""}`;
+    if (notice.agent && !noticed.has(key)) {
+      noticed.add(key);
+      turns.splice(noticeAt(), 0, { role: "user", ts, parts: [{ kind: "task_result", tasks: [agentTaskResult(notice, options.subagents?.get(notice.taskId))] }] });
+    }
+    return true;
+  };
 
   const assistantTurn = (ts?: string): ConversationTurn => {
     const last = turns[turns.length - 1];
@@ -230,8 +296,10 @@ export function parseClaudeTranscript(text: string, maxTurns = MAX_TURNS): Conve
     // A message sent while Claude is working is no `user` entry: it is queued, then recorded
     // as this attachment when the turn takes it in. Background task notices and other agents'
     // messages use the same record, so only a person's prompt counts. The `queue-operation`
-    // lines around it repeat the text and are skipped.
+    // lines around a prompt repeat it; a task completion can arrive only in its enqueue.
+    if (entry.type === "queue-operation" && entry.operation === "enqueue" && typeof entry.content === "string" && notified(entry.content, entry.timestamp ?? null)) continue;
     const queued = entry.type === "attachment" ? entry.attachment : undefined;
+    if (queued?.commandMode === "task-notification" && typeof queued.prompt === "string" && notified(queued.prompt, entry.timestamp ?? null)) continue;
     if (queued?.type === "queued_command" && queued.commandMode === "prompt" && queued.origin?.kind === "human") {
       if (typeof queued.prompt === "string" && queued.prompt.trim() && !isCommandEntry(queued.prompt.trim())) {
         turns.push({ role: "user", ts: entry.timestamp ?? null, parts: [{ kind: "text", text: unwrapPastes(queued.prompt) }] });
@@ -243,11 +311,34 @@ export function parseClaudeTranscript(text: string, maxTurns = MAX_TURNS): Conve
     // only here. It is the runtime speaking in the user's seat, so it reads as a notice.
     if (entry.type === "system" && entry.subtype === "local_command") {
       const output = localCommandOutput(entry.content);
-      if (output.length > 0) turns.push({ role: "user", ts: entry.timestamp ?? null, parts: [{ kind: "notice", text: output, source: "local-command" }] });
+      const at = noticeAt();
+      if (output.length > 0 && !saidByOtherKind(turns[at - 1], output, entry.timestamp ?? null, "local-command")) turns.splice(at, 0, { role: "user", ts: entry.timestamp ?? null, parts: [{ kind: "notice", text: output, source: "local-command" }] });
+      continue;
+    }
+
+    // Claude Code's own notices: an unknown slash command and the arguments it dropped (2.1.29x
+    // writes these here, not as a local_command), a usage limit reached or reset. The message
+    // that drew one is not recorded, so without it a refused command just vanished from the chat.
+    // Lines written together read as one notice.
+    // Claude Code also writes them while the agent works (a message another session held, a
+    // stopped response): about half of the real ones. Such a notice does not end the turn: it
+    // goes before the turn it was written in, so the turn stays whole and stays the last one,
+    // which is what the chat reads as the turn still running.
+    if (entry.type === "system" && entry.subtype === "informational") {
+      const text = typeof entry.content === "string" ? noticeText(entry.content) : "";
+      if (text.length === 0) continue;
+      const ts = entry.timestamp ?? null;
+      const at = noticeAt();
+      const before = turns[at - 1];
+      if (saidByOtherKind(before, text, ts, "informational")) continue;
+      const said = loneNotice(before);
+      if (before && said?.source === "informational" && writtenTogether(before.ts, ts)) turns[at - 1] = { ...before, parts: [{ ...said, text: capNotice(`${said.text}\n${text}`) }] };
+      else turns.splice(at, 0, { role: "user", ts, parts: [{ kind: "notice", text, source: "informational" }] });
       continue;
     }
 
     if (entry.type === "user" && typeof content === "string") {
+      if (notified(content, entry.timestamp ?? null)) continue;
       if (isCommandEntry(content)) continue;
       turns.push({ role: "user", ts: entry.timestamp ?? null, parts: [{ kind: "text", text: unwrapPastes(content) }] });
       continue;
@@ -257,6 +348,8 @@ export function parseClaudeTranscript(text: string, maxTurns = MAX_TURNS): Conve
       const prompt = content.flatMap((block: unknown) => {
         if (block === null || typeof block !== "object") return [];
         const part = block as { type?: string; text?: unknown };
+        // a notice can share an entry with a tool's result
+        if (part.type === "text" && typeof part.text === "string" && notified(part.text, entry.timestamp ?? null)) return [];
         return part.type === "text" && typeof part.text === "string" && !isCommandEntry(part.text.trim()) ? [part.text] : [];
       }).join("\n");
       for (const block of content) {
@@ -282,6 +375,9 @@ export function parseClaudeTranscript(text: string, maxTurns = MAX_TURNS): Conve
 
     if (entry.type === "assistant" && Array.isArray(content)) {
       const turn = assistantTurn(entry.timestamp);
+      // an entry that names no stop reason is still at work when it calls a tool
+      const stop = entry.message?.stop_reason;
+      atWork = stop === "tool_use" || (stop == null && content.some((block: unknown) => typeof block === "object" && block !== null && (block as { type?: unknown }).type === "tool_use"));
       if (entry.timestamp) turn.end_ts = entry.timestamp;
       for (const block of content) {
         if (typeof block !== "object" || block === null) continue;
@@ -344,7 +440,7 @@ export class HistoryChanged extends Error {
 
 /** What paneConversation resolved: which store the turns came from, and where they start. */
 export type RecognizedConversation = {
-  source: "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "codex-transcript";
+  source: "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript";
   turns: ConversationTurn[];
   metadata: ConversationMetadata;
   /** the first turn's position, for the page before it; null at the conversation's beginning */
@@ -359,6 +455,9 @@ export type RecognizedConversation = {
   /** changes whenever the answer could: the route's ETag, so an unchanged poll costs no body */
   version: string;
 };
+
+/** The stores read as one append-only file: OpenCode's and Devin's databases are paged by opencode.ts and devin.ts. */
+type StreamSource = Exclude<RecognizedConversation["source"], "opencode-transcript" | "devin-transcript">;
 
 /** A restart may parse the same files differently: its answers never match an earlier ETag. */
 const PROCESS_VERSION = randomUUID();
@@ -401,7 +500,7 @@ function transcriptGeneration(path: string, stat: { dev: number; ino: number; si
   return generation ? `-${generation}` : "";
 }
 
-function transcriptStream(source: RecognizedConversation["source"], path: string, stat: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }, codexHome: string): TranscriptStream {
+function transcriptStream(source: StreamSource, path: string, stat: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }, codexHome: string): TranscriptStream {
   // (a chain whose parent was archived since comes back shorter: codexHistorySegments;
   // a pi branch skips the side paths a /tree left behind: piBranchSegments)
   const branch = source === "pi-transcript" ? piBranchSegments(path, stat.size) : null;
@@ -511,7 +610,7 @@ function applyHistoryBoundary(path: string, stream: TranscriptStream, source: Re
 }
 
 /** Bytes that every line opening a turn contains: a cheap filter before JSON.parse. */
-const TURN_MARK: Record<RecognizedConversation["source"], Buffer> = {
+const TURN_MARK: Record<StreamSource, Buffer> = {
   "codex-transcript": Buffer.from('"task_started"'),
   "claude-transcript": Buffer.from('"user"'),
   "omp-transcript": Buffer.from('"user"'),
@@ -526,7 +625,7 @@ const TURN_MARK: Record<RecognizedConversation["source"], Buffer> = {
  * task_started), a Claude or omp prompt (tool results answer the turn before it),
  * and the same for pi, whose prompts are `message` records with a user role.
  */
-function opensTurn(source: RecognizedConversation["source"], line: string): boolean {
+function opensTurn(source: StreamSource, line: string): boolean {
   let entry: { type?: unknown; isMeta?: unknown; isCompactSummary?: unknown; payload?: { type?: unknown }; message?: { role?: unknown; content?: unknown } };
   try { entry = JSON.parse(line); } catch { return false; }
   if (entry === null || typeof entry !== "object") return false;
@@ -542,7 +641,7 @@ function opensTurn(source: RecognizedConversation["source"], line: string): bool
     block?.type === "text" && typeof block.text === "string" && !isCommandEntry(block.text.trim()));
 }
 
-function turnStarts(bytes: Buffer, source: RecognizedConversation["source"]): number[] {
+function turnStarts(bytes: Buffer, source: StreamSource): number[] {
   const starts: number[] = [];
   for (let offset = 0; offset < bytes.length;) {
     const newline = bytes.indexOf(0x0a, offset);
@@ -562,7 +661,7 @@ function turnStarts(bytes: Buffer, source: RecognizedConversation["source"]): nu
  * every append, so it never does: with no turn start in its window it starts
  * mid-turn, at a whole line.
  */
-function pageBefore(stream: TranscriptStream, source: RecognizedConversation["source"], to: number, { floor = stream.floor, widen }: { floor?: number; widen: boolean }): { start: number; bytes: Buffer } {
+function pageBefore(stream: TranscriptStream, source: StreamSource, to: number, { floor = stream.floor, widen }: { floor?: number; widen: boolean }): { start: number; bytes: Buffer } {
   let from = Math.max(floor, to - TRANSCRIPT_WINDOW_BYTES);
   let bytes = readStream(stream, from, to);
   for (;;) {
@@ -589,7 +688,7 @@ function pageBefore(stream: TranscriptStream, source: RecognizedConversation["so
  */
 interface LiveScan {
   id: string;
-  source: RecognizedConversation["source"];
+  source: StreamSource;
   /** complete lines up to here are scanned */
   scanned: number;
   /** turn starts in the scanned bytes, ascending, none before the window */
@@ -610,6 +709,8 @@ interface SettledTurns {
   tail: string;
   /** what OmO's `task` calls on the page called their tasks: a task can end in a later turn than the one that started it */
   taskTitles: Map<string, string>;
+  /** Claude completion identities in this page's settled prefix only; never inherited from another page. */
+  noticed: Set<string>;
   /** the titles it began with, from the pages before it */
   inherited: Map<string, string>;
   /** End of the live turn the last poll actually read; replay never scans unseen skipped history. */
@@ -635,25 +736,35 @@ function remember<T>(map: Map<string, T>, key: string, value: T, limit: number):
  * path (and by the written-session key), which is what the maps are keyed by, and each
  * reader keeps its own bound so an entry that outlives its pane is still capped.
  */
-interface PaneReads { paths: Set<string>; sessions: Set<string> }
+interface DevinPaneRead { sessionId: string; cwd: string; dbPath?: string }
+interface PaneReads { paths: Set<string>; sessions: Set<string>; devin: Map<string, DevinPaneRead> }
 const paneReads = new Map<string, PaneReads>();
 /** panes remembered; past this a pane that closed long ago is the one whose release is lost */
 const PANE_READS_MAX = 128;
 
+function emptyPaneReads(): PaneReads { return { paths: new Set<string>(), sessions: new Set<string>(), devin: new Map<string, DevinPaneRead>() }; }
+
 function rememberPaneRead(paneId: string, path: string): void {
-  const reads = paneReads.get(paneId) ?? { paths: new Set<string>(), sessions: new Set<string>() };
+  const reads = paneReads.get(paneId) ?? emptyPaneReads();
   reads.paths.add(path);
   remember(paneReads, paneId, reads, PANE_READS_MAX);
 }
 
 function rememberPaneSession(paneId: string, session: string): void {
-  const reads = paneReads.get(paneId) ?? { paths: new Set<string>(), sessions: new Set<string>() };
+  const reads = paneReads.get(paneId) ?? emptyPaneReads();
   reads.sessions.add(session);
   remember(paneReads, paneId, reads, PANE_READS_MAX);
 }
 
+function rememberPaneDevin(paneId: string, sessionId: string, cwd: string, dbPath?: string): void {
+  const reads = paneReads.get(paneId) ?? emptyPaneReads();
+  const key = JSON.stringify([dbPath ?? defaultDevinDbPath(), sessionId, cwd]);
+  reads.devin.set(key, { sessionId, cwd, dbPath });
+  remember(paneReads, paneId, reads, PANE_READS_MAX);
+}
+
 /** The newest page's start and every turn start in it (pageBefore without widening), or null when it starts mid-turn. */
-function newestPage(path: string, stream: TranscriptStream, source: RecognizedConversation["source"]): { start: number; starts: number[] } | null {
+function newestPage(path: string, stream: TranscriptStream, source: StreamSource): { start: number; starts: number[] } | null {
   const from = Math.max(stream.floor, stream.length - TRANSCRIPT_WINDOW_BYTES);
   let scan = liveScans.get(path);
   // a window that slid past the scanned bytes starts over at its edge (a line may be cut
@@ -680,11 +791,20 @@ function newestPage(path: string, stream: TranscriptStream, source: RecognizedCo
   return start === undefined ? null : { start, starts };
 }
 
-function parseTurns(source: RecognizedConversation["source"], text: string, taskTitles?: Map<string, string>): ConversationTurn[] {
+/** What the meta files of the subagents a Claude page's notifications name say of them: read only when the page has one. */
+function subagentsOnPage(path: string, text: string): ReadonlyMap<string, SubagentDetail> | undefined {
+  if (!text.includes("<task-notification>")) return undefined;
+  // ids come from notifications only: other text on the page (a fetched web page) can hold the tag too
+  const ids = new Set<string>();
+  for (const line of text.split("\n")) for (const notice of lineNotifications(line)) if (notice.agent) ids.add(notice.taskId);
+  return ids.size === 0 ? undefined : subagentDetails(path, ids);
+}
+
+function parseTurns(source: RecognizedConversation["source"], path: string, text: string, taskTitles?: Map<string, string>, noticed?: Set<string>): ConversationTurn[] {
   return source === "codex-transcript" ? parseCodexTranscript(text, Infinity)
     // only pi keeps a tool's images in the entry as base64; omp, omo and gjc are read the same
     // way but would carry image refs nothing can answer, so the option stays with pi alone
-    : source === "claude-transcript" ? parseClaudeTranscript(text, Infinity)
+    : source === "claude-transcript" ? parseClaudeTranscript(text, Infinity, { subagents: subagentsOnPage(path, text), noticed })
       : parseOmpTranscript(text, Infinity, { toolImages: source === "pi-transcript", taskTitles });
 }
 
@@ -763,13 +883,13 @@ function liveTurns(path: string, stream: TranscriptStream, source: RecognizedCon
     if (kept !== undefined) {
       const from = kept.end <= start ? kept.end : kept.start;
       const to = Math.min(start, kept.observedEnd);
-      if (to > from) parseTurns(source, readStream(stream, from, to).toString("utf8"), inherited);
+      if (to > from) parseTurns(source, path, readStream(stream, from, to).toString("utf8"), inherited);
     }
-    settled = { id: stream.id, start, end: start, turns: [], metadata: parseConversationMetadata(`${head}\n`, source), tail: bytesBefore(stream, start), taskTitles: new Map(inherited), inherited, observedEnd: stream.length };
+    settled = { id: stream.id, start, end: start, turns: [], metadata: parseConversationMetadata(`${head}\n`, source), tail: bytesBefore(stream, start), taskTitles: new Map(inherited), noticed: new Set(), inherited, observedEnd: stream.length };
   }
   if (settled.end < last) {
     const text = readStream(stream, settled.end, last).toString("utf8");
-    settled = { ...settled, end: last, turns: [...settled.turns, ...parseTurns(source, text, settled.taskTitles)], metadata: parseConversationMetadata(text, source, settled.metadata), tail: bytesBefore(stream, last) };
+    settled = { ...settled, end: last, turns: [...settled.turns, ...parseTurns(source, path, text, settled.taskTitles, settled.noticed)], metadata: parseConversationMetadata(text, source, settled.metadata), tail: bytesBefore(stream, last) };
   }
   settled.observedEnd = stream.length;
   remember(settledTurns, key, settled, 8);
@@ -778,9 +898,9 @@ function liveTurns(path: string, stream: TranscriptStream, source: RecognizedCon
     return { turns: [...settled.turns, ...live.turns], metadata: live.metadata };
   }
   const text = readStream(stream, last, stream.length).toString("utf8");
-  // the live turn is parsed again on every poll: what it teaches about titles is kept only
+  // the live turn is parsed again on every poll: its titles and completions are kept only
   // once it settles, so a read titles a task exactly as a cold read of the same bytes does
-  return { turns: [...settled.turns, ...parseTurns(source, text, new Map(settled.taskTitles))], metadata: parseConversationMetadata(text, source, settled.metadata) };
+  return { turns: [...settled.turns, ...parseTurns(source, path, text, new Map(settled.taskTitles), new Set(settled.noticed))], metadata: parseConversationMetadata(text, source, settled.metadata) };
 }
 
 /** Forget every scan and parse kept between polls (tests compare against a cold read). */
@@ -789,6 +909,8 @@ export function forgetTranscriptState(): void {
   writtenSessions.clear();
   forgetClaudeSessions();
   forgetGjcState();
+  forgetSubagents();
+  forgetOpencodeState();
   liveScans.clear();
   settledTurns.clear();
   codexTurns.clear();
@@ -797,6 +919,7 @@ export function forgetTranscriptState(): void {
   paneReads.clear();
   forgetAllCodexState();
   forgetAllPiIndexes();
+  forgetDevinState();
 }
 
 /**
@@ -815,6 +938,9 @@ export function forgetPaneTranscriptState(paneId: string): void {
   // still reads stays
   const shared = (pick: (other: PaneReads) => Set<string>, value: string): boolean => [...paneReads.values()].some((other) => pick(other).has(value));
   for (const session of reads.sessions) if (!shared((other) => other.sessions, session)) writtenSessions.delete(session);
+  for (const [key, session] of reads.devin) {
+    if (![...paneReads.values()].some((other) => other.devin.has(key))) forgetDevinState(session.sessionId, session.cwd, session.dbPath);
+  }
   for (const path of reads.paths) {
     if (shared((other) => other.paths, path)) continue;
     for (const key of [...cache.keys()]) if (key.startsWith(`${path}\0`)) cache.delete(key);
@@ -826,6 +952,7 @@ export function forgetPaneTranscriptState(paneId: string): void {
     forgetCodexStateFor(path);
     forgetPiIndex(path);
     forgetClaudeSessionFile(path);
+    forgetOpencodeRead(path);
   }
 }
 
@@ -884,23 +1011,42 @@ export async function labelOmoPanes(snapshot: SessionSnapshot): Promise<SessionS
   };
 }
 
-/**
- * Claude's transcript: Herdr's hook, or a unique live Claude's native PID record, in the config dir
- * of the pane's Claude process (a launcher can give each environment its own CLAUDE_CONFIG_DIR).
- */
-async function claudeTranscriptPath(paneId: string, cwds: readonly (string | null | undefined)[]): Promise<string> {
-  const info = await herdrRpc<{ agent: { agent_session?: { value?: unknown } } }>("agent.get", { target: paneId });
-  let session = info.agent.agent_session?.value;
-  const home = process.env["HOME"] ?? "";
-  let processes: { pid: number; name?: string; argv0?: string; argv?: string[] }[] = [];
+/** The Claude processes in a pane's foreground; none when herdr cannot say. */
+async function claudeProcesses(paneId: string): Promise<{ pid: number; name?: string; argv0?: string; argv?: string[] }[]> {
   try {
     const processInfo = await herdrRpc<{ process_info?: { foreground_processes?: { pid: number; name?: string; argv0?: string; argv?: string[] }[] } }>(
       "pane.process_info", { pane_id: paneId },
     );
-    processes = processInfo.process_info?.foreground_processes?.filter(isClaudeProcess) ?? [];
-  } catch { /* herdr busy: the default store */ }
+    return processInfo.process_info?.foreground_processes?.filter(isClaudeProcess) ?? [];
+  } catch { return []; /* herdr busy: the default store */ }
+}
+
+/** The pid of the one Claude process in a pane's foreground, or null. */
+export async function claudePanePid(pane: HerdrPane): Promise<number | null> {
+  const processes = await claudeProcesses(pane.pane_id);
+  return processes.length === 1 ? processes[0]!.pid : null;
+}
+
+/**
+ * Claude's transcript: Herdr's hook, or a unique live Claude's native PID record, in the config dir
+ * of the pane's Claude process (a launcher can give each environment its own CLAUDE_CONFIG_DIR).
+ */
+async function claudeTranscriptPath(paneId: string, cwds: readonly (string | null | undefined)[], onProcess?: (pid: number) => void): Promise<string> {
+  const info = await herdrRpc<{ agent: { agent_session?: { value?: unknown } } }>("agent.get", { target: paneId });
+  let session = info.agent.agent_session?.value;
+  const home = process.env["HOME"] ?? "";
+  const processes = await claudeProcesses(paneId);
   const only = processes.length === 1 ? processes[0] : undefined;
-  const configDir = (only && await processClaudeConfigDir(only.pid, only.argv ?? [only.argv0 ?? only.name ?? ""], home)) || defaultClaudeConfigDir(home);
+  if (only) onProcess?.(only.pid);
+  let processDir: string | null = null;
+  try {
+    processDir = only ? await processClaudeConfigDir(only.pid, only.argv ?? [only.argv0 ?? only.name ?? ""], home) : null;
+  } catch (error) {
+    // two stores claim the process: ~/.claude would be a guess, maybe another account's session (#586)
+    if (error instanceof AmbiguousClaudeStore) throw new ConversationUnavailable("no_session_id");
+    throw error;
+  }
+  const configDir = processDir || defaultClaudeConfigDir(home);
   if ((typeof session !== "string" || !SESSION_ID.test(session)) && only) session = await claudeProcessSession(home, only.pid, configDir);
   if (typeof session !== "string" || !SESSION_ID.test(session)) throw new ConversationUnavailable("no_session_id");
   const path = await claudeTranscriptFile(home, session, cwds, configDir);
@@ -909,27 +1055,62 @@ async function claudeTranscriptPath(paneId: string, cwds: readonly (string | nul
   return path;
 }
 
-/**
- * The path herdr reports for an omp session, or null unless it is a transcript inside the
- * user's own store. A Windows PC reports it in its own form (drive letter, backslashes).
- */
-export function ompSessionPath(value: unknown, home: string, paths: PlatformPath = nodePath): string | null {
-  if (typeof value !== "string" || !value.endsWith(".jsonl") || !paths.isAbsolute(value) || !paths.isAbsolute(home)) return null;
-  return storeRelative(paths.join(home, ".omp", "agent", "sessions"), value, paths) ? value : null;
+/** A Claude pane's transcript and when its Claude process started (null when it cannot be told), or null while it has no transcript. */
+export async function claudePaneSession(pane: HerdrPane): Promise<{ path: string; startedAt: number | null; pid: number | null } | null> {
+  let pid: number | null = null;
+  try {
+    const path = await claudeTranscriptPath(pane.pane_id, [pane.cwd, pane.foreground_cwd], (found) => { pid = found; });
+    return { path, startedAt: pid === null ? null : processStartedAt(pid), pid };
+  } catch (error) {
+    if (error instanceof ConversationUnavailable) return null;
+    throw error;
+  }
 }
 
-/** omp's transcript: herdr hands over the absolute path, accepted only inside the user's own store. */
-async function ompTranscriptPath(paneId: string): Promise<string> {
+/**
+ * The store holding the omp session herdr reports, or null unless the path is a transcript
+ * inside one of the user's own stores: ~/.omp/agent/sessions, or the one `omp --profile <name>`
+ * keeps at ~/.omp/profiles/<name>/agent/sessions. A Windows PC reports it in its own form
+ * (drive letter, backslashes).
+ */
+export function ompSessionStore(value: unknown, home: string, paths: PlatformPath = nodePath): string | null {
+  if (typeof value !== "string" || !value.endsWith(".jsonl") || !paths.isAbsolute(value) || !paths.isAbsolute(home)) return null;
+  const store = paths.join(home, ".omp", "agent", "sessions");
+  if (storeRelative(store, value, paths)) return store;
+  const profiles = paths.join(home, ".omp", "profiles");
+  const parts = storeRelative(profiles, value, paths);
+  if (!parts || parts.length < 4 || parts[1] !== "agent" || parts[2] !== "sessions") return null;
+  return paths.join(profiles, parts[0]!, "agent", "sessions");
+}
+
+/**
+ * omp's transcript: herdr hands over the absolute path, accepted only inside the user's own
+ * stores. When herdr names none (or another agent's session), the pane's omp process does.
+ */
+async function ompTranscriptPath(paneId: string, cwd: string): Promise<string> {
   const info = await herdrRpc<{ agent: { agent_session?: { kind?: unknown; value?: unknown } } }>("agent.get", { target: paneId });
   const session = info.agent.agent_session;
+  const path = session?.kind === "path" && typeof session.value === "string" ? session.value : null;
   // a Windows bridge starts with HOME set to the profile directory (remote-entry.ts)
-  const path = ompSessionPath(session?.kind === "path" ? session.value : undefined, process.env["HOME"] ?? "");
-  if (!path) throw new ConversationUnavailable("no_session_path");
+  const store = ompSessionStore(path, process.env["HOME"] ?? "");
+  if (path === null || store === null) {
+    const held = await ompHeldTranscript(paneId, cwd);
+    if (held === null) throw new ConversationUnavailable("no_session_path");
+    return held;
+  }
   // omp names its session file at start and writes it with the first answer
-  const unwritten = unwrittenSession(path, nodePath.join(process.env["HOME"] ?? "", ".omp", "agent", "sessions"));
+  const unwritten = unwrittenSession(path, store);
   if (unwritten !== null) throw new ConversationNotStarted(unwritten.id, "omp-transcript", unwritten.path);
-  return path;
+  // the check above is lexical: a link out of the store is no transcript of this pane
+  const inStore = piTranscriptInStore(path, store);
+  if (inStore === null) throw new ConversationUnavailable("no_session_path");
+  return inStore;
 }
+
+/** Where a pane's conversation is: a transcript file, or a session in OpenCode's database. */
+type ResolvedTranscript =
+  | { source: StreamSource; path: string; codexHome?: string }
+  | { source: "opencode-transcript"; path: string; session: string };
 
 /**
  * The store a pane's transcript lives in. herdr's agent label follows the
@@ -939,7 +1120,7 @@ async function ompTranscriptPath(paneId: string): Promise<string> {
  * label: omo's own store is read only when omo is really running
  * in that pane, never on a matching cwd alone.
  */
-async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: string, panes?: HerdrPane[]): Promise<{ source: RecognizedConversation["source"]; path: string; codexHome?: string }> {
+async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: string, panes?: HerdrPane[], opencodeDb?: string): Promise<ResolvedTranscript> {
   const paneId = pane.pane_id;
   let agent = pane.agent ?? pane.agent_session?.agent ?? "";
   // herdr names no agent for this pane: a session report an earlier agent left behind says
@@ -958,6 +1139,9 @@ async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: strin
   if ((agent === "omo" || agent === "pi" || agent === "claude") && await paneRunsOmo(paneId)) {
     return { source: "omo-transcript", path: await omoTranscriptPath(paneId, cwd, panes) };
   }
+  // omp and GJC can change their own cwd without changing the pane's shell directory; their
+  // session headers name the one they run in
+  const sessionCwd = typeof pane.foreground_cwd === "string" && pane.foreground_cwd.length > 0 ? pane.foreground_cwd : cwd;
   try {
     if (agent === "codex") {
       // the pane's own store: the rollout, its history and its images are all read from there
@@ -968,18 +1152,22 @@ async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: strin
     }
     // Claude's project is the directory it started in, the process's own cwd more often than the pane's
     if (agent === "claude") return { source: "claude-transcript", path: await claudeTranscriptPath(paneId, [cwd, pane.foreground_cwd]) };
-    if (agent === "omp") return { source: "omp-transcript", path: await ompTranscriptPath(paneId) };
-    if (agent === "gjc") {
-      // GJC can change its own cwd without changing the pane's shell directory.
-      const sessionCwd = typeof pane.foreground_cwd === "string" && pane.foreground_cwd.length > 0 ? pane.foreground_cwd : cwd;
-      return { source: "gjc-transcript", path: await gjcTranscriptPath(paneId, sessionCwd) };
-    }
+    if (agent === "omp") return { source: "omp-transcript", path: await ompTranscriptPath(paneId, sessionCwd) };
+    if (agent === "gjc") return { source: "gjc-transcript", path: await gjcTranscriptPath(paneId, sessionCwd) };
     // pi's own label only routes pi: an omo pane was taken above, by its process tree.
     if (agent === "pi") {
       const found = await piTranscriptPath(paneId);
       if (found === null) throw new ConversationUnavailable("no_session_path");
       if ("unwritten" in found) throw new ConversationNotStarted(found.unwritten.id, "pi-transcript", found.unwritten.path);
       return { source: "pi-transcript", path: found.path };
+    }
+    if (agent === "opencode") {
+      // herdr's integration names the session the TUI shows; at its home screen there is none
+      const session = opencodeSessionId(pane);
+      if (session === null) throw new ConversationUnavailable("no_session_id");
+      const path = opencodeDb ?? opencodeDatabasePath();
+      if (path === null) throw new ConversationUnavailable("no_session_path");
+      return { source: "opencode-transcript", path, session };
     }
     throw new ConversationUnavailable("no_recognized_transcript");
   } catch (error) {
@@ -995,11 +1183,51 @@ async function omoTranscriptPath(paneId: string, cwd: string, panes?: HerdrPane[
   return session.path;
 }
 
+/** A live Devin executable, not a command line which happens to mention one. */
+export function isDevinProcess(argv: readonly string[]): boolean {
+  const executable = argv[0] ?? "";
+  const exact = /(?:^|[\\/])devin(?:\.exe)?$/;
+  return process.platform === "win32" ? exact.test(executable.toLowerCase()) : exact.test(executable);
+}
+
+/** Resolves only a session explicitly named by this live Devin pane, never by directory contents. */
+export function devinSessionForPane(pane: HerdrPane, panes: HerdrPane[], argv: string[]): string {
+  if (pane.agent !== "devin") throw new ConversationUnavailable("no_session_id");
+  const reported = pane.agent_session?.agent === "devin" && pane.agent_session.kind === "id"
+    && typeof pane.agent_session.value === "string" && pane.agent_session.value.length > 0
+    ? pane.agent_session.value : null;
+  const resumed: string[] = [];
+  for (let index = 1; index < argv.length; index++) {
+    const arg = argv[index]!;
+    if (arg === "--") break;
+    if (arg.startsWith("--resume=")) {
+      const id = arg.slice("--resume=".length);
+      if (!id || id.startsWith("-")) throw new ConversationUnavailable("no_session_id");
+      resumed.push(id);
+    } else if (arg === "--resume" || arg === "-r") {
+      const id = argv[index + 1];
+      if (!id || id.startsWith("-")) throw new ConversationUnavailable("no_session_id");
+      resumed.push(id);
+      index++;
+    }
+  }
+  const named = resumed[0] ?? null;
+  if (resumed.some((id) => id !== named) || (reported !== null && named !== null && reported !== named)) {
+    throw new ConversationUnavailable("no_session_id");
+  }
+  const explicit = reported ?? named;
+  if (explicit === null) throw new ConversationUnavailable("no_session_id");
+  if (panes.some((other) => other.pane_id !== pane.pane_id && other.agent === "devin"
+    && other.agent_session?.agent === "devin" && other.agent_session.kind === "id" && other.agent_session.value === explicit)) {
+    throw new ConversationUnavailable("no_session_id");
+  }
+  return explicit;
+}
+
 /**
  * pane -> agent session -> transcript turns. Read-only, same-user files only.
  * Claude sessions are looked up by id under ~/.claude/projects; omp sessions
- * come as an absolute path from herdr, accepted only under the user's own
- * ~/.omp/agent/sessions dir; omo sessions are resolved from its own store by
+ * come from herdr or the pane's omp process (ompTranscriptPath); omo sessions are resolved from its own store by
  * process/session evidence (omoTranscriptForPane). Throws ConversationUnavailable when the pane has
  * no recognized agent store (the caller falls back to the scrollback
  * transcript view, like chatmux).
@@ -1007,16 +1235,43 @@ async function omoTranscriptPath(paneId: string, cwd: string, panes?: HerdrPane[
  * Without `page` this is the newest page. `before` is the page ending at a
  * returned cursor; `from` is every turn after one, for a chat that already
  * shows the pages before it. A cursor from another file throws HistoryChanged.
+ * `opencodeDb` is OpenCode's store, unset where OpenCode itself would find it.
  */
-export async function paneConversation(paneId: string, codexHome?: string, page: ConversationPage = {}): Promise<RecognizedConversation> {
+export async function paneConversation(paneId: string, codexHome?: string, page: ConversationPage = {}, devinDbPath?: string, opencodeDb?: string): Promise<RecognizedConversation> {
   const snapshot = await sessionSnapshot();
   const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
   if (pane === undefined) throw new ConversationUnavailable("pane_not_found");
   if (typeof pane.cwd !== "string" || pane.cwd.length === 0) throw new ConversationUnavailable("no_recognized_transcript");
 
-  let resolved: Awaited<ReturnType<typeof resolveTranscript>>;
+  if (pane.agent === "devin") {
+    const cwd = pane.foreground_cwd || pane.cwd;
+    const storePath = devinDbPath ?? defaultDevinDbPath();
+    const info = await herdrRpc<{ process_info?: { foreground_processes?: { argv?: unknown }[] } }>(
+      "pane.process_info", { pane_id: paneId },
+    ).catch(() => null);
+    const processes = (info?.process_info?.foreground_processes ?? []).filter((process) =>
+      Array.isArray(process.argv) && process.argv.every((arg) => typeof arg === "string") &&
+      isDevinProcess(process.argv as string[]) && process.argv[1] !== "acp",
+    );
+    if (processes.length > 1) throw new ConversationUnavailable("transcript_missing");
+    // No Devin runs under the label: what does run is resolved below, as it was before this
+    // reader (an omo is found by its process tree, whatever herdr calls the pane).
+    if (processes.length === 1) {
+      const sessionId = devinSessionForPane(pane, snapshot.panes, processes[0]!.argv as string[]);
+      try {
+        const answer = devinConversation(sessionId, cwd, page, storePath);
+        rememberPaneDevin(paneId, sessionId, cwd, storePath);
+        return answer;
+      } catch (error) {
+        if (error instanceof DevinHistoryUnavailable) throw new ConversationUnavailable("transcript_missing");
+        throw error;
+      }
+    }
+  }
+
+  let resolved: ResolvedTranscript;
   try {
-    resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes);
+    resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb);
   } catch (error) {
     if (!(error instanceof ConversationNotStarted)) throw error;
     // a file read before and gone since is no conversation not begun: the terminal stands in for it
@@ -1030,6 +1285,16 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
     const id = `unwritten:${error.sessionId}`;
     return { source: error.source, turns: [], metadata: { model: null, reasoning_effort: null }, cursor: null, history_id: id, version: answerVersion(id, "") };
   }
+  if (resolved.source === "opencode-transcript") {
+    // its caches are keyed by store and session, which is what the pane is remembered against
+    rememberPaneRead(paneId, opencodeReadKey(resolved.path, resolved.session));
+    const answer = opencodeConversation(resolved.path, resolved.session, page);
+    if (answer.kind === "history_changed") throw new HistoryChanged();
+    if (answer.kind === "unavailable") throw new ConversationUnavailable(answer.reason);
+    const { kind: _kind, signature, ...conversation } = answer;
+    const key = `opencode\0${resolved.path}\0${resolved.session}\0${page.before ?? ""}\0${page.since ?? ""}\0${page.from ?? ""}`;
+    return { source: resolved.source, ...conversation, version: answerVersion(key, signature) };
+  }
   const identity = resolved.source === "claude-transcript" ? nodePath.basename(resolved.path, ".jsonl")
     : resolved.source === "pi-transcript" || resolved.source === "omp-transcript" ? realpathSync(resolved.path) : null;
   rememberPaneRead(paneId, resolved.path);
@@ -1039,7 +1304,7 @@ export async function paneConversation(paneId: string, codexHome?: string, page:
 }
 
 /** One page of a resolved transcript (paneConversation's `page`). */
-export function transcriptPage(source: RecognizedConversation["source"], path: string, page: ConversationPage = {}, codexHome?: string): RecognizedConversation {
+export function transcriptPage(source: StreamSource, path: string, page: ConversationPage = {}, codexHome?: string): RecognizedConversation {
   let stat: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
   try {
     stat = statSync(path);
@@ -1108,7 +1373,7 @@ export function transcriptPage(source: RecognizedConversation["source"], path: s
   // the store decides the parser, not the pane's label: omo writes omp's
   // session shape while herdr may be calling that same pane `claude`. The page
   // bounds the turns, so none are cut: they must meet the next page exactly.
-  const turns = live?.turns ?? parseTurns(source, text);
+  const turns = live?.turns ?? parseTurns(source, path, text);
   const metadata = live?.metadata ?? parseConversationMetadata(`${head}\n${text}`, source);
   // Record the stat from BEFORE the read: an append during parsing must cause
   // another read on the next poll, not permanently cache a torn tail.
@@ -1127,14 +1392,16 @@ export function transcriptPage(source: RecognizedConversation["source"], path: s
  * here rather than sent with every poll of the conversation. Null when there is no such
  * image. Codex uses a hash of the native attachment and searches only the bound history.
  */
-export async function conversationImage(paneId: string, ref: string, codexHome?: string): Promise<{ mediaType: string; bytes: Uint8Array<ArrayBuffer> } | null> {
-  if (!IMAGE_REF.test(ref) && !CODEX_IMAGE_REF.test(ref) && !PI_IMAGE_REF.test(ref)) return null;
+export async function conversationImage(paneId: string, ref: string, codexHome?: string, opencodeDb?: string): Promise<{ mediaType: string; bytes: Uint8Array<ArrayBuffer> } | null> {
+  if (!IMAGE_REF.test(ref) && !CODEX_IMAGE_REF.test(ref) && !PI_IMAGE_REF.test(ref) && !OPENCODE_IMAGE_REF.test(ref)) return null;
   const snapshot = await sessionSnapshot();
   const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
   if (pane === undefined || typeof pane.cwd !== "string" || pane.cwd.length === 0) return null;
-  let resolved: Awaited<ReturnType<typeof resolveTranscript>>;
-  try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes); }
+  let resolved: ResolvedTranscript;
+  try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb); }
   catch (error) { if (error instanceof ConversationUnavailable) return null; throw error; }
+  // OpenCode's store is read per request and keeps nothing for the pane to release
+  if (resolved.source === "opencode-transcript") return opencodeImage(resolved.path, resolved.session, ref);
   rememberPaneRead(paneId, resolved.path);
   if (resolved.source === "codex-transcript") return codexTranscriptImage(codexHistorySegments(resolved.path, resolved.codexHome ?? codexHome), ref, pane.cwd);
   if (resolved.source === "pi-transcript") return piTranscriptImage(resolved.path, ref);
@@ -1171,20 +1438,24 @@ const TOOL_REF = /^[A-Za-z0-9_:.-]{1,128}$/;
 const TOOL_OUTPUT_MAX = 2_000_000;
 
 /** The whole output of a tool call whose page output was cut, by its id; null when there is none. */
-export async function toolOutput(paneId: string, ref: string, codexHome?: string): Promise<string | null> {
+export async function toolOutput(paneId: string, ref: string, codexHome?: string, opencodeDb?: string): Promise<string | null> {
   if (!TOOL_REF.test(ref)) return null;
   const snapshot = await sessionSnapshot();
   const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
   if (pane === undefined || typeof pane.cwd !== "string" || pane.cwd.length === 0) return null;
-  let resolved: Awaited<ReturnType<typeof resolveTranscript>>;
-  try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes); }
+  let resolved: ResolvedTranscript;
+  try { resolved = await resolveTranscript(pane, pane.cwd, codexHome, snapshot.panes, opencodeDb); }
   catch (error) { if (error instanceof ConversationUnavailable) return null; throw error; }
+  if (resolved.source === "opencode-transcript") {
+    const output = opencodeToolOutput(resolved.path, resolved.session, ref);
+    return output !== null && output.length > TOOL_OUTPUT_MAX ? `${output.slice(0, TOOL_OUTPUT_MAX)}\n… trimmed` : output;
+  }
   rememberPaneRead(paneId, resolved.path);
   return transcriptToolOutput(resolved.source, resolved.path, ref, resolved.codexHome ?? codexHome);
 }
 
 /** The output a transcript file holds for one tool call id, whole (up to TOOL_OUTPUT_MAX). */
-export function transcriptToolOutput(source: RecognizedConversation["source"], path: string, ref: string, codexHome?: string): string | null {
+export function transcriptToolOutput(source: StreamSource, path: string, ref: string, codexHome?: string): string | null {
   if (!TOOL_REF.test(ref)) return null;
   if (source === "codex-transcript") {
     let segments: ReturnType<typeof codexHistorySegments>;

@@ -1,11 +1,17 @@
 import { stripVTControlCharacters } from "node:util";
 import type {
+  AgentIntegration,
+  PaneDirection,
   PaneReadResult,
   ReadFormat,
   ReadSource,
   SessionSnapshot,
+  SplitPaneDirection,
+  PaneFindRequest,
+  PaneFindResponse,
+  PaneFindMatch,
 } from "../../shared/protocol.ts";
-import type { AgentManifestInfo, AgentStartParams, PaneInfo, PaneScrollInfo, TabInfo, WorkspaceInfo } from "../../shared/herdr-api.generated.ts";
+import type { AgentInfo, AgentManifestInfo, AgentStartParams, PaneInfo, PaneLayoutSnapshot, PaneMoveParams, PaneMoveResult, PaneScrollInfo, TabInfo, WorkspaceInfo } from "../../shared/herdr-api.generated.ts";
 import type { HerdrIdentity } from "../../shared/machines.ts";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -70,12 +76,17 @@ function makeLineReader(onLine: (line: string) => void): (chunk: Uint8Array) => 
  * One request, one connection.
  * The herdr server closes the connection after a single response, so a pooled
  * or reused socket would never see a second reply.
+ *
+ * `guard`, when given, is asked once more right before the request is written: the
+ * connect is awaited, and a caller's right to send can lapse meanwhile. A guard that
+ * answers false sends nothing and rejects with `cancelled`.
  */
 export async function herdrRpc<T = unknown>(
   method: string,
   params: Record<string, unknown>,
   socketPath: string = herdrSocketPath(),
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  guard?: () => boolean,
 ): Promise<T> {
   const id = nextId();
   return await new Promise<T>((resolve, reject) => {
@@ -142,6 +153,10 @@ export async function herdrRpc<T = unknown>(
           }
           return;
         }
+        if (guard && !guard()) {
+          finish(() => reject(new HerdrError("cancelled", `herdr ${method} was not sent: the sender may no longer send`)));
+          return;
+        }
         sock.write(`${JSON.stringify({ id, method, params })}\n`);
       })
       .catch((err: Error) => {
@@ -165,8 +180,93 @@ export async function sessionSnapshot(socketPath?: string, timeoutMs?: number): 
   return result.snapshot;
 }
 
+/** One pane's metadata; an unknown pane rejects with herdr's `pane_not_found`. */
+export async function paneGet(paneId: string, socketPath?: string): Promise<PaneInfo> {
+  const result = await herdrRpc<{ pane: PaneInfo }>("pane.get", { pane_id: paneId }, socketPath);
+  return result.pane;
+}
+
 export async function agentManifests(socketPath?: string): Promise<{ manifests: AgentManifestInfo[] }> {
   return herdrRpc("server.agent_manifests", {}, socketPath);
+}
+
+/** herdr's `InstalledPluginInfo`, the fields the bridge reads. */
+export interface InstalledPluginInfo {
+  plugin_id: string;
+  name: string;
+  version: string;
+  description?: string | null;
+  enabled: boolean;
+}
+
+/** herdr's `PluginActionInfo`. `platforms` null or absent: every platform. */
+export interface PluginActionInfo {
+  plugin_id: string;
+  action_id: string;
+  title: string;
+  description?: string | null;
+  contexts?: string[];
+  command: string[];
+  platforms?: string[] | null;
+}
+
+/**
+ * herdr's `PluginInvocationContext`. herdr takes each field as given and fills a missing one
+ * from its own focus, never from the pane or workspace another field names (measured on 0.9.3:
+ * `focused_pane_id` alone came back with the focused workspace's ID and label).
+ */
+export interface PluginInvocationContext {
+  workspace_id?: string;
+  workspace_label?: string;
+  workspace_cwd?: string;
+  worktree?: unknown;
+  tab_id?: string;
+  tab_label?: string;
+  focused_pane_id?: string;
+  focused_pane_cwd?: string;
+  focused_pane_agent?: string;
+  focused_pane_status?: string;
+  invocation_source?: string;
+}
+
+/** herdr's `PluginCommandLogInfo`. */
+export interface PluginCommandLog {
+  log_id: string;
+  plugin_id: string;
+  action_id?: string | null;
+  status: "running" | "succeeded" | "failed" | (string & {});
+  exit_code?: number | null;
+  error?: string | null;
+  stdout?: string | null;
+  stderr?: string | null;
+}
+
+export async function pluginList(socketPath?: string): Promise<InstalledPluginInfo[]> {
+  return (await herdrRpc<{ plugins: InstalledPluginInfo[] }>("plugin.list", {}, socketPath)).plugins;
+}
+
+/** Every plugin's manifest actions, a disabled plugin's and another platform's included. */
+export async function pluginActionList(socketPath?: string): Promise<PluginActionInfo[]> {
+  return (await herdrRpc<{ actions: PluginActionInfo[] }>("plugin.action.list", {}, socketPath)).actions;
+}
+
+/** Starts the action's command and answers at once: its log entry is still `running`. */
+export async function pluginActionInvoke(
+  pluginId: string,
+  actionId: string,
+  context?: PluginInvocationContext,
+  socketPath?: string,
+): Promise<{ log: PluginCommandLog }> {
+  return herdrRpc("plugin.action.invoke", { plugin_id: pluginId, action_id: actionId, ...(context === undefined ? {} : { context }) }, socketPath);
+}
+
+export async function pluginLogList(pluginId: string, limit: number, socketPath?: string, timeoutMs?: number): Promise<PluginCommandLog[]> {
+  return (await herdrRpc<{ logs: PluginCommandLog[] }>("plugin.log.list", { plugin_id: pluginId, limit }, socketPath, timeoutMs)).logs;
+}
+
+/** herdr's built-in agent integrations and whether each is installed. Read only: this bridge never installs one. */
+export async function integrationList(socketPath?: string): Promise<AgentIntegration[]> {
+  return (await herdrRpc<{ integrations: AgentIntegration[] }>("integration.list", {}, socketPath)).integrations;
 }
 
 export interface WorkspaceCreateResult {
@@ -235,6 +335,16 @@ export async function agentStart(
 
 export async function paneRename(paneId: string, label: string | null, socketPath?: string): Promise<void> {
   await herdrRpc("pane.rename", { pane_id: paneId, label }, socketPath);
+}
+
+/**
+ * The live name other tools address the agent in the pane by (`herdr agent prompt <name>`); null
+ * clears it. herdr keeps the rule: invalid_agent_name for a name outside it, agent_name_taken for
+ * one another live agent holds, agent_not_found for a pane without a live agent.
+ */
+export async function agentRename(paneId: string, name: string | null, socketPath?: string): Promise<AgentInfo> {
+  const answer = await herdrRpc<{ type: "agent_info"; agent: AgentInfo }>("agent.rename", { target: paneId, name }, socketPath);
+  return answer.agent;
 }
 
 export async function workspaceRename(workspaceId: string, label: string, socketPath?: string): Promise<void> {
@@ -348,14 +458,63 @@ export interface PaneTextPoint { row: number; col: number }
 
 /** Where the pane's viewport sits in its scrollback; null when herdr reports none. */
 export async function paneScrollInfo(paneId: string, socketPath?: string): Promise<PaneScrollInfo | null> {
-  const result = await herdrRpc<{ pane: PaneInfo }>("pane.get", { pane_id: paneId }, socketPath);
-  return result.pane.scroll ?? null;
+  const pane = await paneGet(paneId, socketPath);
+  return pane.scroll ?? null;
 }
 
 /** Scrolls the pane's viewport; herdr redraws every attached terminal. */
 export async function paneScroll(paneId: string, offsetFromBottom: number, socketPath?: string): Promise<PaneScrollInfo | null> {
   const result = await herdrRpc<{ pane: PaneInfo }>("pane.scroll", { pane_id: paneId, offset_from_bottom: offsetFromBottom }, socketPath);
   return result.pane.scroll ?? null;
+}
+
+/** Copy search is stateless; scrolling is the same shared viewport used by herdr's TUI. */
+export async function paneFind(request: PaneFindRequest, socketPath?: string): Promise<PaneFindResponse> {
+  const scroll = await paneScrollInfo(request.pane_id, socketPath);
+  const row = scroll ? scroll.max_offset_from_bottom - scroll.offset_from_bottom : 0;
+  // pane.read.revision is NOT copy_search's content_revision. copy_motion supplies the latter
+  // without entering copy mode or changing any client's cursor.
+  const motion = await herdrRpc<{ cursor: PaneTextPoint; content_revision: number }>("pane.copy_motion", {
+    pane_id: request.pane_id, cursor: { row, col: 0 }, motion: "line_end",
+  }, socketPath);
+  if (request.previous && request.content_revision !== motion.content_revision) {
+    throw new HerdrError("stale_content", "Pane changed. Search again.");
+  }
+  const previous = request.previous;
+  const result = await herdrRpc<{
+    matches: PaneFindMatch[]; total: number; current?: number | null; current_global?: number | null; content_revision: number;
+  }>("pane.copy_search", {
+    pane_id: request.pane_id, query: request.query, direction: request.direction,
+    cursor: previous?.start ?? (request.direction === "backward" ? motion.cursor : { row, col: 0 }),
+    content_revision: motion.content_revision, ...(previous ? { previous } : {}),
+  }, socketPath);
+  const match = result.current == null ? null : result.matches[result.current] ?? null;
+  if (match) {
+    // A browser resize can reflow history while searching. Use the viewport herdr has now,
+    // not the one read to choose the search's starting cursor.
+    const currentScroll = await paneScrollInfo(request.pane_id, socketPath);
+    // Let herdr reject a reflow or history eviction after copy_search before moving the view.
+    await herdrRpc("pane.copy_motion", {
+      pane_id: request.pane_id, cursor: match.start, motion: "line_end", content_revision: result.content_revision,
+    }, socketPath);
+    if (currentScroll) {
+      await paneScroll(request.pane_id, Math.max(0, currentScroll.max_offset_from_bottom - match.start.row), socketPath);
+      // herdr 0.9.3 cannot guard pane.scroll atomically. Refuse success if output or reflow
+      // arrived after the pre-scroll check; the shared view may already have moved.
+      await herdrRpc("pane.copy_motion", {
+        pane_id: request.pane_id, cursor: match.start, motion: "line_end", content_revision: result.content_revision,
+      }, socketPath);
+    }
+  } else {
+    // No match is an answer about one revision too: output since copy_search may hold the text.
+    await herdrRpc("pane.copy_motion", {
+      pane_id: request.pane_id, cursor: { row, col: 0 }, motion: "line_end", content_revision: result.content_revision,
+    }, socketPath);
+  }
+  return {
+    total: result.total, current: result.current_global == null ? null : result.current_global + 1,
+    match, content_revision: result.content_revision,
+  };
 }
 
 /**
@@ -367,8 +526,8 @@ export async function paneSelectionRead(paneId: string, anchor: PaneTextPoint, c
   return result.text;
 }
 
-export async function paneSendText(paneId: string, text: string, socketPath?: string): Promise<void> {
-  await herdrRpc("pane.send_text", { pane_id: paneId, text }, socketPath);
+export async function paneSendText(paneId: string, text: string, socketPath?: string, guard?: () => boolean): Promise<void> {
+  await herdrRpc("pane.send_text", { pane_id: paneId, text }, socketPath, undefined, guard);
 }
 
 /**
@@ -380,12 +539,69 @@ export async function agentPrompt(target: string, text: string, socketPath?: str
   await herdrRpc("agent.prompt", { target, text }, socketPath);
 }
 
-export async function paneSendKeys(paneId: string, keys: string[], socketPath?: string): Promise<void> {
-  await herdrRpc("pane.send_keys", { pane_id: paneId, keys }, socketPath);
+export async function paneSendKeys(paneId: string, keys: string[], socketPath?: string, guard?: () => boolean): Promise<void> {
+  await herdrRpc("pane.send_keys", { pane_id: paneId, keys }, socketPath, undefined, guard);
 }
 
 export async function paneClose(paneId: string, socketPath?: string): Promise<void> {
   await herdrRpc("pane.close", { pane_id: paneId }, socketPath);
+}
+
+/**
+ * The pane into another tab, a new tab (of its workspace or another) or a new workspace
+ * (herdr's `pane move`). A pane that leaves its workspace comes back under a new pane id;
+ * `focus` false keeps herdr's own focus where it was (measured on 0.9.3: true moves it to the
+ * pane). herdr answers `{ move_result }`; the result alone is returned.
+ */
+export async function paneMove(params: PaneMoveParams, socketPath?: string): Promise<PaneMoveResult> {
+  const answer = await herdrRpc<{ move_result: PaneMoveResult }>("pane.move", { ...params } satisfies PaneMoveParams, socketPath);
+  return answer.move_result;
+}
+
+/**
+ * A new pane beside `paneId` (herdr's prefix+v / prefix+-), answered as herdr's snapshot lists it.
+ * herdr's focus stays where it is unless `focus` asks for the new pane, as its --focus does.
+ */
+export async function paneSplit(paneId: string, direction: SplitPaneDirection, focus: boolean, socketPath?: string): Promise<PaneInfo> {
+  const result = await herdrRpc<{ pane: PaneInfo }>("pane.split", { target_pane_id: paneId, direction, focus }, socketPath);
+  return result.pane;
+}
+
+/** How herdr answers a layout change: whether anything moved, why not, and the tab's layout after it. */
+export interface PaneLayoutOutcome {
+  changed: boolean;
+  reason: string | null;
+  focused_pane_id: string;
+  layout: PaneLayoutSnapshot;
+}
+
+/** herdr's prefix+z: the tab shows the pane alone (and focuses it), or every pane again. */
+export async function paneZoom(paneId: string, mode: "toggle" | "on" | "off", socketPath?: string): Promise<PaneLayoutOutcome & { zoomed: boolean }> {
+  const result = await herdrRpc<{ zoom: PaneLayoutOutcome & { zoomed: boolean; reason?: string | null } }>("pane.zoom", { pane_id: paneId, mode }, socketPath);
+  return { ...result.zoom, reason: result.zoom.reason ?? null };
+}
+
+/** herdr's prefix+shift+hjkl: the pane and its neighbour on that side change places; no_neighbor when it has none. */
+export async function paneSwap(paneId: string, direction: PaneDirection, socketPath?: string): Promise<PaneLayoutOutcome & { target_pane_id: string | null }> {
+  const result = await herdrRpc<{ swap: PaneLayoutOutcome & { target_pane_id?: string | null; reason?: string | null } }>("pane.swap", { pane_id: paneId, direction }, socketPath);
+  return { ...result.swap, reason: result.swap.reason ?? null, target_pane_id: result.swap.target_pane_id ?? null };
+}
+
+/**
+ * herdr's resize mode: the border the pane shares with a neighbour moves `direction`-wards by
+ * `amount` of the split that border belongs to, measured on the split's own extent rather than
+ * the tab's (herdr's own 0.05 when undefined; herdr caps it at 0.5 and holds the ratio to
+ * 0.1..0.9). Measured on 0.9.3: the direction is the border's, so the left pane of a split
+ * shrinks on `left` and the right one grows.
+ */
+export async function paneResize(paneId: string, direction: PaneDirection, amount: number | undefined, socketPath?: string): Promise<PaneLayoutOutcome> {
+  const result = await herdrRpc<{ resize: PaneLayoutOutcome & { reason?: string | null } }>("pane.resize", { pane_id: paneId, direction, ...(amount === undefined ? {} : { amount }) }, socketPath);
+  return { ...result.resize, reason: result.resize.reason ?? null };
+}
+
+/** Clears the pane's terminal screen, as herdr's own `pane clear` does. */
+export async function paneClear(paneId: string, socketPath?: string): Promise<void> {
+  await herdrRpc("pane.clear", { pane_id: paneId }, socketPath);
 }
 
 export interface HerdrSubscription {

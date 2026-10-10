@@ -5,9 +5,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InteractivePrompt } from "../shared/protocol.ts";
 
-import { answerKeys, codexQuestionsCollapsed, codexQueuedPrompt, handlePromptRequest, modelListWaits, openOmoAsks, parseClaudeSuggestion, parseFallbackPrompt, parseInteractivePrompt, pendingOmoAsk, promptWaitEnded } from "./prompt.ts";
+import { answerKeys, claudeInputDraft, viewportShowsLive, removedInvisible, noteSubmitted, codexQuestionsCollapsed, codexQueuedPrompt, handlePromptRequest, modelListWaits, openOmoAsks, parseClaudeSuggestion, parseFallbackPrompt, parseInteractivePrompt, pendingOmoAsk, promptWaitEnded } from "./prompt.ts";
 
 const labels = (prompt: InteractivePrompt | null) => prompt?.options.map((option) => option.label);
+const CLAUDE_BACKGROUND_APPROVAL_FOOTER = "Esc to cancel · ctrl+x ctrl+k twice to stop background agents";
+const claudeBackgroundApproval = (selected: number, footer = CLAUDE_BACKGROUND_APPROVAL_FOOTER) => {
+  const row = (index: number, label: string) => `${index === selected ? " ❯ " : "   "}${index + 1}. ${label}`;
+  return [
+    "✻ Waiting for 1 background agent to finish",
+    "",
+    "─".repeat(80),
+    " Bash command · from the general-purpose agent",
+    " Run shell command",
+    "╌".repeat(80),
+    " │ systemctl --user start demo.service",
+    "╌".repeat(80),
+    " │ Permission rule Bash(systemctl --user start:*) requires confirmation for this command.",
+    " /permissions to update rules",
+    "",
+    " Do you want to proceed?",
+    row(0, "Yes"),
+    row(1, "Yes, and don't ask again for: systemctl --user start demo.service"),
+    row(2, "No"),
+    "",
+    ` ${footer}`,
+    "",
+  ].join("\n");
+};
 
 describe("interactive prompt parsing", () => {
   test("invalidates approvals when their command changes, including text beyond the display cap", () => {
@@ -992,6 +1016,74 @@ ${rows}
   });
 });
 
+describe("Claude's held message", () => {
+  // Claude Code 2.1.294, live: a pasted message with a zero-width space, after its Enter
+  const rule = "─".repeat(80);
+  const held = (box: string, footer = "  [Haiku 4.5] │ project\n  ⏸ manual mode on") => `
+ ▐▛███▜▌   Claude Code v2.1.294
+${" ".repeat(40)}Removed 1 invisible character · review and press Enter to send
+${rule}
+${box}
+${rule}
+${footer}
+`;
+
+  test("shows the message Claude holds, with Send and Discard", () => {
+    const prompt = parseInteractivePrompt("claude", held("❯ helloworld test"))!;
+    expect(prompt).not.toBeNull();
+    expect(prompt.title).toBe("Claude Code removed 1 invisible character");
+    expect(prompt.body).toBe("helloworld test");
+    expect(prompt.options.map((option) => option.label)).toEqual(["Send", "Discard"]);
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+    expect(answerKeys(prompt, { option_index: 1 })).toEqual([{ keys: ["ctrl+c"] }]);
+  });
+
+  test("keeps a held message of several lines whole, and counts the characters", () => {
+    const screen = held("❯ first line\n  second line").replace("Removed 1 invisible character", "Removed 3 invisible characters");
+    const prompt = parseInteractivePrompt("claude", screen)!;
+    expect(prompt.title).toBe("Claude Code removed 3 invisible characters");
+    expect(prompt.body).toBe("first line\nsecond line");
+  });
+
+  test("knows a held message without the hint, by what the chat just sent", () => {
+    // a turn's status line took the hint's row: only the box says it, and only to the one who sent it
+    const screen = held("\u276f timingtest").replace(/.*Removed 1 invisible character.*\n/, "  \u273b Cooked for 1s \u00b7 done 5:23 PM\n");
+    expect(parseInteractivePrompt("claude", screen)).toBeNull();
+    const prompt = parseInteractivePrompt("claude", screen, null, true, [], "timing\u200btest")!;
+    expect(prompt.title).toBe("Claude Code removed 1 invisible character");
+    expect(prompt.body).toBe("timingtest");
+    // a box that differs in anything visible is the user's own draft
+    expect(parseInteractivePrompt("claude", screen, null, true, [], "timing\u200btests")).toBeNull();
+    expect(parseInteractivePrompt("claude", screen, null, true, [], "timingtest")).toBeNull();
+  });
+
+  test("counts only invisible characters as removed, a wrapped box aside", () => {
+    expect(removedInvisible("a\u200bb\u2060c\ufeff", "abc")).toBe(3);
+    expect(removedInvisible("long message here", "long mess\nage here")).toBe(0);
+    expect(removedInvisible("abc", "abd")).toBe(0);
+    expect(removedInvisible("ab\u200bc", "ab")).toBe(0);
+    expect(removedInvisible("\ud55c\u3164\uae00", "\ud55c\uae00")).toBe(1);
+  });
+
+  test("offers no Discard while Claude works: its Ctrl+C would interrupt the turn", () => {
+    // Claude Code 2.1.294, live: Ctrl+C under a running turn answers "Interrupted" and leaves the box as it was
+    const prompt = parseInteractivePrompt("claude", held("❯ helloworld test"), null, true, [], null, true)!;
+    expect(prompt.body).toBe("helloworld test");
+    expect(prompt.options.map((option) => option.label)).toEqual(["Send"]);
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+    expect(() => answerKeys(prompt, { option_index: 1 })).toThrow();
+  });
+
+  test("is gone once the input is empty, and never reads the hint off a quoted screen", () => {
+    // sent or discarded: the hint stays over an empty input
+    expect(parseInteractivePrompt("claude", held("❯"))).toBeNull();
+    // output under the box is not Claude's footer: the hint is quoted, not live
+    expect(parseInteractivePrompt("claude", held("❯ hi", `  footer\n${rule}\n❯ another box`))).toBeNull();
+    // the same words not over an input box
+    expect(parseInteractivePrompt("claude", "Removed 1 invisible character · review and press Enter to send\nsome output\n")).toBeNull();
+  });
+});
+
 describe("Claude's unnumbered menus", () => {
   // Claude Code 2.1.285 on a folder it has not seen, as herdr's pane read shows it (live)
   const trust = (selected: 0 | 1 = 0, after = "") => `
@@ -1519,6 +1611,71 @@ describe("Claude's suggested next prompt", () => {
     // a typed character under that cursor, with nothing grey after it, is typed
     expect(parseClaudeSuggestion(screen("❯ \u001b[7mr\u001b[27m"))).toBeNull();
     expect(parseClaudeSuggestion(screen("❯ \u001b[7mr\u001b[27mun"))).toBeNull();
+  });
+
+  test("a draft typed in the input box is the user's: Claude's grey text, its tip, its cursor and an empty box are not", () => {
+    // the live screen as a detection read gives it, without colors, and the viewport's ANSI read of the same screen
+    const draft = (ansi: string, live = ansi.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")) => claudeInputDraft(live, ansi);
+    expect(draft(screen("❯\u00a0아직 진행중이야?"))).toBe(true);
+    expect(draft(screen("❯ \u001b[2m아직\u001b[0m 진행중"))).toBe(true);
+    expect(draft(screen("❯ \u001b[7mr\u001b[27mun"))).toBe(true);
+    expect(draft(screen("❯ \u001b[7mr\u001b[27m"))).toBe(true);
+    // a draft of several lines fills the box down to its rule
+    expect(draft(screen("❯ first line", "  second line\r\n" + RULE))).toBe(true);
+    expect(draft(screen("❯\u00a0\u001b[0m\u001b[2m아직 진행중이야?\u001b[0m"))).toBe(false);
+    expect(draft(screen("❯ \u001b[7mr\u001b[27m\u001b[2mun the tests\u001b[22m"))).toBe(false);
+    expect(draft(screen('❯ \u001b[2mTry "how does <filepath> work?"\u001b[0m'))).toBe(false);
+    // grey text wrapped over two rows is still Claude's own
+    expect(draft(screen("❯ \u001b[2mfirst grey row\u001b[0m", "  \u001b[2msecond grey row\u001b[0m\r\n" + RULE))).toBe(false);
+    expect(draft(screen("❯\u00a0"))).toBe(false);
+    expect(draft(screen("❯ \u001b[7m \u001b[27m"))).toBe(false);
+    // a paste or an image Claude folded into a placeholder is content, dim or not
+    expect(draft(screen("❯ \u001b[2m[Pasted text #1 +12 lines]\u001b[0m"))).toBe(true);
+    expect(draft(screen("❯ \u001b[2m[Image #1]\u001b[0m"))).toBe(true);
+    // a named session labels its rule
+    expect(draft(screen("❯ typed", "──── my-session ─"))).toBe(true);
+    // no rule on screen says nothing
+    expect(draft("❯ loose text\nmore")).toBe(false);
+  });
+
+  test("a viewport's colors count only when it is verified to show the live screen", () => {
+    const live = screen("❯ \u001b[2mrun the tests\u001b[0m").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+    const colors = screen("❯ \u001b[2mrun the tests\u001b[0m");
+    const bottom = { offset_from_bottom: 0 };
+    expect(viewportShowsLive(bottom, bottom, colors, live, live)).toBe(true);
+    // scrolled before or after the colored read
+    expect(viewportShowsLive({ offset_from_bottom: 12 }, bottom, colors, live, live)).toBe(false);
+    expect(viewportShowsLive(bottom, { offset_from_bottom: 3 }, colors, live, live)).toBe(false);
+    // a scroll known for one read only is no proof, whatever the text says
+    expect(viewportShowsLive({ offset_from_bottom: 12 }, null, colors, live, live)).toBe(false);
+    expect(viewportShowsLive(null, { offset_from_bottom: 12 }, colors, live, live)).toBe(false);
+    expect(viewportShowsLive(bottom, null, colors, live, live)).toBe(false);
+    // no scroll from herdr at all: the viewport's whole text must be the live screen's
+    expect(viewportShowsLive(null, null, colors, live, live)).toBe(true);
+    expect(viewportShowsLive(null, null, "● older output\r\n" + colors, live, live)).toBe(false);
+    // the live screen changed across the colored read
+    expect(viewportShowsLive(bottom, bottom, colors, live.replace("run the tests", "run the test"), live)).toBe(false);
+  });
+
+  test("bash mode, a box clipped by the pane, or a viewport that is not the live box hold a pending message", () => {
+    const draft = (ansi: string, live = ansi.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")) => claudeInputDraft(live, ansi);
+    // the Enter after a paste would run it as a command
+    expect(draft(screen("! "))).toBe(true);
+    expect(draft(screen("! echo unfinished"))).toBe(true);
+    // a draft taller than the pane: its top rule and `❯` row are above the screen
+    expect(draft(["  more of the draft", "  its last line", RULE, "  footer"].join("\r\n"))).toBe(true);
+    // the viewport scrolled into the history shows no box, or another one: only the live box counts
+    const live = screen("❯\u00a0half typed").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+    expect(claudeInputDraft(live, "\u001b[0m● earlier output\r\n" + "more of it")).toBe(true);
+    expect(claudeInputDraft(live, screen("❯ \u001b[2mhalf typed\u001b[0m".replace("half typed", "an old suggestion")))).toBe(true);
+    // colors not verified to show the live screen (null) say nothing: a box that is not empty holds,
+    // also one whose words are Claude's grey suggestion; an empty one does not
+    const grey = screen("❯ \u001b[2mrun the tests\u001b[0m");
+    expect(claudeInputDraft(grey.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ""), null)).toBe(true);
+    expect(claudeInputDraft(screen("❯\u00a0").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ""), null)).toBe(false);
+    // an empty live box sends, whatever an older box in the scrolled viewport held
+    const empty = screen("❯\u00a0").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+    expect(claudeInputDraft(empty, screen("❯ an old draft"))).toBe(false);
   });
 });
 
@@ -2664,6 +2821,8 @@ describe("an answer and the menu it was made for", () => {
     onRead?: () => void;
     /** herdr never answers what it is asked about the pane's agent */
     agentUnanswered?: boolean;
+    /** what an ANSI read shows instead of `screen`: the pane's viewport, scrolled off its live screen */
+    viewport?: string;
     /** the next screen read alone answers with this, that much later */
     nextRead?: { text: string; delay: number };
     /** herdr presses this key and its reply is lost on the way */
@@ -2689,7 +2848,7 @@ describe("an answer and the menu it was made for", () => {
       socket.on("data", (chunk) => {
         input += chunk.toString();
         if (!input.includes("\n")) return;
-        const request = JSON.parse(input.split("\n")[0]!) as { id: string; method: string; params: { keys?: string[]; text?: string } };
+        const request = JSON.parse(input.split("\n")[0]!) as { id: string; method: string; params: { keys?: string[]; text?: string; format?: string } };
         const answer = (result: unknown) => socket.end(`${JSON.stringify({ id: request.id, result })}\n`);
         const snapshotDelay = request.method === "session.snapshot" ? pane.nextSnapshotDelay : undefined;
         if (snapshotDelay !== undefined) pane.nextSnapshotDelay = undefined;
@@ -2699,7 +2858,7 @@ describe("an answer and the menu it was made for", () => {
           const once = pane.nextRead;
           pane.nextRead = undefined;
           if (once) return void setTimeout(() => answer({ read: { text: once.text } }), once.delay);
-          return void setTimeout(() => answer({ read: { text: pane.screen } }), pane.readDelay ?? 0);
+          return void setTimeout(() => answer({ read: { text: request.params.format === "ansi" ? pane.viewport ?? pane.screen : pane.screen } }), pane.readDelay ?? 0);
         }
         if (request.method === "pane.process_info") return answer({ process_info: { foreground_processes: pane.omo?.live ? [{ pid: pane.omo.pid, argv: ["omo"] }] : [] } });
         if (request.method === "agent.get" && pane.agentUnanswered) return;
@@ -2781,6 +2940,93 @@ ${omoRule}
       finally { child.kill(); await child.exited; }
     });
   }
+
+  // Claude Code 2.1.294, live: a message it holds back for an invisible character
+  const heldRule = "─".repeat(80);
+  const heldScreen = (box: string, over = `${" ".repeat(40)}Removed 1 invisible character · review and press Enter to send`) => `
+ ▐▛███▜▌   Claude Code v2.1.294
+${over}
+${heldRule}
+${box}
+${heldRule}
+  [Haiku 4.5] │ project
+`;
+
+  test("sends Claude's held message only as the card showed it: a box edited in the terminal refuses the answer", async () => {
+    await withPane("claude", "idle", heldScreen("❯ helloworld test"), async (pane) => {
+      const shown = (await card())!;
+      expect(shown.body).toBe("helloworld test");
+      // edited in the terminal after the card was read: the hint stays, the message is another one
+      pane.screen = heldScreen("❯ helloworld test and more");
+      expect(await answer(shown.id, { option_index: 0 })).toEqual({ status: 409, code: "prompt_changed" });
+      // sent from the terminal meanwhile: the hint lingers over an empty input
+      pane.screen = heldScreen("❯");
+      expect(await answer(shown.id, { option_index: 0 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(await answer(shown.id, { option_index: 1 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual([]);
+      // the card as the screen shows it now is answered with one Enter
+      pane.screen = heldScreen("❯ helloworld test");
+      const again = (await card())!;
+      expect(await answer(again.id, { option_index: 0 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["enter"]);
+    });
+  });
+
+  test("never presses Ctrl+C for a Discard tapped before Claude went to work", async () => {
+    await withPane("claude", "idle", heldScreen("❯ helloworld test"), async (pane) => {
+      const shown = (await card())!;
+      expect(labels(shown)).toEqual(["Send", "Discard"]);
+      // a turn began under the card: Ctrl+C would interrupt it and leave the message where it is
+      pane.status = "working";
+      expect(await answer(shown.id, { option_index: 1 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual([]);
+      const working = (await card())!;
+      expect(labels(working)).toEqual(["Send"]);
+      expect((await answer(working.id, { option_index: 1 })).status).toBe(400);
+      expect(pane.sent).toEqual([]);
+    });
+  });
+
+  test("forgets what the chat sent once its held message is answered: the same words after it are a new message", async () => {
+    // the hint has gone: only the chat's own send says the box holds a held message
+    const box = heldScreen("❯ samemessage", "  ✻ Cooked for 1s · done");
+    await withPane("claude", "idle", box, async (pane) => {
+      expect(await card()).toBeNull();
+      noteSubmitted("p_1", "same\u200bmessage");
+      const shown = (await card())!;
+      expect(shown.body).toBe("samemessage");
+      expect(await answer(shown.id, { option_index: 0 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["enter"]);
+      // typed or pasted again, without the character: nothing was taken out of this one
+      expect(await card()).toBeNull();
+    });
+  });
+
+  test("takes no grey placeholder or suggestion in Claude's empty box for a held message", async () => {
+    // Claude Code 2.1.294, live: the empty box's own grey text (SGR 2), as herdr's ANSI read gives it
+    const grey = (text: string) => `❯ \u001b[0m\u001b[2m${text}\u001b[0m`;
+    await withPane("claude", "idle", heldScreen("❯ helloworld test"), async (pane) => {
+      const shown = (await card())!;
+      expect(labels(shown)).toEqual(["Send", "Discard"]);
+      // sent or cleared in the terminal: the hint lingers a moment over a box that is empty again
+      for (const empty of [grey('Try "how does <filepath> work?"'), grey("run the tests")]) {
+        pane.screen = heldScreen(empty);
+        expect(await card()).toBeNull();
+        // Enter there would send Claude's suggestion, Ctrl+C would ask to leave Claude
+        expect(await answer(shown.id, { option_index: 0 })).toEqual({ status: 409, code: "prompt_changed" });
+        expect(await answer(shown.id, { option_index: 1 })).toEqual({ status: 409, code: "prompt_changed" });
+      }
+      expect(pane.sent).toEqual([]);
+      // typed text is not grey: a message of the same words is a held message
+      pane.screen = heldScreen("❯ run the tests");
+      expect((await card())?.body).toBe("run the tests");
+      // a pane scrolled into its history: the viewport's older box and its grey text say nothing
+      // about the message the live screen holds
+      pane.screen = heldScreen("❯ helloworld test");
+      pane.viewport = heldScreen(grey("run the tests"));
+      expect((await card())?.body).toBe("helloworld test");
+    });
+  });
 
   test.skipIf(process.platform !== "linux")("opens the pending OmO form, navigates to a non-default row and confirms after redraw", async () => {
     for (const box of ["❯", "❯ ", "❯\n ", "❯│"]) await withOmo(async (pane) => {
@@ -3337,6 +3583,18 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
         });
       });
     }
+  });
+
+  test("answers Claude's second option after redrawing its background-agent footer", async () => {
+    await withPane("claude", "blocked", claudeBackgroundApproval(0), async (pane) => {
+      const prompt = (await card())!;
+      pane.onSent = (sent) => {
+        if (sent === "down") pane.screen = claudeBackgroundApproval(1);
+      };
+      expect(await answer(prompt.id, { option_index: 1 })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["down", "enter"]);
+      expect(pane.sent.some((sent) => sent.startsWith("text:") || /^\d+$/.test(sent))).toBe(false);
+    });
   });
 
   test("picks Claude's model with s only where the list still shows that model under the cursor", async () => {
@@ -3898,5 +4156,285 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       expect(pane.sent).toEqual([]);
       expect((await card())!.id).not.toBe(first.id);
     });
+  });
+});
+
+// fork: Claude Code 2.1.29x screens the readers missed, answered as menus (arrows + enter), never by typing the number
+describe("Claude Code 2.1.29x approvals and questions", () => {
+  const RULE = "─".repeat(80);
+  const DASH = "╌".repeat(80);
+  test("accepts its exact background-agent footer, but not unknown trailing text", () => {
+    const footer = CLAUDE_BACKGROUND_APPROVAL_FOOTER;
+    for (const accepted of [
+      footer,
+      "Esc to cancel · Tab to amend",
+      "Esc to cancel · Tab to amend · ctrl+e to explain",
+      "Esc to cancel · ctrl+e to explain",
+      "Esc to cancel",
+    ]) {
+      const prompt = parseInteractivePrompt("claude", claudeBackgroundApproval(1, accepted));
+      expect(prompt).toMatchObject({
+        kind: "approval",
+        title: "Bash command · from the general-purpose agent",
+        question: "Do you want to proceed?",
+      });
+      expect(labels(prompt)).toEqual(["Yes", "Yes, and don't ask again for: systemctl --user start demo.service", "No"]);
+    }
+    for (const unknown of [
+      "Esc to cancel Password:",
+      "Esc to cancel · Password:",
+      "Esc to cancel · unknown trailing text",
+      `${footer} · Password:`,
+    ]) {
+      expect(parseInteractivePrompt("claude", claudeBackgroundApproval(1, unknown))).toBeNull();
+    }
+  });
+
+  test("an approval whose hint is Esc to cancel alone is a card", () => {
+    const screen = [
+      "● Bash(systemctl --user restart demo.service)",
+      "  ⎿  Waiting…",
+      "",
+      RULE,
+      " Bash command",
+      " Restart the demo service",
+      DASH,
+      " │ systemctl --user restart demo.service",
+      DASH,
+      " │ Permission rule Bash(systemctl --user restart:*) requires confirmation for this command.",
+      " /permissions to update rules",
+      "",
+      " Do you want to proceed?",
+      "   1. Yes",
+      " ❯ 2. Yes, and don't ask again for: systemctl *",
+      "   3. No",
+      "",
+      " Esc to cancel",
+      "",
+    ].join("\n");
+    const prompt = parseInteractivePrompt("claude", screen)!;
+    expect(prompt).toMatchObject({ kind: "approval", title: "Bash command", question: "Do you want to proceed?" });
+    expect(prompt.options.map((option) => option.label)).toEqual(["Yes", "Yes, and don't ask again for: systemctl *", "No"]);
+    expect(answerKeys(prompt, { option_index: 0 }).flatMap((step) => step.keys ?? [])).toEqual(["up", "enter"]);
+  });
+
+  test("a long command pushes the panel's title off the screen: still an approval", () => {
+    const screen = [
+      ...Array.from({ length: 24 }, (_, index) => ` │ echo line ${index}`),
+      DASH,
+      " A variable in this command can't be checked before it runs",
+      " │ Permission rule Bash(systemctl --user daemon-reload:*) requires confirmation for this command.",
+      " /permissions to update rules",
+      "",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+      "",
+      " Esc to cancel · Tab to amend",
+      "",
+    ].join("\n");
+    const prompt = parseInteractivePrompt("claude", screen)!;
+    expect(prompt).toMatchObject({ kind: "approval", title: "Command approval", question: "Do you want to proceed?" });
+    expect(prompt.options.map((option) => option.label)).toEqual(["Yes", "No"]);
+  });
+
+  test("a question whose typed-answer row already holds a draft keeps it as the typed answer", () => {
+    const screen = [
+      "❯ which session should get the notes?",
+      RULE,
+      " ☐ Session",
+      "",
+      "Two sessions are open. Which one?",
+      "",
+      "  1. builder-a",
+      "     started 15 hours ago",
+      "  2. builder-b",
+      "     started 13 hours ago",
+      "❯ 3. neither, tell me their names",
+      RULE,
+      "  4. Chat about this",
+      "",
+      "Enter to select · ↑/↓ to navigate · ctrl+g to edit in VS Code · Esc to cancel",
+      "",
+    ].join("\n");
+    const prompt = parseInteractivePrompt("claude", screen)!;
+    expect(prompt).toMatchObject({ kind: "question", title: "Session", question: "Two sessions are open. Which one?", custom_option_index: 2 });
+    expect(prompt.options.map((option) => option.label)).toEqual(["builder-a", "builder-b"]);
+    expect(answerKeys(prompt, { option_index: 1 }).flatMap((step) => step.keys ?? [])).toEqual(["up", "enter"]);
+  });
+
+  test("an answered approval above another program's bare Esc to cancel hint is no card", () => {
+    const screen = [
+      RULE,
+      " Bash command",
+      " sudo -v",
+      "",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+      "",
+      " Esc to cancel · Tab to amend",
+      "Password:",
+      "Esc to cancel",
+      "",
+    ].join("\n");
+    expect(parseInteractivePrompt("claude", screen)).toBeNull();
+  });
+
+  test("an answered approval whose hint a narrow pane wrapped, above another bare hint, is no card", () => {
+    const screen = [
+      RULE,
+      " Bash command",
+      " sudo -v",
+      "",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+      "",
+      " Esc to",
+      " cancel · Tab to amend",
+      "Password:",
+      "Esc to cancel",
+      "",
+    ].join("\n");
+    expect(parseInteractivePrompt("claude", screen)).toBeNull();
+  });
+
+  test("an option that names Esc to cancel in its own text keeps the approval a card", () => {
+    const screen = [
+      RULE,
+      " Bash command",
+      " echo Esc to cancel",
+      "",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. Yes, and don’t ask again for: echo Esc to cancel:*",
+      "   3. No",
+      "",
+      " Esc to cancel · Tab to amend",
+      "",
+    ].join("\n");
+    expect(parseInteractivePrompt("claude", screen)?.options.length).toBe(3);
+  });
+
+  test("a command line that reads Tip: is part of a scrolled approval's asking", () => {
+    const scrolledApproval = (tip: string) => [
+      " │ cat <<EOF",
+      ` │ Tip: ${tip}`,
+      " │ EOF",
+      DASH,
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+      "",
+      " Esc to cancel · Tab to amend",
+      "",
+    ].join("\n");
+    const hello = parseInteractivePrompt("claude", scrolledApproval("hello"))!;
+    const changed = parseInteractivePrompt("claude", scrolledApproval("$(rm -rf important)"))!;
+    expect(changed.body).toContain("rm -rf important");
+    expect(changed.id).not.toBe(hello.id);
+  });
+
+  test("a boxed line and a dashed rule further up the screen do not make printed rows an approval", () => {
+    const screen = [
+      " │ earlier boxed output",
+      DASH,
+      "● Here is what the dialog says:",
+      "",
+      "  Do you want to proceed?",
+      "  ❯ 1. Yes",
+      "    2. No",
+      "",
+      "  Esc to cancel",
+      "",
+    ].join("\n");
+    expect(parseInteractivePrompt("claude", screen)).toBeNull();
+  });
+
+  test("a printed approval with no panel left above it is no card", () => {
+    const screen = ["Printed example", "Do you want to proceed?", "❯ 1. Yes", "  2. No", "Esc to cancel", ""].join("\n");
+    expect(parseInteractivePrompt("claude", screen)).toBeNull();
+  });
+
+  test("a scrolled approval is another asking when a command line far above the question changes", () => {
+    const scrolledApproval = (first: string) => [
+      ` │ ${first}`,
+      ...Array.from({ length: 12 }, () => " │ echo same"),
+      DASH,
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+      "",
+      " Esc to cancel · Tab to amend",
+      "",
+    ].join("\n");
+    const harmless = parseInteractivePrompt("claude", scrolledApproval("echo harmless"))!;
+    const changed = parseInteractivePrompt("claude", scrolledApproval("rm -rf important"))!;
+    expect(changed.body).toContain("rm -rf important");
+    expect(changed.id).not.toBe(harmless.id);
+  });
+
+  test("a menu ending in Chat about this with no question chip or rule over it has no typed-answer row", () => {
+    const screen = [
+      "Choose an item",
+      "  1. Keep",
+      "❯ 2. Delete",
+      "  3. Chat about this",
+      "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel",
+      "",
+    ].join("\n");
+    expect(parseInteractivePrompt("claude", screen)?.custom_option_index ?? null).toBeNull();
+  });
+
+  // live on 2.1.295: the draft stays in its row when the cursor moves up, and the hint loses ctrl+g
+  test("a drafted question stays a card with the cursor on another row", () => {
+    const screen = [
+      RULE,
+      " ☐ Pick",
+      "",
+      "Which fruit?",
+      "",
+      "  1. apple",
+      "     Apple",
+      "❯ 2. pear",
+      "     Pear",
+      "  3. my draft",
+      RULE,
+      "  4. Chat about this",
+      "",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+      "",
+    ].join("\n");
+    const prompt = parseInteractivePrompt("claude", screen)!;
+    expect(prompt).toMatchObject({ kind: "question", title: "Pick", custom_option_index: 2 });
+    expect(prompt.options.map((option) => option.label)).toEqual(["apple", "pear"]);
+    expect(answerKeys(prompt, { option_index: 0 }).flatMap((step) => step.keys ?? [])).toEqual(["up", "enter"]);
+    expect(answerKeys(prompt, { custom_text: "plum" }).flatMap((step) => step.keys ?? [`text:${step.text}`]))
+      .toEqual(["down", "ctrl+k", "ctrl+u", "text:plum", "enter"]);
+  });
+
+  // live on 2.1.295: the typed text went in after the draft, "neither, tell me their namesbuilder-c"
+  test("a typed answer replaces the draft in the row instead of joining it", () => {
+    const screen = [
+      RULE,
+      " ☐ Session",
+      "",
+      "Two sessions are open. Which one?",
+      "",
+      "  1. builder-a",
+      "     started 15 hours ago",
+      "  2. builder-b",
+      "     started 13 hours ago",
+      "❯ 3. neither, tell me their names",
+      RULE,
+      "  4. Chat about this",
+      "",
+      "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel",
+      "",
+    ].join("\n");
+    const prompt = parseInteractivePrompt("claude", screen)!;
+    expect(answerKeys(prompt, { custom_text: "builder-c" }).flatMap((step) => step.keys ?? [`text:${step.text}`]))
+      .toEqual(["ctrl+k", "ctrl+u", "text:builder-c", "enter"]);
   });
 });

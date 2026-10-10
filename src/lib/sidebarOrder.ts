@@ -11,8 +11,8 @@
  * `state_change_seq` each pane had when it was last on screen. A DONE whose counter has not moved
  * past that was looked at, and is drawn as ready.
  */
-import type { AgentStatus, PaneInfo, SessionSnapshot } from "../../shared/protocol.ts";
-import { knownStatus } from "./status.ts";
+import type { AgentStatus, HerdrPane, PaneInfo, SessionSnapshot } from "../../shared/protocol.ts";
+import { knownStatus, paneStatus } from "./status.ts";
 
 /** pane id → the `state_change_seq` it had when last viewed */
 export type SeenRecord = Readonly<Record<string, number>>;
@@ -31,10 +31,11 @@ export function stateSeqs(snapshot: Pick<SessionSnapshot, "agents"> | null | und
  * What `liveSeqs` remembers between snapshots: each pane's last status, the changes it dated
  * itself (`bumped`), and for each pane the last stand-in herdr's own counter replaced
  * (`promoted`, stand-in → counter), so a record made at the stand-in can follow it (`carrySeen`),
- * and herdr's own counter per pane at the last call (`real`).
+ * herdr's own counter per pane at the last call (`real`), and how many herdr restarts it noticed
+ * (`restarts`).
  */
-export interface SeqMemory { status: Map<string, unknown>; bumped: Map<string, number>; promoted: Map<string, { from: number; to: number }>; real: Map<string, number> }
-export const newSeqMemory = (): SeqMemory => ({ status: new Map(), bumped: new Map(), promoted: new Map(), real: new Map() });
+export interface SeqMemory { status: Map<string, unknown>; bumped: Map<string, number>; promoted: Map<string, { from: number; to: number }>; real: Map<string, number>; restarts: number }
+export const newSeqMemory = (): SeqMemory => ({ status: new Map(), bumped: new Map(), promoted: new Map(), real: new Map(), restarts: 0 });
 
 /**
  * `stateSeqs`, kept in step with pushed statuses. A pane-status push lands in the snapshot at once
@@ -45,7 +46,7 @@ export const newSeqMemory = (): SeqMemory => ({ status: new Map(), bumped: new M
  * and the swap is kept in `memory.promoted`. A change that arrives with a new counter of herdr's (a
  * roster read that saw it first) keeps that counter, so herdr's order between changes stands, and
  * drops the pane's earlier stand-in, which dated an older change. A counter that went back means
- * herdr restarted: every stand-in is dropped. Mutates `memory`.
+ * herdr restarted: every stand-in is dropped and `memory.restarts` goes up. Mutates `memory`.
  */
 export function liveSeqs(snapshot: Pick<SessionSnapshot, "agents" | "panes"> | null | undefined, memory: SeqMemory): Map<string, number> {
   const seqs = stateSeqs(snapshot);
@@ -53,6 +54,7 @@ export function liveSeqs(snapshot: Pick<SessionSnapshot, "agents" | "panes"> | n
   if ([...seqs].some(([id, real]) => real < (memory.real.get(id) ?? real))) {
     memory.bumped.clear();
     memory.promoted.clear();
+    memory.restarts++;
   }
   let top = Math.max(0, ...seqs.values(), ...memory.bumped.values());
   for (const pane of panes) {
@@ -98,7 +100,8 @@ export function isSeenDone(pane: Pick<PaneInfo, "pane_id" | "agent_status">, seq
 }
 
 /** The status to draw: a DONE already looked at here reads as ready, as herdr's own idle after a view. */
-export function shownStatus(pane: Pick<PaneInfo, "pane_id" | "agent_status">, seqs: ReadonlyMap<string, number>, seen: SeenRecord | null): AgentStatus | undefined {
+export function shownStatus(pane: Pick<HerdrPane, "pane_id" | "agent_status" | "background_wait">, seqs: ReadonlyMap<string, number>, seen: SeenRecord | null): AgentStatus | undefined {
+  if (pane.background_wait) return paneStatus(pane);
   return seen && isSeenDone(pane, seqs, seen) ? "idle" : pane.agent_status;
 }
 
@@ -161,6 +164,15 @@ export function pruneSeen(record: SeenRecord, panes: readonly Pick<PaneInfo, "pa
 }
 
 /**
+ * The record once herdr restarted (`SeqMemory.restarts` went past `handled`, the count the record
+ * was last kept at): none of it. `pruneSeen` drops only entries above a pane's new counter, and one
+ * that happens to equal it would mark a finish of the new session as looked at (#591).
+ */
+export function seenAfterRestart(record: SeenRecord, restarts: number, handled: number): SeenRecord {
+  return restarts > handled && Object.keys(record).length > 0 ? {} : record;
+}
+
+/**
  * Rows in Activity order: a blocked one first, then the most recent state change, then the
  * order given. State is not ranked otherwise: ranking moved a row the moment its state changed (a
  * pane sent a message fell below every DONE while it ran and jumped back when it finished), where
@@ -191,10 +203,19 @@ export function loadSeen(machineId: string): SeenRecord | null {
   }
 }
 
-/** Whether this browser has a record for any PC: the setting was turned on here before. */
+/**
+ * Whether this browser has a record for any PC: the setting was turned on here before. Only a
+ * record `loadSeen` accepts counts, so a damaged one does not keep the first use from starting quiet.
+ */
 export function anySeen(): boolean {
   try {
-    for (let index = 0; index < localStorage.length; index++) if (localStorage.key(index)?.startsWith(seenKey(""))) return true;
+    const prefix = seenKey("");
+    const ids: string[] = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(prefix)) ids.push(key.slice(prefix.length));
+    }
+    return ids.some((machineId) => loadSeen(machineId) !== null);
   } catch { /* storage blocked */ }
   return false;
 }

@@ -41,14 +41,14 @@ https://github.com/user-attachments/assets/2f030569-1004-425e-835d-9e775ec6e4c8
 
 ## Quick start
 
-> **Want a look first?** [Try it in your browser](https://devswha.github.io/herdr-web-ui/demo/): the app on a fictional session, nothing to install. Nothing in it is live.
+> **Want a look first?** [Try it in your browser](https://herdrweb.dev/demo/): the app on a fictional session, nothing to install. Nothing in it is live.
 
 > **Setting it up with a coding agent?** Point it at [INSTALL.md](../INSTALL.md), a step-by-step guide written for agents.
 
 **1. Install it** with one line, on Linux (x64, arm64) or macOS:
 
 ```bash
-curl -fsSL https://devswha.github.io/herdr-web-ui/install.sh | sh
+curl -fsSL https://herdrweb.dev/install.sh | sh
 ```
 
 It does, in order, only what is not done yet:
@@ -138,7 +138,18 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **omo** | Native session file, found through the pane's process tree | — use Terminal |
 | **gjc** | Native session file, from the session directory gjc keeps open | — use Terminal |
 | **pi** | Native session file, resolved through herdr; after `/tree`, the branch in play | ✓ its dialogs: a question, a confirmation, an answer typed in |
+| **OpenCode** | Native session in OpenCode 2's own database, resolved through herdr: `~/.local/share/opencode/opencode.db` (`%USERPROFILE%\.local\share\opencode\opencode.db` on Windows), or where the server's `XDG_DATA_HOME` or `OPENCODE_DB` puts it | — use Terminal |
+| **Devin CLI** | Native SQLite session, showing the active branch when herdr or the live process explicitly identifies the session; otherwise terminal text | — use Terminal |
 | **Anything else** | The terminal's text | — use Terminal |
+
+Devin sessions are never selected by directory or recency alone. A plain `devin` shows the
+terminal text, since herdr does not report its session without its Devin integration; a session
+started with `devin --resume <id>` (or `-r <id>`, as Devin suggests when it exits) is a chat.
+Missing, ambiguous or
+unreadable history uses the terminal-text fallback, including histories beyond the reader's
+5,000-node or 8 MiB bounds. Long tool output is shortened with a truncation marker; use
+Terminal for the rest. The database is opened read-only, though SQLite may create its
+WAL coordination files beside it.
 
 When the last visible line is a familiar password, SSH passphrase or PIN request, both
 views show a **Password or PIN** field. It hides what you type and sends it directly
@@ -154,6 +165,8 @@ model's window, which is the file pi reads its own providers from; a model it st
 for shows no ring rather than a guessed one, because pi answers those from a catalogue or a
 running llama.cpp server that this app cannot ask. The model and reasoning effort come from what the session recorded, never from answer text. A todo list shows where the agent recorded it, in the turn's work block: Claude Code's `TodoWrite`, Codex's `update_plan`, or omp, omo and gjc todo calls. Plain-text plans and Claude Code `TaskCreate` / `TaskUpdate` calls are not currently reconstructed. Details and verification are in the [chat-mode audit](chat-mode-audit.md).
 
+Background tasks have a button by the message box, with a count while some run: an OmO pane's `task` children, and a Claude Code pane's subagents (the `Agent` tool), read from the session's own files. A Claude Code pane's background commands (`run_in_background`, Ctrl+B, or one moved there by its timeout) are listed with them. It lists what runs and the newest ten that ended in the last day, and the sidebar badge shows the running count. A Claude Code turn that ends while work it started still runs reads **BG**, not DONE: that work's notice starts the next turn by itself, and the finish is alerted once, when that turn ends (a turn is held at most 30 minutes). A subagent that ends leaves a card in the chat with its answer, and a Claude Code subagent whose pane no longer runs that session reads as lost.
+
 ## Features
 
 | | |
@@ -165,7 +178,7 @@ running llama.cpp server that this app cannot ask. The model and reasoning effor
 | **Compose** | `/` commands and `@` file mentions, any file or image up to 8 MB attached by path, and a draft per pane. Send during work schedules a next-turn message; use its ↑ Send now action to send it now. |
 | **Follow every agent** | Live RUN / INPUT / DONE / READY status for all panes, and alerts when an agent needs input, finishes or its terminal ends. |
 | **Open what agents make** | A file path in an answer opens in a viewer (images, video, audio, PDF, text), or find it with **Browse files**, and download it to your phone. |
-| **Manage sessions** | Start an agent in a folder you type or pick with **Browse**. In New workspace, Browse filters the currently loaded folders as you type (case-insensitive); open a result, then choose **Use this folder**. It does not search subfolders or folders beyond the displayed 500. Add a tab to a workspace (as herdr's prefix+c), switch tabs from the strip over the pane, rename workspaces and panes, reorder workspaces, and jump anywhere from the command palette. |
+| **Manage sessions** | Start an agent in a folder you type or pick with **Browse**. In New workspace, Browse filters the currently loaded folders as you type (case-insensitive); open a result, then choose **Use this folder**. It does not search subfolders or folders beyond the displayed 500. Add a tab to a workspace (as herdr's prefix+c), switch tabs from the strip over the pane, rename workspaces and panes, reorder workspaces (drag a row, or on a phone long-press it and drag; the row's ⋯ also has Move up and Move down), and jump anywhere from the command palette. |
 | **Speak instead of typing** | A mic beside Attach in the composer and beside Send in the terminal input line. Hold to talk or tap twice; the words land at the caret and are never sent by themselves. See [Voice input](#voice-input). |
 | **Watch your plan limits** | Beside Settings, how much of each AI subscription signed in on the PC is used, or what is left: the week's or the session's limit per account, and every limit with its reset time on a tap. See [Subscription usage](#subscription-usage). |
 | **Make it yours** | English, Korean, Japanese or Simplified Chinese, following the browser or chosen in Settings. Dark, light or system theme, compact density, terminal and chat font sizes, a resizable composer, Enter behavior and thinking visibility. |
@@ -179,7 +192,9 @@ The bridge claims the same message ID for Send now and an automatic send, so the
 deliver it. Older bridges keep the draft and ask for an update instead of changing queueing into
 an immediate send. Connection loss pauses automatic delivery; uncertain text can be copied or
 discarded after checking the terminal. Previously held browser messages still need **Send now**
-or **Discard**.
+or **Discard**. A message is never pasted over text typed in Claude Code's own input box: while
+that box holds a draft the message stays in the list with the reason, and **Send now** delivers it
+once the draft is sent or cleared in the terminal.
 
 ## Subscription usage
 
@@ -214,7 +229,9 @@ Only providers with a sign-in are shown; a GitHub account without Copilot is lef
 
 Turn it on in **Settings → Voice input**, then hold the mic beside Attach (chat) or Send (the terminal input line) and speak, or tap it once to start and again to finish. A pill above the box shows that it is recording, with the level of your voice and a timer; Esc or ✕ cancels. On a desktop, hold Ctrl+Shift+Space (Cmd+Shift+Space on a Mac). The text goes in at the caret and is never sent by itself, so you can read it first.
 
-- **With an OpenAI API key** (recommended for Korean, Japanese and Chinese mixed with code terms): paste it under **OpenAI API key** in the same section, or set `HERDR_WEB_OPENAI_API_KEY` for the server. The server sends each recording to `gpt-transcribe` with the app's language and English, and the pane's slash commands as hints. In chat, a second call tidies the text (fillers, spacing) and leaves code, paths and flags as you said them; the terminal keeps the words as transcribed unless you turn tidying on there.
+- **With an OpenAI API key** (recommended for Korean, Japanese and Chinese mixed with code terms): paste it under **OpenAI API key** in the same section, or set `HERDR_WEB_OPENAI_API_KEY` for the server. The server sends each recording to `gpt-transcribe` with the dictation language and English, and the pane's slash commands as hints. In chat, a second call tidies the text (fillers, spacing) and leaves code, paths and flags as you said them; the terminal keeps the words as transcribed unless you turn tidying on there.
+- **Dictation language** (same section) is the language you speak. Auto listens for the app's language. While the app's language follows the browser and the browser's first language is one the app is not translated into (Hungarian, German, …), Auto listens for that one instead, so you are not heard as English. Pick another from the list when you dictate in a language your browser does not put first.
+  Auto uses browser language tags with a two-letter primary code, which both recognition paths accept. Other tags use the app's language, shown in the Auto label.
 - **Without a key**, the browser recognizes the speech itself. Chrome and Edge send the audio to Google or Microsoft for that; Safari uses Apple's.
 - **The key stays on the server.** It is kept in `voice.json` under `HERDR_WEB_STATE_DIR` (readable by your user only) and never sent to a browser. Every device that can type into your terminals (your own Tailscale login, a paired device, the token) dictates with it, and the use is billed to that key. A device paired to watch only can neither dictate nor change the key.
 - **Silence is not sent.** The recorder runs only while it hears speech, so the pauses before, between and after your words are neither uploaded nor billed. A recording with no speech is not sent at all.
@@ -235,7 +252,7 @@ Only devices in your tailnet can open that address. Your own devices get in with
 **Settings → Phone & devices** in the app does this step for you as far as it can: it shows the address Tailscale already serves for this PC as a QR code, or the exact command still to run, and the address it will give.
 
 1. Open the address.
-2. Install the app: in Safari, choose **Share → Add to Home Screen**; in Chrome, choose **Install app**.
+2. Install the app: in Safari, choose **Share → Add to Home Screen**; in Chrome, choose **Install app**. Each PC installs as an app of its own: set `HERDR_WEB_APP_NAME` on each to tell them apart (see [Configuration](#configuration)).
 3. Open the **⋯** menu at the top right and tap **Alerts** to turn on alerts for that device. iPhone needs iOS 16.4+ and the home-screen app.
 
 To check alerts later, choose **Settings → Alerts → Send test**. The result tells you
@@ -243,7 +260,7 @@ whether the test was sent or failed; a missing subscription offers **Turn alerts
 
 On a phone:
 - Agent panes open in the chat.
-- The terminal gets a key bar above the keyboard (Esc, Tab, Ctrl, Alt, Shift, Enter, arrows, Ctrl+C).
+- The terminal gets a key bar above the keyboard (Esc, Tab, Ctrl+C, Ctrl, Alt, Shift, Enter, arrows).
   Ctrl, Alt and Shift stay held until tapped again and combine with each other.
   Enable direct terminal typing with the keyboard button to use them with letters and
   symbols. Herdr encodes each chord for the program's keyboard protocol; legacy
@@ -403,9 +420,11 @@ Observe connections cannot take a pane, and a displaced bridge never takes it ba
 | `HERDR_WEB_OPENAI_API_KEY` | unset | OpenAI API key for [voice input](#voice-input). Set here, it cannot be changed from the app |
 | `HERDR_WEB_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API root for voice input |
 | `HERDR_WEB_AUTO_UPDATE` | `0` | `1` installs new releases without asking |
+| `HERDR_WEB_TELEMETRY` | unset (on) | `0` sends no [anonymous usage counts](#anonymous-usage-counts), whatever the switch in Settings says. `DO_NOT_TRACK=1` does the same |
 | `HERDR_WEB_PUSH_SUBJECT` | this repository's URL | VAPID contact URL or `mailto:` address |
 | `HERDR_WEB_BUNDLE_MANIFEST` | unset | Remote-PC bundle manifest (path or URL) that overrides local and published bundles |
 | `HERDR_WEB_HERDR_BIN` | `herdr` | herdr executable used for terminal attach |
+| `HERDR_WEB_APP_NAME` | unset (`herdr`) | The name the installed app has on a phone or computer, for example the PC's name. Each PC installs as an app of its own, and without it they are all called `herdr`. An app already installed takes the new name when the browser next updates it, usually within a day or two, without a reinstall. Keep it short: a home screen cuts a long label |
 | `HERDR_WEB_PASTE_DIR` | `<pane cwd>/.herdr-web-ui` | Where pasted and attached files are saved: an absolute path or `~/…`. Set it to keep them out of your projects; an agent may then ask before reading one. It covers the panes of this server's PC; a remote PC keeps the default |
 | `CODEX_HOME` | `~/.codex` | Where Codex sessions are read |
 
@@ -427,9 +446,17 @@ herdr itself is updated from **Settings → About → Update herdr**. herdr refu
 
 This is for Linux and macOS. On Windows, and for a remote PC, update herdr on that PC.
 
+## Anonymous usage counts
+
+The app tells its maintainer how many installs there are, which versions they run and which countries they are in, and nothing else. It sends one small message when it is first installed and one each time it runs a new version, never in between. The first time you open the app, a line under the header says so, with **What is sent** and **Turn off**. Nothing is sent before that line has been shown, and the first message waits ten minutes after it, so **Turn off** on that line stops it.
+
+A message holds the event (`install` or `update`), a random ID made on this PC, the app's version and the version an update replaced, the OS and CPU architecture, and how the app was installed (herdr plugin, `bun run start`, or `bun run server`). Nothing about your terminals, agents, files, workspaces or accounts is in it. The receiver ([`telemetry/`](../telemetry/README.md)) keeps those fields, the day and the country the message came from (two letters, such as `KR`, worked out by its host from the connection), and never stores your IP address or anything finer than the country.
+
+**Settings → About → Anonymous usage counts** shows the next message exactly as it would be sent, and its switch turns the counts off for this PC. `HERDR_WEB_TELEMETRY=0` or `DO_NOT_TRACK=1` in the server's environment turns them off whatever the switch says, and they are always off in CI. A remote PC's bridge sends nothing.
+
 ## Keyboard shortcuts
 
-`Mod` is **⌘** on macOS and **Ctrl** elsewhere. Every shortcut adds Shift, so the terminal keeps its own Ctrl keys.
+`Mod` is **⌘** on Apple platforms and **Ctrl** elsewhere. Global app shortcuts add Shift, so the terminal keeps its own Ctrl keys. These are the defaults:
 
 | Shortcut | Action |
 | --- | --- |
@@ -439,6 +466,20 @@ This is for Linux and macOS. On Windows, and for a remote PC, update herdr on th
 | `Mod+Shift+O` | New workspace (`Mod+Shift+N` too, in the installed app: a Chrome tab keeps `Ctrl+Shift+N` for an incognito window) |
 | `Mod+Shift+↑` / `↓` | Previous / next pane |
 | `Mod+Shift+,` | Settings |
+
+**Settings → Shortcuts** changes the final key of each app binding or turns it off. Settings
+are saved in this browser, not on the remote PC. The command palette shows the current bindings
+and omits disabled ones. Reset shortcuts restores the defaults. Hold-to-dictate
+(`Mod+Shift+Space`) remains fixed.
+
+Known browser/OS reservations are marked, but other combinations can also be intercepted by
+your browser, OS or extensions. Installed-app mode may behave differently. While an IME is
+composing, keys stay with it. In text fields, Mod+Shift+arrows keep their text-selection behavior.
+List and tab controls also have focus-local keys; those do not become global terminal shortcuts.
+
+On a phone, use the header and More menu for app actions; Command palette is available there
+without a shortcut. The terminal key bar is configured separately under **Settings → Terminal**.
+An external keyboard uses the same app bindings as a desktop.
 
 Enter sends and Shift+Enter adds a line. Settings can switch sending to Mod+Enter.
 
@@ -524,7 +565,7 @@ Samsung Internet has a forced dark mode that repaints every page, including one 
 
 All three are in the herdr plugin marketplace too, and each does something this app does not. [collie](https://github.com/AltanS/collie) is a mobile terminal for herdr, tmux and zellij, with a status dashboard, a key pad, quick replies and voice input, served over Tailscale by its own bridge. [roamgate](https://github.com/powerfooI/roamgate) is a browser client for herdr with a file explorer and diff annotations, installed by its own script. [herdr-remote](https://github.com/dcolinmorgan/herdr-remote) is a macOS menu-bar app with a phone dashboard and a Telegram bot behind a relay and a free tunnel.
 
-herdr web ui reads the agent's own transcript, so Claude Code, Codex, omp, omo, gjc and pi panes are a chat with the work folded per turn, and a prompt card is checked against the live menu before its answer is typed. The terminal is the same live pane as your TUI, other PCs join over SSH from the sidebar, and it installs and updates as a herdr plugin, with no server or account of its own. It brings no tunnel: you reach it over Tailscale, SSH or your own HTTPS proxy. If you want tmux or zellij, diffs, Telegram or a tunnel out of the box, one of the others is the better fit.
+herdr web ui reads the agent's own transcript, so Claude Code, Codex, omp, omo, gjc, pi, OpenCode and identifiable Devin CLI panes are a chat with the work folded per turn. Supported prompt cards are checked against the live menu before an answer is typed; Devin prompts use Terminal. The terminal is the same live pane as your TUI, other PCs join over SSH from the sidebar, and it installs and updates as a herdr plugin, with no server or account of its own. It brings no tunnel: you reach it over Tailscale, SSH or your own HTTPS proxy. If you want tmux or zellij, diffs, Telegram or a tunnel out of the box, one of the others is the better fit.
 </details>
 
 <details>
