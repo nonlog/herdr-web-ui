@@ -1900,7 +1900,6 @@ export function PaneTerminal({
     } catch {
       /* not laid out yet; the ResizeObserver will follow up */
     }
-    socket.attach(paneId, term.cols, term.rows, chatViewRef.current || localGridRef.current);
     // out of use (the pane closed in herdr and the app moved on to the next one, or a reload behind
     // another app), the attach adopts the pane's size; the refit takes it once the user is here
     const away = !inUse();

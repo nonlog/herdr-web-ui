@@ -196,13 +196,8 @@ export async function checkPaneSwitchKeepsTerminalSize(browser: Browser, origin:
     // a resize that should not happen gets this long to show up: the grid's ResizeObserver waits 120 ms
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     const sent = (await framesOf(other)).slice(before).filter((f) => f.dir === "out" && (f.type === "attach" || f.type === "resize"));
-    // The upstream background observer can resume a pane during the pointer
-    // transition and send another keep_size attach. The invariant is that
-    // every attachment adopts the grid, and none resizes the shared PTY.
-    assert.ok(sent.length > 0, "the picked pane attaches in its own lens");
-    assert.deepEqual([...new Set(sent.map((frame) => JSON.stringify(frame)))],
-      [JSON.stringify({ dir: "out", type: "attach", keep_size: true })],
-      "the picked pane never attaches with geometry ownership or resizes");
+    assert.deepEqual(sent, [{ dir: "out", type: "attach", keep_size: true }],
+      "the picked pane attaches exactly once, adopting the shared grid without resizing it");
     assert.equal(await size(), desktopSize, "picking a chat-lens pane leaves the desktop's grid");
     console.log(`PASS picking a chat-lens pane from a terminal-lens pane leaves the shared grid at ${desktopSize}`);
   } finally {

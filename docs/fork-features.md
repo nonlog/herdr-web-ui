@@ -8,8 +8,7 @@
 
 - Fork：`nonlog/herdr-web-ui`；插件 ID 仍为 `devswha.herdr-web-ui`，不得因仓库名称不同而更改。
 - Windows 工作区：`D:\Workspace\herdr-web-ui`。
-- 此次同步前的共同祖先：`50db970ee563bdba084ae499a2fc1f7aa29e5031`。
-- 此次同步目标：上游 v0.4.1，`b223a3efa5f7ae20a559d57e63afb21b0acd3b7c`。
+- 上游同步：最初吸收 v0.4.1 后，继续合并 v0.4.5（`21d1b9208ac489f8690fe8ba758dc5cd73842cf6`），保留完整两侧提交历史；之后由 `docs/upstream-sync-state.json` 记录已验证的上游基线。
 - 验证使用的 Herdr 基线：0.9.3；原生 Windows 不具备直接 `terminal attach`，不能误当成 Unix 平台。
 - 只向用户 Fork 推送，不向上游提交 PR。所有助手创建的提交，author 与 committer 均为 `Codex <codex@openai.com>`。
 
@@ -20,7 +19,7 @@
 | 原生 Windows 实时终端 | `server/terminal-control.ts`、`server/index.ts`、`server/terminal-control.contract.test.ts` | `terminal session control` 提供真实 ANSI 帧；无需 Windows node-pty sidecar；保持输入就绪、接管、连接竞争重试、终端更换后的恢复。 |
 | 三种终端传输 | `server/index.ts`、`server/mirror.ts`、`shared/protocol.ts` | Unix direct attach、Windows control、旧桥接 mirror 分开处理；不要把所有 Windows 会话降回轮询截图。 |
 | Codex Windows Chat mode | `server/codex.ts`、`server/codex.test.ts`、`server/windows-native.test.ts` | 同时识别普通和带 `\\?\` 前缀的 cwd / rollout 路径；规范化后仍校验文件位于会话目录内。 |
-| Codex 跨目录恢复会话 | `codexTranscriptRows`、`cwdVariants`、`CWD_MATCH`、`codexTranscriptPath` | Windows 恢复选择器切到其他目录时，使用有界候选与唯一、充分的屏幕匹配；歧义时拒绝猜测，不选择错误会话。 |
+| Codex 跨目录恢复会话 | `codexTranscriptRows`、`storedCwdCondition`、`codexTranscriptPath` | 合并上游更完整的 Windows cwd 条件与路径大小写安全检查；Windows 恢复选择器切到其他目录时，仍使用有界候选与唯一、充分的屏幕匹配；歧义时拒绝猜测，不选择错误会话。 |
 | 公网滚轮请求合并 | `src/lib/terminalWheel.ts` 及测试、`PaneTerminal.tsx` | 应用内滚动将像素/行/页归一化，约 40 ms 合并一批，保留滚轮速度设置，避免高延迟链路累积大量重绘请求。 |
 | 手机不争抢 PTY 尺寸 | `PaneTerminal.tsx`、`scripts/chat-size-regression.ts` | 手机 `attach` 使用 `keep_size:true`；焦点、键盘、字体、视口、聊天/终端切换不触发共享 PTY resize；显示较大网格时允许横向平移。 |
 | 接入时的几何与画面顺序 | `server/index.ts`、双客户端浏览器回归 | direct attach 的 observer / keep-size 客户端也必须先收到共享 geometry 再收到 ANSI replay，避免按手机初始小网格解析宽画面造成截断。 |
@@ -48,6 +47,10 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 ## 本次吸收的上游功能
 
 同步保留上游提交历史，不重写为一个无法追踪的源码拷贝。主要变化包括：v0.4.1 / remote bundle 21、分页设置、可定制手机按键栏、组合键和 IME 修复、桥接端待发送消息生命周期、Claude `/effort` 选择卡和命令回复、Agent 活动排序及已查看完成提示、更新前后版本说明，以及 CSP、剪贴板授权、焦点约束、Push HTTPS 校验、Token 失败退避等修复。
+
+继续合并 v0.4.5 后，还包含上游终端搜索、Pane 拆分/移动/缩放与管理、自定义 Agent 名称、插件操作入口、后台失焦时释放和只读观察模式、快捷键/鼠标点击处理、通知与会话管理优化。Fork 的独立历史滚动仍为浏览器本地行为；上游的终端搜索和后台观察模式不得使用会调整 Windows 原生控制 PTY 的 resize 覆盖它。
+
+后续增量自动同步不再让上游 `.github/workflows/` 改动堵住整个工作流：普通源码改动采用自上次已处理上游 SHA 起的 Git 三方补丁，经过 Windows/macOS/Fast/浏览器完整 CI 后才自动快进 Fork `main`；上游工作流变动记录在 `docs/upstream-sync-state.json`，由有工作流写入权限的维护者另行审查合并。冲突与安全敏感改动不自动覆盖 Fork。详见 [自动同步设计](upstream-sync.md)。
 
 上游 `c04c760` / PR #582 已覆盖一部分 Codex Windows 路径前缀问题。本 Fork 同时保留上游的 `withoutVerbatimPrefix` / `storedCwds` 测试与 Fork 的路径安全检查、更多 cwd 变体及跨目录恢复逻辑。不要因为上游也修了“Windows 路径”就整块删除 Fork 的恢复算法。
 
