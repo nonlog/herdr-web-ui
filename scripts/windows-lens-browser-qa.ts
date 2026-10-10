@@ -118,10 +118,17 @@ try {
   // that footer, while Instant local history swallowed all downward wheels.
   await desktop.setViewportSize({ width: 1200, height: 345 });
   await until(async () => (await scrollOf(desktop)).height > 90, "native grid overflows the short desktop web viewport");
-  await shell(desktop, `printf '\\033[2J\\033[Htop-of-screen\\033[${Math.max(8, beforeBrowser.height - 3)};1Hnative-footer-below-cursor\\033[2;1H'`);
+  await shell(desktop, `printf '\\033[2J\\033[Htop-of-screen-isolation-live-242\\033[${Math.max(8, beforeBrowser.height - 3)};1Hnative-footer-below-cursor\\033[2;1H'`);
   await until(async () => (await screen(desktop)).includes("native-footer-below-cursor"), "footer below the active input row");
   await desktop.getByRole("button", { name: "Application scroll", exact: true }).click();
+  await desktop.getByRole("button", { name: "Instant local history", exact: true }).waitFor();
+  // The shell's focused textarea may scroll the DOM mount to its lower edge;
+  // explicitly start at the top so this measures a downward gesture, not an
+  // already-bottomed scrollbar. This is still a per-browser-only scroll.
+  await desktop.locator(".pane-terminal").evaluate((host) => { host.scrollTop = 0; });
+  await until(async () => (await scrollOf(desktop)).top < 2, "browser viewport starts at its top edge");
   const beforePan = await scrollOf(desktop);
+  console.log("QA adopted grid before down-wheel", beforePan);
   await wheel(desktop, 14);
   await until(async () => (await scrollOf(desktop)).top > beforePan.top + 30, "downward wheel pans an oversized native grid in local-history mode");
   assert.equal(await historyVisible(desktop), 0, "panning the visible grid does not replace it with cached history");

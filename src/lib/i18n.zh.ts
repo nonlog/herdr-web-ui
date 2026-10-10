@@ -16,6 +16,7 @@ export const ZH: Record<string, string> = {
   "Loading history...": "正在加载历史…",
   "History unavailable; scroll to retry": "历史加载失败，滚动可重试",
   "Cached history": "已缓存历史",
+  "Manual viewport": "手动浏览终端",
   "Back to live": "返回实时终端",
   "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "本地历史直接滚动缓存内容，不改变其他设备的视图。应用内滚动会向共享程序发送滚轮操作。",
 

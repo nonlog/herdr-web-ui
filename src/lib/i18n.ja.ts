@@ -14,6 +14,7 @@ export const JA: Record<string, string> = {
   "Loading history...": "履歴を読み込み中…",
   "History unavailable; scroll to retry": "履歴を取得できません。スクロールして再試行",
   "Cached history": "キャッシュ済み履歴",
+  "Manual viewport": "手動で表示中",
   "Back to live": "ライブ表示に戻る",
   "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "ローカル履歴は他の端末の表示を変えず、保存済みの出力を即時スクロールします。アプリ内スクロールは共有プログラムへ操作を送ります。",
 
