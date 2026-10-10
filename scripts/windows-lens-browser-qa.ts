@@ -112,6 +112,34 @@ try {
   await until(async () => (await screen(desktop)).includes("isolation-live-242"), "live fixture output");
   const nativeScroll = await paneScrollInfo(paneId); assert.equal(nativeScroll?.offset_from_bottom, 0);
 
+  // A native Herdr controller adopts the original desktop grid, even when the
+  // web viewport is shorter. A Claude-style TUI can paint a footer *below* its
+  // cursor. The old cursor follower kept snapping browser scrollTop back above
+  // that footer, while Instant local history swallowed all downward wheels.
+  await desktop.setViewportSize({ width: 1200, height: 345 });
+  await until(async () => (await scrollOf(desktop)).height > 90, "native grid overflows the short desktop web viewport");
+  await shell(desktop, `printf '\\033[2J\\033[Htop-of-screen\\033[${Math.max(8, beforeBrowser.height - 3)};1Hnative-footer-below-cursor\\033[2;1H'`);
+  await until(async () => (await screen(desktop)).includes("native-footer-below-cursor"), "footer below the active input row");
+  await desktop.getByRole("button", { name: "Application scroll", exact: true }).click();
+  const beforePan = await scrollOf(desktop);
+  await wheel(desktop, 14);
+  await until(async () => (await scrollOf(desktop)).top > beforePan.top + 30, "downward wheel pans an oversized native grid in local-history mode");
+  assert.equal(await historyVisible(desktop), 0, "panning the visible grid does not replace it with cached history");
+  await desktop.locator(".pane-terminal").evaluate((host) => { host.scrollTop = host.scrollHeight - host.clientHeight; });
+  await until(async () => (await scrollOf(desktop)).top >= (await scrollOf(desktop)).height - 2, "scrollbar reaches the terminal's actual bottom");
+  await desktop.getByRole("button", { name: "Back to live", exact: true }).waitFor();
+  const manual = await scrollOf(desktop);
+  await paneSendText(paneId, "printf '\\033[2;1Hlive-update-above-footer'"); await paneSendKeys(paneId, ["Enter"]);
+  await until(async () => (await screen(desktop)).includes("live-update-above-footer"), "fresh ANSI arrives while reading the lower rows");
+  await Bun.sleep(150);
+  assert.ok(Math.abs((await scrollOf(desktop)).top - manual.top) < 3, "incoming output preserves the user's scrollbar position instead of following a higher cursor");
+  assert.equal(desktopWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length, 0, "local panning does not alter shared Herdr scroll or geometry");
+  await desktop.getByRole("button", { name: "Back to live", exact: true }).click();
+  await until(async () => !(await desktop.getByRole("button", { name: "Back to live", exact: true }).count()), "follow-live resumes explicitly");
+  await desktop.getByRole("button", { name: "Instant local history", exact: true }).click();
+  await desktop.setViewportSize({ width: 1280, height: 800 });
+  console.log("PASS adopted native grid: down-wheel and scrollbar reach the footer, streaming keeps the manual viewport, Back to live resumes follow");
+
   const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" });
   const phone = await phoneContext.newPage(); const phoneWire = record(phone);
   let delayed = false; let reads = 0;

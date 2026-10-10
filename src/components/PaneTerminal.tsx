@@ -203,11 +203,14 @@ export function PaneTerminal({
     return !coarse; // touch is isolated by default; existing desktop wheel behavior is retained
   });
   const applicationScrollRef = useRef(applicationScroll); applicationScrollRef.current = applicationScroll;
+  const [manualGridPan, setManualGridPan] = useState(false);
+  const resumeGridFollowRef = useRef<() => void>(() => {});
   const [historyStatus, setHistoryStatus] = useState<"live" | "reading" | "loading" | "unavailable">("live");
   const prefetchHistoryRef = useRef<() => void>(() => {});
   useEffect(() => {
     try { localStorage.setItem("herdr-web-ui:terminal-scroll-target", applicationScroll ? "application" : "history"); } catch {}
     hideLocalHistoryRef.current();
+    if (applicationScroll) resumeGridFollowRef.current();
     prefetchHistoryRef.current();
   }, [applicationScroll]);
   const { settings, update: updateSettings } = useSettings();
@@ -628,7 +631,18 @@ export function PaneTerminal({
       return true;
     };
     const historyPan = (): void => { if (historyActive) moveLocalViewport(); };
-    host.addEventListener("scroll", historyPan, { passive: true });
+    const onHostScroll = (): void => {
+      historyPan();
+      // Scrollbar drags and browser-native scrolling pan the oversized native grid.
+      // Ignore scroll events caused by our own cursor-follow adjustment.
+      if (!adopted() || historyActive) return;
+      if (Math.abs(host.scrollTop - observedScrollTop) <= 1) return; // horizontal panning alone
+      observedScrollTop = host.scrollTop;
+      const expected = autoScrollTop;
+      autoScrollTop = null;
+      if (expected === null || Math.abs(host.scrollTop - expected) > 1) markManualPan();
+    };
+    host.addEventListener("scroll", onHostScroll, { passive: true });
     const flushControlWheel = (): void => {
       if (controlWheelTimer !== null) {
         window.clearTimeout(controlWheelTimer);
@@ -684,6 +698,23 @@ export function PaneTerminal({
     // Shift down, and a replay without it scrolled where the wheel itself did not.
     term.attachCustomWheelEventHandler((event) => {
       const pane = paneRef.current;
+      // The native Windows grid can be taller than the browser's viewport. The
+      // older history handler swallowed every downward wheel at offset zero,
+      // making the bottom rows inaccessible even though the mount can scroll.
+      // Pan the live grid first; only scroll into cached history at its top edge.
+      if (pane && localHistoryEnabled() && !historyActive && adopted() && !event.ctrlKey) {
+        const max = Math.max(0, host.scrollHeight - host.clientHeight);
+        const rowHeight = (term.element?.querySelector<HTMLElement>(".xterm-screen")?.offsetHeight ?? 0) / term.rows || terminalFontSize * 1.2;
+        const pixels = event.deltaMode === 2 ? event.deltaY * host.clientHeight
+          : event.deltaMode === 1 ? event.deltaY * rowHeight : event.deltaY;
+        const destination = Math.max(0, Math.min(max, host.scrollTop + pixels * wheelSpeedRef.current));
+        if (Math.abs(destination - host.scrollTop) > 0.5) {
+          markManualPan();
+          host.scrollTop = destination;
+          event.preventDefault();
+          return false;
+        }
+      }
       if (pane && localHistoryEnabled() && !event.ctrlKey
         && scrollLocalHistory(pane, event.deltaY, event.deltaMode)) {
         event.preventDefault();
@@ -743,6 +774,13 @@ export function PaneTerminal({
     // has no cursor; xterm's own rests on the last row with text, which serves the same.
     const adopted = (): boolean => observeRef.current || fixedGridRef.current || localGridRef.current;
     let panned = false;
+    let autoScrollTop: number | null = null;
+    let observedScrollTop = host.scrollTop;
+    const markManualPan = (): void => {
+      if (panned) return;
+      panned = true;
+      setManualGridPan(true);
+    };
     const followCursor = (): void => {
       host.toggleAttribute("data-adopted-grid", adopted());
       const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
@@ -750,7 +788,17 @@ export function PaneTerminal({
       const row = screen.offsetHeight / term.rows;
       const cursorBottom = screen.offsetTop + (term.buffer.active.cursorY + 1) * row;
       const max = host.scrollHeight - host.clientHeight;
-      host.scrollTop = cursorBottom <= host.clientHeight ? 0 : cursorBottom - row >= max ? max : cursorBottom - host.clientHeight;
+      const destination = cursorBottom <= host.clientHeight ? 0 : cursorBottom - row >= max ? max : cursorBottom - host.clientHeight;
+      if (Math.abs(host.scrollTop - destination) > 0.5) {
+        autoScrollTop = destination;
+        host.scrollTop = destination;
+      }
+    };
+    resumeGridFollowRef.current = (): void => {
+      panned = false;
+      autoScrollTop = null;
+      setManualGridPan(false);
+      followCursor();
     };
 
     /** herdr's text for the last drag, while its highlight is still the selection */
@@ -1111,6 +1159,7 @@ export function PaneTerminal({
           if (pane) socket.resize(pane, term.cols, term.rows, true);
         }
         panned = false;
+        setManualGridPan(false);
         followCursor();
       } else if (message.type === "pane-geometry") {
         // Observe clients adopt the shared grid. A legacy mirror and a Windows controller
@@ -1135,7 +1184,6 @@ export function PaneTerminal({
         if (!observeRef.current && !fixedGridRef.current && !localGridRef.current && !chatViewRef.current) return;
         if (term.cols !== message.cols || term.rows !== message.rows) term.resize(message.cols, message.rows);
         if (historyActive) paintLocalHistory();
-        panned = false;
         followCursor();
       } else if (message.type === "error") {
         if (message.code === "input_not_ready" || message.code === "input_failed") {
@@ -1344,7 +1392,6 @@ export function PaneTerminal({
         // the grid belongs to the pty while observing, and to herdr when fixed: only the view moves
         // (a soft keyboard opening must not leave the prompt under it)
         if (adopted()) {
-          panned = false;
           followCursor();
           return;
         }
@@ -1448,10 +1495,11 @@ export function PaneTerminal({
       if (controlWheelTimer !== null) window.clearTimeout(controlWheelTimer);
       cache.reset(null);
       if (prefetchTimer !== null) window.clearTimeout(prefetchTimer);
-      host.removeEventListener("scroll", historyPan);
+      host.removeEventListener("scroll", onHostScroll);
       prefetchHistoryRef.current = () => {};
       resetLocalHistoryRef.current = () => {};
       hideLocalHistoryRef.current = () => {};
+      resumeGridFollowRef.current = () => {};
       host.removeEventListener("touchstart", onTouchStart);
       host.removeEventListener("touchmove", onTouchMove);
       host.removeEventListener("touchend", onTouchEnd);
@@ -1594,6 +1642,7 @@ export function PaneTerminal({
     term.reset();
     modifyOtherKeysRef.current = 0;
     resetLocalHistoryRef.current(paneId);
+    resumeGridFollowRef.current();
     if (!paneId) return;
     try {
       fit?.fit();
@@ -2035,8 +2084,8 @@ export function PaneTerminal({
             onClick={() => setApplicationScroll((current) => !current)}>
             {t(applicationScroll ? "Application scroll" : "Instant local history")}
           </button>
-          {!applicationScroll && <span role="status">{t(historyStatus === "loading" ? "Loading history..." : historyStatus === "unavailable" ? "History unavailable; scroll to retry" : historyStatus === "reading" ? "Cached history" : "Live")}</span>}
-          {!applicationScroll && historyStatus !== "live" && <button type="button" className="btn btn-ghost" onClick={() => { hideLocalHistoryRef.current(); if (!coarseRef.current) termRef.current?.focus(); }}>{t("Back to live")}</button>}
+          {!applicationScroll && <span role="status">{t(historyStatus === "loading" ? "Loading history..." : historyStatus === "unavailable" ? "History unavailable; scroll to retry" : historyStatus === "reading" ? "Cached history" : manualGridPan ? "Manual viewport" : "Live")}</span>}
+          {!applicationScroll && (historyStatus !== "live" || manualGridPan) && <button type="button" className="btn btn-ghost" onClick={() => { hideLocalHistoryRef.current(); resumeGridFollowRef.current(); if (!coarseRef.current) termRef.current?.focus(); }}>{t("Back to live")}</button>}
         </div>
       )}
       <div className="terminal-surface">

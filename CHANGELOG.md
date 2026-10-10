@@ -3,6 +3,11 @@
 ## [Unreleased - nonlog fork]
 
 ### Fork changes
+- Fix oversized native Herdr grids in the web Terminal lens: mouse wheels in
+  Instant local history pan the visible grid before entering older cached output;
+  scrollbar drags suspend cursor-follow instead of jumping back on every ANSI
+  frame. Keep a Back to live action, native geometry and other clients unchanged,
+  with an isolated Windows controller browser regression.
 - Fix long-running Pi sessions showing `Conversation unavailable`: the Pi entry-tree
   reader no longer rejects a continuous active branch at 64 MiB, because only
   bounded conversation pages are materialized. Limit discontiguous ranges

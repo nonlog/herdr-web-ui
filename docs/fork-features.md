@@ -73,6 +73,13 @@ CI `Native Windows install` 任务生成 `windows-runtime-<commit SHA>`，内含
 
 ### 原生终端底部截断修复
 
+#### 网页端手动滚动不再回弹
+
+Windows 原生控制连接采用真正的 Herdr 网格，网格可能高于网页 Terminal 的容器。原版 Fork 的 `followCursor()` 在每次 `pty-data` 回调后定位光标，但只有触摸手势会设置 `panned`；桌面浏览器拖动滚动条没有暂停自动跟随，滚动位置随下一帧立刻被拉回光标行。`Instant local history` 还在历史偏移为零时吞掉向下滚轮，导致 Claude Code 等带底部状态行的 TUI 下方内容不可达。
+
+修复后，对超出网页视口的原生网格，鼠标滚轮优先在本地平移网格；到达网格顶部后，上滚才进入本地缓存历史。实际纵向浏览（鼠标滚轮、滚动条）暂停光标跟随，不因后续 ANSI 输出、无变化的几何通知或网页容器重新布局而被重置；光标自动跟随产生的滚动事件不误判为手动操作。`Manual viewport` 提示与 `Back to live` 可显式恢复跟随。操作只改变当前浏览器 DOM 的 `scrollTop`，不发送共享 Herdr scroll/resize，不影响另一个终端客户端。`windows-lens-browser-qa.ts` 在隔离的真实 Herdr 控制连接中测试光标上方、状态栏下方的窄网页视口与流式输出。
+
+
 此前只让手机采用原生网格，电脑浏览器仍把自己的尺寸传入 `terminal session control`。Herdr 0.9.3 的控制连接会设置 `direct_attach_resize_locks` 并重设真实 PTY；当网页比原生窗口高，输入框就可能被画到原生窗口底部之外。原生窗口后续调整尺寸也受该锁影响，不能仅靠刷新网页处理。
 
 现在 Windows control 始终使用原生 pane 的布局尺寸，电脑和手机网页都只是采用该网格。服务端拒绝把旧网页发来的 resize 应用于控制连接，避免未刷新的标签页再次破坏布局。一个共享的 `NativeGeometryFollower` 每 500 ms 串行读取布局，只在原生尺寸变化时更新控制连接；无连接时不读取，失败不猜测，过期请求不能改动已更换的控制连接。画面尺寸在对应 ANSI 帧之前发送，完整帧更新回放基线。
