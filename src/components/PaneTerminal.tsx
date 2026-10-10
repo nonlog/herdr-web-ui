@@ -1251,8 +1251,7 @@ export function PaneTerminal({
         setObserving(nowObserving);
         term.options.disableStdin = nowObserving || secretRef.current !== null || heldRef.current;
         onRoleAckRef.current?.(message.mode);
-        if (!nowObserving && !fixedGridRef.current && !localGridRef.current && !chatViewRef.current) {
-        if (!nowObserving && !fixedGridRef.current && !chatViewRef.current && inUse()) {
+        if (!nowObserving && !fixedGridRef.current && !localGridRef.current && !chatViewRef.current && inUse()) {
           try {
             fit.fit();
           } catch {
