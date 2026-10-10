@@ -41,6 +41,8 @@ fi
 git diff --name-only "$common" "$fork_sha" | sort -u > "$tmp/fork-paths"
 git diff --name-only "$common" "$upstream_sha" | sort -u > "$tmp/upstream-paths"
 comm -12 "$tmp/fork-paths" "$tmp/upstream-paths" > "$tmp/overlap"
+: > "$tmp/workflow-paths"
+grep '^\.github/workflows/' "$tmp/upstream-paths" > "$tmp/workflow-paths" || true
 : > "$tmp/sensitive"
 while IFS= read -r file; do
   case "$file" in
@@ -99,6 +101,53 @@ else
   git reset --hard "$upstream_sha"
   mode=conflict
 fi
+
+# GITHUB_TOKEN has no requestable "workflows" permission. Pushing *any*
+# upstream commit touching .github/workflows would be rejected by GitHub,
+# even on a new PR branch. Rather than require a long-lived personal token,
+# publish a DRAFT tracking PR containing only a Markdown report. That branch
+# is NOT the upstream source and must never be merged as a code update.
+if [[ -s "$tmp/workflow-paths" ]]; then
+  merge_mode="$mode"
+  if [[ "$merge_mode" == clean ]]; then git merge --abort || true; fi
+  git reset --hard "$fork_sha"
+  {
+    echo '# Upstream sync waiting for workflow-change review'
+    echo
+    echo 'This is a tracking report only; merging this document does NOT integrate upstream code.'
+    echo
+    echo "Fork base: $fork_sha"
+    echo "Upstream tip: $upstream_sha"
+    echo "Git merge result: $merge_mode"
+    echo
+    echo 'Workflows changed upstream (GITHUB_TOKEN cannot push these commits):'
+    sed 's/^/- /' "$tmp/workflow-paths"
+    echo
+    echo 'Paths requiring merge-conflict resolution:'
+    if [[ -s "$tmp/conflicts" ]]; then sed 's/^/- /' "$tmp/conflicts"; else echo '- None'; fi
+    echo
+    echo 'Use a human-authenticated Git credential with workflow write permission'
+    echo 'to integrate devswha/herdr-web-ui main on a separate review branch.'
+    echo 'Preserve docs/fork-features.md functionality and run complete GitHub CI.'
+  } > docs/upstream-sync-pending.md
+  git add docs/upstream-sync-pending.md
+  reuse_tracker=false
+  if [[ -n "$previous" ]]; then
+    previous_message="$(git show -s --format=%B "$previous")"
+    if grep -qx "Sync-Fork: $fork_sha" <<< "$previous_message" \
+      && grep -qx "Sync-Upstream: $upstream_sha" <<< "$previous_message"; then
+      reuse_tracker=true
+    fi
+  fi
+  if [[ "$reuse_tracker" == true ]]; then
+    git reset --hard "$previous"
+  else
+    git commit -m 'chore: track upstream workflow changes awaiting review' \
+      -m 'Sync-Generated-By: nonlog/upstream-sync' \
+      -m "Sync-Fork: $fork_sha" -m "Sync-Upstream: $upstream_sha"
+  fi
+  mode=workflow-review
+fi
 candidate="$(git rev-parse HEAD)"
 updated=false
 if [[ "$previous" != "$candidate" ]]; then
@@ -111,7 +160,7 @@ if [[ "$previous" != "$candidate" ]]; then
 fi
 
 manual=false
-if [[ "$mode" == conflict || -s "$tmp/overlap" || -s "$tmp/sensitive" ]]; then
+if [[ "$mode" != clean || -s "$tmp/overlap" || -s "$tmp/sensitive" ]]; then
   manual=true
 fi
 
@@ -141,7 +190,9 @@ Requires manual review: **$manual**
 
 Every candidate is prepared without discarding fork-only commits.
 EOF
-  if [[ "$mode" == conflict ]]; then
+  if [[ "$mode" == workflow-review ]]; then
+    printf '\n**TRACKING ONLY — DO NOT MERGE:** upstream changed GitHub Actions workflow files. GitHub GITHUB_TOKEN cannot push these commits, so this draft PR contains only docs/upstream-sync-pending.md, not the new upstream code. Integrate upstream manually using Git credentials with workflow permission; preserve Fork functionality and run all CI lanes. No personal token is stored in Actions.\n'
+  elif [[ "$mode" == conflict ]]; then
     printf '\n**Conflict mode:** this PR branch contains the raw upstream tip, not a resolved merge. Do not merge it as-is. Merge fork main into this branch, resolve conflicts preserving fork behavior, and run the complete CI. The scheduled job will never promote this state.\n'
   else
     printf '\n**Clean mode:** the PR branch contains a merge commit with both fork main and upstream main as parents.\n'
@@ -152,6 +203,7 @@ EOF
     printf '\n**Eligible for automatic promotion** only after all three required CI jobs pass and fork/upstream/PR heads remain unchanged. No automatic Windows plugin deployment.\n'
   fi
   write_paths "Conflicted paths" "$tmp/conflicts"
+  write_paths "Upstream workflow files requiring privileged/manual merge" "$tmp/workflow-paths"
   write_paths "Fork-customized paths changed upstream" "$tmp/overlap"
   write_paths "Sensitive paths changed upstream" "$tmp/sensitive"
   cat <<'EOF'
@@ -168,8 +220,10 @@ EOF
 
 pr="$(gh pr list --repo "$GH_REPO" --base main --head "$sync_branch" --state open --json number --jq '.[0].number // empty')"
 if [[ -z "$pr" ]]; then
+  draft=()
+  if [[ "$manual" == true ]]; then draft=(--draft); fi
   gh pr create --repo "$GH_REPO" --base main --head "$sync_branch" \
-    --title "chore: sync devswha/herdr-web-ui upstream" --body-file "$tmp/pr.md"
+    --title "chore: sync devswha/herdr-web-ui upstream" --body-file "$tmp/pr.md" "${draft[@]}"
   pr="$(gh pr list --repo "$GH_REPO" --base main --head "$sync_branch" --state open --json number --jq '.[0].number // empty')"
 else
   gh pr edit "$pr" --repo "$GH_REPO" --body-file "$tmp/pr.md"
@@ -185,8 +239,8 @@ echo "Upstream candidate PR: https://github.com/$GH_REPO/pull/$pr"
   echo "Mode: $mode; manual review: $manual"
 } >> "$GITHUB_STEP_SUMMARY"
 
-if [[ "$mode" == conflict ]]; then
-  echo "Merge conflicts recorded in the PR. No code was promoted or built."
+if [[ "$mode" != clean ]]; then
+  echo "Upstream update requires manual review ($mode). No code was promoted or built."
   exit 0
 fi
 
