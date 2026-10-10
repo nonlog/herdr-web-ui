@@ -1591,9 +1591,6 @@ export function PaneTerminal({
       }
       socket.resize(current, term.cols, term.rows, true);
     };
-    const onVisible = (): void => {
-      if (document.visibilityState === "visible") { refit(); prefetchHistory(); }
-    };
     // herdr holds a pane at the size of a `terminal attach` for as long as one is attached, and its
     // own TUI cannot take it back (0.9.3): this window, left open behind it, kept the pane at the
     // window's size, and the TUI drew it cut off at its split's edge with its bottom rows out of
@@ -1694,6 +1691,7 @@ export function PaneTerminal({
       cancelLeave();
       if (releasedRef.current) resume();
       else refit();
+      prefetchHistory();
     };
     const onVisibility = (): void => {
       if (inUse()) back();
