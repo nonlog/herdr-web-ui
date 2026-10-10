@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
-# Safe, unattended upstream integration for nonlog/herdr-web-ui.
-# Never run upstream scripts with this job's write-capable token.
+# Integrate upstream *source* changes with 3-way patching while retaining fork
+# history. The temporary GITHUB_TOKEN deliberately never updates workflow files.
 set -euo pipefail
 export LC_ALL=C
 
-if [[ "$GH_REPO" != "nonlog/herdr-web-ui" ]]; then
-  echo "Refusing to write to an unexpected repository: $GH_REPO" >&2
-  exit 1
-fi
-
-sync_branch="automation/upstream-sync"
-sync_ref="refs/heads/$sync_branch"
-tracking="refs/remotes/origin/$sync_branch"
+[[ "${GH_REPO:-}" == "nonlog/herdr-web-ui" ]] || { echo "Unexpected repository" >&2; exit 1; }
 upstream_url="https://github.com/devswha/herdr-web-ui.git"
+branch="automation/upstream-source-sync"
+review_branch="automation/upstream-source-sync-review"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -21,298 +16,212 @@ git config user.email codex@openai.com
 git remote add upstream "$upstream_url"
 git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
-fork_sha="$(git rev-parse refs/remotes/origin/main)"
-upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
-
-if git merge-base --is-ancestor "$upstream_sha" "$fork_sha"; then
-  echo "Fork main already includes upstream/main ($upstream_sha)."
-  echo "No new upstream commits." >> "$GITHUB_STEP_SUMMARY"
+base="$(git rev-parse refs/remotes/origin/main)"
+latest="$(git rev-parse refs/remotes/upstream/main)"
+state="docs/upstream-sync-state.json"
+[[ -f "$state" ]] || { echo "Missing tracked upstream integration baseline" >&2; exit 1; }
+previous="$(jq -er '.last_applied_sha' "$state")"
+[[ "$(jq -r .upstream "$state")" == devswha/herdr-web-ui ]] || { echo "Unknown upstream state owner" >&2; exit 1; }
+git cat-file -e "${previous}^{commit}"
+git merge-base --is-ancestor "$previous" "$latest" || {
+  echo "Upstream history was rewritten; existing baseline is not its ancestor" >&2
+  exit 1
+}
+if [[ "$previous" == "$latest" ]]; then
+  echo "No new upstream changes" | tee -a "$GITHUB_STEP_SUMMARY"
   exit 0
 fi
 
-common="$(git merge-base "$fork_sha" "$upstream_sha")"
-if [[ -z "$common" ]]; then
-  echo "Upstream has no common ancestor with this fork. Manual review required." >&2
-  exit 1
-fi
+git diff --name-only "$previous" "$latest" -- .github/workflows > "$tmp/workflows"
+git diff --name-only "$previous" "$latest" -- . ':(exclude).github/workflows' > "$tmp/source-files"
+git diff --binary --no-ext-diff "$previous" "$latest" -- . ':(exclude).github/workflows' > "$tmp/source.patch"
 
-# Require manual review for any file previously customized by the fork, even
-# when git's automatic 3-way merge reports no textual conflict.
-git diff --name-only "$common" "$fork_sha" | sort -u > "$tmp/fork-paths"
-git diff --name-only "$common" "$upstream_sha" | sort -u > "$tmp/upstream-paths"
-comm -12 "$tmp/fork-paths" "$tmp/upstream-paths" > "$tmp/overlap"
-: > "$tmp/workflow-paths"
-grep '^\.github/workflows/' "$tmp/upstream-paths" > "$tmp/workflow-paths" || true
-: > "$tmp/sensitive"
-while IFS= read -r file; do
-  case "$file" in
-    .github/*|AGENTS.md|*/AGENTS.md|package.json|bun.lock|install.ps1|herdr-plugin.toml|scripts/*|server/index.ts|server/codex.ts|server/pi-tree.ts|server/terminal-control.ts|server/native-geometry.ts|shared/protocol.ts|src/App.tsx|src/components/PaneTerminal.tsx|src/components/PaneTerminal.css|src/lib/ws.ts)
-      echo "$file" >> "$tmp/sensitive" ;;
-  esac
-done < "$tmp/upstream-paths"
-sort -u "$tmp/sensitive" -o "$tmp/sensitive"
+# Save a draft *tracking* PR when a source merge is not safe. It contains only
+# a report: it is NOT a diff that anyone should merge to gain upstream features.
+review() {
+  local reason="$1"
+  git reset --hard "$base"
+  git checkout -B upstream-sync-review "$base"
+  mkdir -p docs
+  {
+    echo '# Upstream source update requires review'
+    echo
+    echo '**TRACKING ONLY: DO NOT MERGE THIS DOCUMENT AS AN UPSTREAM UPDATE.**'
+    echo
+    echo "Reason: $reason"
+    echo "Fork base: $base"
+    echo "Last processed upstream: $previous"
+    echo "New upstream tip: $latest"
+    echo
+    echo 'Unresolved paths:'
+    if [[ -s "$tmp/conflicts" ]]; then sed 's/^/- /' "$tmp/conflicts"; else echo '- Not identified'; fi
+    echo
+    echo 'Upstream source changes (workflow files excluded):'
+    sed 's/^/- /' "$tmp/source-files"
+    echo
+    echo 'Upstream workflow files excluded because GITHUB_TOKEN cannot modify them:'
+    if [[ -s "$tmp/workflows" ]]; then sed 's/^/- /' "$tmp/workflows"; else echo '- None'; fi
+    echo
+    echo 'Resolve using a fresh branch, keep docs/fork-features.md capabilities,'
+    echo 'and submit the exact result to GitHub Actions CI before merging.'
+    echo 'Update docs/upstream-sync-state.json only for changes actually integrated.'
+  } > docs/upstream-sync-pending.md
+  git add docs/upstream-sync-pending.md
 
-previous=""
-if git ls-remote --exit-code --heads origin "$sync_ref" >/dev/null 2>&1; then
-  git fetch --no-tags origin "+$sync_ref:$tracking"
-  previous="$(git rev-parse "$tracking")"
-fi
-
-# A reviewer may have manually resolved the conflict on the PR branch. Do not
-# let the next scheduled run silently force-push away that work. The only
-# replaceable heads are upstream snapshots or commits authored by this sync.
-if [[ -n "$previous" ]]; then
-  automation_owned=false
-  if git merge-base --is-ancestor "$previous" "$upstream_sha"; then
-    automation_owned=true # a previous, unchanged upstream snapshot
-  elif git show -s --format=%B "$previous" | grep -qx 'Sync-Generated-By: nonlog/upstream-sync'; then
-    automation_owned=true # this script's merge commit
+  local ref="refs/heads/$review_branch" earlier=""
+  if git ls-remote --heads --exit-code origin "$ref" >/dev/null 2>&1; then
+    git fetch --no-tags origin "+$ref:refs/remotes/origin/$review_branch"
+    earlier="$(git rev-parse "refs/remotes/origin/$review_branch")"
+    if ! git show -s --format=%B "$earlier" | grep -qx 'Sync-Generated-By: nonlog/upstream-source-sync'; then
+      echo "Review branch has manual commits; leaving them untouched" >&2
+      return 0
+    fi
+    if git show -s --format=%B "$earlier" | grep -qx "Upstream-Source-SHA: $latest" &&
+       git show -s --format=%B "$earlier" | grep -qx "Fork-Base-SHA: $base"; then
+      git reset --hard "$earlier"
+    fi
   fi
-  if [[ "$automation_owned" != true ]]; then
-    echo "The upstream-sync PR branch contains manual commits; preserving it for review."
-    echo "Upstream-sync branch has manual commits. Not force-pushing over a reviewer's work." >> "$GITHUB_STEP_SUMMARY"
+  if [[ "$(git rev-parse HEAD)" == "$base" ]]; then
+    git commit -m 'chore: track upstream source conflicts for review' \
+      -m 'Sync-Generated-By: nonlog/upstream-source-sync' \
+      -m "Upstream-Source-SHA: $latest" -m "Fork-Base-SHA: $base"
+  fi
+  if [[ -n "$earlier" ]]; then
+    git push "--force-with-lease=$ref:$earlier" origin "HEAD:$ref"
+  else
+    git push origin "HEAD:$ref"
+  fi
+  local number
+  number="$(gh pr list --repo "$GH_REPO" --state open --base main --head "$review_branch" --json number --jq '.[0].number // empty')"
+  if [[ -z "$number" ]]; then
+    gh pr create --repo "$GH_REPO" --base main --head "$review_branch" --draft \
+      --title 'chore: upstream source update needs conflict review (tracking only)' \
+      --body "Source sync of $latest needs review ($reason). **DO NOT MERGE THIS TRACKING PR.** The report in docs/upstream-sync-pending.md lists unresolved paths; the upstream code was not incorporated."
+  else
+    gh pr edit "$number" --repo "$GH_REPO" \
+      --body "Source sync of $latest needs review ($reason). **DO NOT MERGE THIS TRACKING PR.** The report in docs/upstream-sync-pending.md lists unresolved paths; the upstream code was not incorporated."
+  fi
+  echo "Upstream source sync held: $reason" | tee -a "$GITHUB_STEP_SUMMARY"
+}
+
+git checkout -B upstream-sync-candidate "$base"
+: > "$tmp/conflicts"
+if [[ -s "$tmp/source.patch" ]]; then
+  if ! git apply --index --3way "$tmp/source.patch" > "$tmp/apply.log" 2>&1; then
+    git diff --name-only --diff-filter=U > "$tmp/conflicts" || true
+    if [[ ! -s "$tmp/conflicts" ]]; then cat "$tmp/apply.log" >> "$tmp/conflicts"; fi
+    review 'source code conflicts during three-way patch application'
     exit 0
   fi
 fi
 
-git checkout -B upstream-sync-candidate "$fork_sha"
-: > "$tmp/conflicts"
-if git merge --no-ff --no-commit "$upstream_sha" > "$tmp/merge.log" 2>&1; then
-  mode=clean
-  # Reuse a validated, identical candidate rather than pushing a new merge
-  # commit every day (which would invalidate CI and PR review each day).
-  if [[ -n "$previous" ]] && [[ "$(git show -s --format=%P "$previous")" == "$fork_sha $upstream_sha" ]]; then
-    git merge --abort
-    git reset --hard "$previous"
-  else
-    git commit -m "chore: sync devswha/herdr-web-ui $(git rev-parse --short=12 "$upstream_sha")" \
-      -m 'Sync-Generated-By: nonlog/upstream-sync'
-  fi
-else
-  git diff --name-only --diff-filter=U > "$tmp/conflicts"
-  if [[ ! -s "$tmp/conflicts" ]]; then
-    cat "$tmp/merge.log" >&2
-    echo "Unexpected upstream merge error without file conflicts." >&2
+# Source integration deliberately squashes only non-workflow changes. This avoids
+# the GitHub App workflows permission restriction, without storing a PAT.
+changed_workflows="$(jq -R -s 'split("\n") | map(select(length>0))' < "$tmp/workflows")"
+jq -n --arg sha "$latest" --argjson old "$(cat "$state")" \
+  --argjson changed "$changed_workflows" \
+  '{upstream:"devswha/herdr-web-ui",last_applied_sha:$sha,
+    workflow_changes_pending:( ($old.workflow_changes_pending // []) + $changed | unique | sort )}' > "$tmp/newstate"
+cp "$tmp/newstate" "$state"
+git add "$state"
+if git diff --cached --quiet; then
+  echo "No source or state changes; nothing to promote" | tee -a "$GITHUB_STEP_SUMMARY"
+  exit 0
+fi
+
+# Changes to authentication and ingress enforcement need scrutiny beyond
+# application CI. Regular terminal, UI, API, tests, installers and dependencies
+# auto-integrate if Git's 3-way apply and all platform CI jobs succeed.
+git diff --cached --name-only > "$tmp/changed"
+: > "$tmp/security"
+while IFS= read -r file; do
+  case "$file" in
+    server/auth.ts|server/access.ts|server/machine-security.ts|server/ssh.ts|server/input-guard.ts|server/http.ts|server/open-access.ts)
+      echo "$file" >> "$tmp/security" ;;
+  esac
+done < "$tmp/changed"
+
+git diff --cached --check || { review 'source patch has whitespace errors'; exit 0; }
+git commit -m "chore: integrate upstream source $(git rev-parse --short=12 "$latest")" \
+  -m 'Sync-Generated-By: nonlog/upstream-source-sync' -m "Upstream-Source-SHA: $latest"
+candidate="$(git rev-parse HEAD)"
+ref="refs/heads/$branch"
+earlier=""
+if git ls-remote --heads --exit-code origin "$ref" >/dev/null 2>&1; then
+  git fetch --no-tags origin "+$ref:refs/remotes/origin/$branch"
+  earlier="$(git rev-parse "refs/remotes/origin/$branch")"
+  if ! git merge-base --is-ancestor "$earlier" "$base" &&
+     ! git show -s --format=%B "$earlier" | grep -qx 'Sync-Generated-By: nonlog/upstream-source-sync'; then
+    echo "Existing candidate branch contains manual work; refusing to overwrite" >&2
     exit 1
   fi
-  # A PR with the upstream tip as its head shows GitHub's conflict state.
-  # NEVER resolve conflicts with -X theirs or overwrite fork-only source.
-  git merge --abort
-  git reset --hard "$upstream_sha"
-  mode=conflict
-fi
-
-# GITHUB_TOKEN has no requestable "workflows" permission. Pushing *any*
-# upstream commit touching .github/workflows would be rejected by GitHub,
-# even on a new PR branch. Rather than require a long-lived personal token,
-# publish a DRAFT tracking PR containing only a Markdown report. That branch
-# is NOT the upstream source and must never be merged as a code update.
-if [[ -s "$tmp/workflow-paths" ]]; then
-  merge_mode="$mode"
-  if [[ "$merge_mode" == clean ]]; then git merge --abort || true; fi
-  git reset --hard "$fork_sha"
-  {
-    echo '# Upstream sync waiting for workflow-change review'
-    echo
-    echo 'This is a tracking report only; merging this document does NOT integrate upstream code.'
-    echo
-    echo "Fork base: $fork_sha"
-    echo "Upstream tip: $upstream_sha"
-    echo "Git merge result: $merge_mode"
-    echo
-    echo 'Workflows changed upstream (GITHUB_TOKEN cannot push these commits):'
-    sed 's/^/- /' "$tmp/workflow-paths"
-    echo
-    echo 'Paths requiring merge-conflict resolution:'
-    if [[ -s "$tmp/conflicts" ]]; then sed 's/^/- /' "$tmp/conflicts"; else echo '- None'; fi
-    echo
-    echo 'Use a human-authenticated Git credential with workflow write permission'
-    echo 'to integrate devswha/herdr-web-ui main on a separate review branch.'
-    echo 'Preserve docs/fork-features.md functionality and run complete GitHub CI.'
-  } > docs/upstream-sync-pending.md
-  git add docs/upstream-sync-pending.md
-  reuse_tracker=false
-  if [[ -n "$previous" ]]; then
-    previous_message="$(git show -s --format=%B "$previous")"
-    if grep -qx "Sync-Fork: $fork_sha" <<< "$previous_message" \
-      && grep -qx "Sync-Upstream: $upstream_sha" <<< "$previous_message"; then
-      reuse_tracker=true
-    fi
-  fi
-  if [[ "$reuse_tracker" == true ]]; then
-    git reset --hard "$previous"
-  else
-    git commit -m 'chore: track upstream workflow changes awaiting review' \
-      -m 'Sync-Generated-By: nonlog/upstream-sync' \
-      -m "Sync-Fork: $fork_sha" -m "Sync-Upstream: $upstream_sha"
-  fi
-  mode=workflow-review
-fi
-candidate="$(git rev-parse HEAD)"
-updated=false
-if [[ "$previous" != "$candidate" ]]; then
-  if [[ -n "$previous" ]]; then
-    git push "--force-with-lease=$sync_ref:$previous" origin "HEAD:$sync_ref"
-  else
-    git push origin "HEAD:$sync_ref"
-  fi
-  updated=true
-fi
-
-manual=false
-if [[ "$mode" != clean || -s "$tmp/overlap" || -s "$tmp/sensitive" ]]; then
-  manual=true
-fi
-
-write_paths() {
-  local name="$1"
-  local file="$2"
-  printf '\n### %s\n\n' "$name"
-  if [[ -s "$file" ]]; then
-    printf '```text\n'
-    head -100 "$file"
-    printf '```\n'
-  else
-    printf 'None.\n'
-  fi
-}
-
-{
-  cat <<EOF
-## Automated upstream update
-
-Upstream: devswha/herdr-web-ui (main)
-Fork base: $fork_sha
-Upstream tip: $upstream_sha
-Candidate: $candidate
-Merge status: **$mode**
-Requires manual review: **$manual**
-
-Every candidate is prepared without discarding fork-only commits.
-EOF
-  if [[ "$mode" == workflow-review ]]; then
-    printf '\n**TRACKING ONLY — DO NOT MERGE:** upstream changed GitHub Actions workflow files. GitHub GITHUB_TOKEN cannot push these commits, so this draft PR contains only docs/upstream-sync-pending.md, not the new upstream code. Integrate upstream manually using Git credentials with workflow permission; preserve Fork functionality and run all CI lanes. No personal token is stored in Actions.\n'
-  elif [[ "$mode" == conflict ]]; then
-    printf '\n**Conflict mode:** this PR branch contains the raw upstream tip, not a resolved merge. Do not merge it as-is. Merge fork main into this branch, resolve conflicts preserving fork behavior, and run the complete CI. The scheduled job will never promote this state.\n'
-  else
-    printf '\n**Clean mode:** the PR branch contains a merge commit with both fork main and upstream main as parents.\n'
-  fi
-  if [[ "$manual" == true ]]; then
-    printf '\n**Review hold:** no automatic promotion. Inspect the overlapping/customized and protected files below, resolve as needed, and validate via CI.\n'
-  else
-    printf '\n**Eligible for automatic promotion** only after all three required CI jobs pass and fork/upstream/PR heads remain unchanged. No automatic Windows plugin deployment.\n'
-  fi
-  write_paths "Conflicted paths" "$tmp/conflicts"
-  write_paths "Upstream workflow files requiring privileged/manual merge" "$tmp/workflow-paths"
-  write_paths "Fork-customized paths changed upstream" "$tmp/overlap"
-  write_paths "Sensitive paths changed upstream" "$tmp/sensitive"
-  cat <<'EOF'
-
-### Verification and merge rules
-
-- CI must pass: Native Windows install, Fast checks, and Integration and browser.
-- Never use a conflict-resolution strategy that silently prefers upstream.
-- Preserve Windows native terminal control, native geometry, independent ANSI history, semantic Escape, large Pi session paging, and Codex recovery.
-- Review docs/fork-features.md before resolving a conflict.
-- GitHub-token-created PR events do not automatically trigger other Actions; the sync job explicitly dispatches CI when a clean candidate is new.
-EOF
-} > "$tmp/pr.md"
-
-pr="$(gh pr list --repo "$GH_REPO" --base main --head "$sync_branch" --state open --json number --jq '.[0].number // empty')"
-if [[ -z "$pr" ]]; then
-  draft=()
-  if [[ "$manual" == true ]]; then draft=(--draft); fi
-  gh pr create --repo "$GH_REPO" --base main --head "$sync_branch" \
-    --title "chore: sync devswha/herdr-web-ui upstream" --body-file "$tmp/pr.md" "${draft[@]}"
-  pr="$(gh pr list --repo "$GH_REPO" --base main --head "$sync_branch" --state open --json number --jq '.[0].number // empty')"
+  git push "--force-with-lease=$ref:$earlier" origin "HEAD:$ref"
 else
-  gh pr edit "$pr" --repo "$GH_REPO" --body-file "$tmp/pr.md"
-fi
-if [[ -z "$pr" ]]; then
-  echo "Could not locate or create the upstream synchronization PR." >&2
-  exit 1
-fi
-echo "Upstream candidate PR: https://github.com/$GH_REPO/pull/$pr"
-{
-  echo "Upstream tip: $upstream_sha"
-  echo "Candidate PR: https://github.com/$GH_REPO/pull/$pr"
-  echo "Mode: $mode; manual review: $manual"
-} >> "$GITHUB_STEP_SUMMARY"
-
-if [[ "$mode" != clean ]]; then
-  echo "Upstream update requires manual review ($mode). No code was promoted or built."
-  exit 0
+  git push origin "HEAD:$ref"
 fi
 
-# GITHUB_TOKEN-created push/PR events cannot trigger CI themselves.
-# Dispatch the full existing workflow against the exact merged candidate.
-if [[ "$updated" == true ]]; then
-  echo "Dispatching all CI lanes for candidate $candidate."
-  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  gh workflow run ci.yml --repo "$GH_REPO" --ref "$sync_branch"
-else
-  started=""
-  echo "No candidate changes; keeping existing PR and test results."
-fi
-
-if [[ "$manual" == true ]]; then
-  echo "Manual review required. Skipping automatic promotion."
-  exit 0
-fi
-
-# Automatic promotion is only for clean, non-customized, non-sensitive files.
-# A full successful workflow is required even when main has no branch rules.
-if [[ "$updated" != true ]]; then
-  echo "Unchanged candidate: holding promotion until a fresh validated run."
-  exit 0
-fi
-
+# Dispatch instead of relying on GITHUB_TOKEN-created push/PR events. CI is a
+# separate workflow with contents:read, so untrusted upstream code cannot use
+# this workflow's write-capable token.
+started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+gh workflow run ci.yml --repo "$GH_REPO" --ref "$branch"
 run_id=""
 for _ in $(seq 1 75); do
-  list="$(gh run list --repo "$GH_REPO" --workflow ci.yml --branch "$sync_branch" \
+  list="$(gh run list --repo "$GH_REPO" --workflow ci.yml --branch "$branch" \
     --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt)"
   run_id="$(jq -r --arg sha "$candidate" --arg since "$started" \
     '[.[] | select(.headSha == $sha and .createdAt >= $since)] | sort_by(.createdAt) | last | .databaseId // empty' <<< "$list")"
-  if [[ -n "$run_id" ]]; then break; fi
+  [[ -n "$run_id" ]] && break
   sleep 10
 done
-if [[ -z "$run_id" ]]; then
-  echo "Could not identify dispatched CI for $candidate; PR retained." >&2
-  exit 1
-fi
+[[ -n "$run_id" ]] || { echo "Could not locate dispatched CI run" >&2; exit 1; }
 
 completed=false
 for _ in $(seq 1 95); do
   gh run view "$run_id" --repo "$GH_REPO" --json status,conclusion,headSha,jobs > "$tmp/ci.json"
-  if [[ "$(jq -r '.status' "$tmp/ci.json")" == completed ]]; then
-    completed=true
-    break
-  fi
+  if [[ "$(jq -r '.status' "$tmp/ci.json")" == completed ]]; then completed=true; break; fi
   sleep 20
 done
-if [[ "$completed" != true ]]; then
-  echo "CI did not finish in time; no automatic promotion. PR retained." >&2
-  exit 1
-fi
+[[ "$completed" == true ]] || { echo "CI still pending; candidate retained" >&2; exit 1; }
+
 if ! jq -e --arg sha "$candidate" '
   .conclusion == "success" and .headSha == $sha and
-  ([.jobs[] | select(.conclusion == "success") | .name] |
-    index("Native Windows install") != null and
-    index("Fast checks") != null and
-    index("Integration and browser") != null)
+  ([.jobs[] | select(.conclusion == "success") | .name] as $passed |
+    (["Native Windows install","Native macOS session identity",
+      "Fast checks","Integration and browser"] - $passed | length) == 0)
 ' "$tmp/ci.json" >/dev/null; then
-  echo "Required CI lanes did not all pass. PR retained for review." >&2
+  echo "CI failed; candidate preserved on $branch, no main update" >&2
   exit 1
 fi
 
-# An exact fast-forward of the validated merge commit: no second untested
-# merge commit, and every automation-authored commit keeps Codex identity.
-latest_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-latest_upstream="$(git ls-remote upstream refs/heads/main | awk '{print $1}')"
-latest_candidate="$(git ls-remote origin "$sync_ref" | awk '{print $1}')"
-if [[ "$latest_main" != "$fork_sha" || "$latest_upstream" != "$upstream_sha" || "$latest_candidate" != "$candidate" ]]; then
-  echo "Fork, upstream, or candidate moved during CI; refusing promotion. PR retained."
+if [[ -s "$tmp/security" ]]; then
+  details="$(sed 's/^/- /' "$tmp/security")"
+  number="$(gh pr list --repo "$GH_REPO" --state open --base main --head "$branch" --json number --jq '.[0].number // empty')"
+  body="Upstream source $latest passed complete CI (run $run_id), but changes security-sensitive files:\n\n$details\n\nReview before merging; do not force-push the base."
+  if [[ -z "$number" ]]; then
+    gh pr create --repo "$GH_REPO" --base main --head "$branch" --draft \
+      --title 'chore: upstream source sync security review' --body "$body"
+  else
+    gh pr edit "$number" --repo "$GH_REPO" --body "$body"
+  fi
+  echo "Full CI passed; security-sensitive paths require review" | tee -a "$GITHUB_STEP_SUMMARY"
+  exit 0
+fi
+
+# Check the exact test commit and both repositories have not moved during CI.
+now_base="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+now_latest="$(git ls-remote upstream refs/heads/main | awk '{print $1}')"
+now_branch="$(git ls-remote origin "$ref" | awk '{print $1}')"
+if [[ "$now_base" != "$base" || "$now_latest" != "$latest" || "$now_branch" != "$candidate" ]]; then
+  echo "Repository moved during CI; validated candidate remains on $branch" | tee -a "$GITHUB_STEP_SUMMARY"
   exit 0
 fi
 git push origin "$candidate:refs/heads/main"
-echo "Fast-forwarded fully validated upstream integration $candidate to main." | tee -a "$GITHUB_STEP_SUMMARY"
+{
+  echo "Integrated upstream source through $latest"
+  echo "CI: https://github.com/$GH_REPO/actions/runs/$run_id"
+  if [[ -s "$tmp/workflows" ]]; then
+    echo "Workflow changes recorded but not applied:"
+    sed 's/^/- /' "$tmp/workflows"
+  fi
+} >> "$GITHUB_STEP_SUMMARY"

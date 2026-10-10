@@ -46,6 +46,7 @@ describe("browser lane", () => {
     expect(code).toBe(7);
     expect(rows(text)).toEqual([
       { script: "scripts/demo-build.ts", seconds: expect.any(Number), code: 0 },
+      { script: "scripts/windows-lens-browser-qa.ts", seconds: expect.any(Number), code: 0 },
       { script: "scripts/ui-regression.ts", seconds: expect.any(Number), code: 0 },
       { script: "scripts/terminal-dispose-browser-qa.ts", seconds: expect.any(Number), code: 0 },
       { script: "scripts/sticky-modifiers-regression.ts", seconds: expect.any(Number), code: 7 },
@@ -57,7 +58,7 @@ describe("browser lane", () => {
   it("summarizes every script and exits zero on success without enabling local evidence", async () => {
     const { text, code, evidence } = await lane();
     expect(code).toBe(0);
-    expect(rows(text)).toHaveLength(22);
+    expect(rows(text)).toHaveLength(23);
     expect(rows(text).every((row) => row.code === 0 && row.seconds >= 0)).toBe(true);
     expect(rows(text).at(-1)?.script).toBe("scripts/machine-conflict-regression.ts");
     expect(evidence).toBe(false);
