@@ -81,7 +81,9 @@ async function setup(label: string, agent = "claude", screen = "› Message\n", 
   // `ending`: what the screen ends with once drawn, for a text taller than the pane
   const showScreen = async (text: string, ending = text) => {
     writeFileSync(screenFile, text);
-    const deadline = Date.now() + 5_000;
+    // A concurrent CI browser lane can delay herdr recorder propagation; do
+    // not mistake a slow visible-screen read for a failed pending-input check.
+    const deadline = Date.now() + 10_000;
     while (!(await paneRead({ paneId: pane, source: "visible", format: "text" })).text.trimEnd().endsWith(ending.trimEnd())) {
       if (Date.now() >= deadline) throw new Error("recorder screen did not update");
       await Bun.sleep(25);

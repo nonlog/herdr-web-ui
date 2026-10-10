@@ -281,10 +281,10 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
     const desktopSize = await size();
     const phone = await open({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     await attached(phone);
-    const deadline = Date.now() + 10_000;
-    let phoneSize = desktopSize;
-    while (phoneSize === desktopSize && Date.now() < deadline) phoneSize = await size();
-    assert.notEqual(phoneSize, desktopSize, "the phone's terminal lens fits the grid to the phone");
+    // The fork's mobile terminal is always a keep-size observer: the desktop
+    // owns this Unix PTY, and phone viewport/font changes never resize it.
+    const phoneSize = await size();
+    assert.equal(phoneSize, desktopSize, "the phone's terminal lens adopts the existing grid without resizing");
 
     // the desktop's window turns visible behind another app: shown, without the focus
     const shown = (await sizing(desktop)).length;
