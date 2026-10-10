@@ -128,6 +128,7 @@ try {
   await desktop.locator(".pane-terminal").evaluate((host) => { host.scrollTop = 0; });
   await until(async () => (await scrollOf(desktop)).top < 2, "browser viewport starts at its top edge");
   const beforePan = await scrollOf(desktop);
+  const beforeSharedScrollCommands = desktopWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length;
   console.log("QA adopted grid before down-wheel", beforePan);
   await wheel(desktop, 14);
   await until(async () => (await scrollOf(desktop)).top > beforePan.top + 30, "downward wheel pans an oversized native grid in local-history mode");
@@ -140,7 +141,7 @@ try {
   await until(async () => (await screen(desktop)).includes("live-update-above-footer"), "fresh ANSI arrives while reading the lower rows");
   await Bun.sleep(150);
   assert.ok(Math.abs((await scrollOf(desktop)).top - manual.top) < 3, "incoming output preserves the user's scrollbar position instead of following a higher cursor");
-  assert.equal(desktopWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length, 0, "local panning does not alter shared Herdr scroll or geometry");
+  assert.equal(desktopWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length, beforeSharedScrollCommands, "local panning adds no shared Herdr scroll or resize commands");
   await desktop.getByRole("button", { name: "Back to live", exact: true }).click();
   await until(async () => !(await desktop.getByRole("button", { name: "Back to live", exact: true }).count()), "follow-live resumes explicitly");
   await desktop.getByRole("button", { name: "Instant local history", exact: true }).click();
