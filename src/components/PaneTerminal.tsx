@@ -1306,13 +1306,14 @@ export function PaneTerminal({
       if (chord !== null) {
         // Shortcuts are never retained as offline text or replayed later: a chord the
         // terminal cannot take now (not ready, disconnected) is told, not dropped in silence
-        if (!socket.sendKeys(current, [chord])) {
+        if (socket.sendKeys(current, [chord])) resumeGridFollowRef.current();
+        else {
           const t = tRef.current; // the language of now, not of the attach
           setInputError(t("Not sent: the terminal is not ready for keys."));
         }
         return;
       }
-      if (socket.sendInput(current, input)) return;
+      if (socket.sendInput(current, input)) { resumeGridFollowRef.current(); return; }
       // A closed socket, an attachment still opening, or a failed synchronous send:
       // keep printable input for explicit review, never replay it automatically.
       if (draftPaneRef.current !== current) {
@@ -1734,6 +1735,7 @@ export function PaneTerminal({
     const sent = socket.submit(pane, composerMessage(text), composerPayload(text, term.modes.bracketedPasteMode), false, delivery);
     if (sent === null) return null;
     hideLocalHistoryRef.current();
+    resumeGridFollowRef.current();
     term.scrollToBottom();
     if (delivery === "immediate") setChatSent((current) => current + 1);
     const owner = paneStorageId(machineId, pane);
@@ -1784,6 +1786,7 @@ export function PaneTerminal({
     const sent = socket.submit(pane, message, payload, true);
     if (sent === null) return false;
     hideLocalHistoryRef.current();
+    resumeGridFollowRef.current();
     term.scrollToBottom();
     return sent.then((result) => (result.ok ? true : submitNote(result.code, result.message)));
   }, []);
@@ -1794,7 +1797,7 @@ export function PaneTerminal({
     if (!socket || pane === null || !socket.connected) return false;
     const sent = hasModifiers(modifiersRef.current)
       ? socket.sendKeys(pane, [terminalChord("Enter", modifiersRef.current)!]) : socket.sendInput(pane, "\r");
-    if (sent) hideLocalHistoryRef.current();
+    if (sent) { hideLocalHistoryRef.current(); resumeGridFollowRef.current(); }
     termRef.current?.scrollToBottom();
     return sent;
   }, []);
