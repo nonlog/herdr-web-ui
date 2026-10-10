@@ -1,4 +1,4 @@
-> **nonlog fork:** [Fork 功能、修复与同步记录](docs/fork-features.md) — Windows live control, isolated mobile history, CI-only deployment.
+> **nonlog fork:** [Fork 功能、修复与同步记录](docs/fork-features.md) · [上游自动同步](docs/upstream-sync.md) — Windows live control, isolated mobile history, CI-only deployment.
 
 # herdr web ui
 

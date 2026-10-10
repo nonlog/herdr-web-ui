@@ -1,5 +1,7 @@
 # nonlog/herdr-web-ui：Fork 功能、修复与同步约束
 
+定期检查、同步 PR、冲突保护和 CI 合并门禁见 [docs/upstream-sync.md](upstream-sync.md)。自动同步只更新源码，不自动部署 Windows 插件。
+
 本文记录相对 `devswha/herdr-web-ui` 的本地扩展，供后续 Agent 和维护者同步上游时核对。功能存在于源代码不等于已经安装；验证与部署记录见文末。
 
 ## 基线与同步范围
