@@ -1131,9 +1131,13 @@ One set for both themes: the card is island black wherever it shows.
   still `Discard`.
 - `/` completions come from `GET /api/pane/commands` and group built-in, user and project commands;
   `@` completions query `GET /api/pane/files`. Arrow keys navigate, Enter/Tab accepts, Escape closes.
-- Paste, picker or drag/drop accepts up to four files per action; an image is stored as a paste, any other
-  file under its own sanitised name. Each uploads through `POST /api/pane/image` and inserts a removable
-  editable `@path` mention.
+- Paste, picker or drag/drop attaches up to **Files at once** files per action (Settings → Chat, 20 unless the
+  device chose 1 to 50); the message box names how many it left out. An image is stored as a paste, any other
+  file under its own sanitised name. Each uploads through `POST /api/pane/image`, three at a time
+  across all picks, and puts a removable editable `@path` mention at the start of the message (after
+  a leading `/command`), in the order the files were picked. A path waits while the box holds only a
+  `/command` still being typed or an IME composition. The caret and selection move only with the
+  text they sit in, so typing while files upload is not disturbed.
 - While a phone's keyboard is up, a tap on the transcript or a drag down it (`32px`) puts the
   keyboard away. Each only blurs the field, so the draft stays. The prompt card, which can stand
   where the transcript was on a short screen, does the same: a tap on its text (never on an
@@ -1221,7 +1225,7 @@ One set for both themes: the card is island black wherever it shows.
   replaces the one entry. A reload steps out of the entries it finds; Forward reopens the page.
 - Pages, in order: **Appearance** (theme, colors, density, language, sidebar rows), **Chat**
   (panes open in, show thinking, chat width, chat font size and family, highlight code; then
-  **Composer**: optional plain PageUp/PageDown chat scrolling (off by default), Enter sends, suggestion chip; then **Quick replies**; then **File viewer**: wrap long
+  **Composer**: optional plain PageUp/PageDown chat scrolling (off by default), Enter sends, files at once, suggestion chip; then **Quick replies**; then **File viewer**: wrap long
   lines, Markdown width), **Terminal** (font size, 80 columns in a split, font family, wheel
   speed, input mode, Key bar), **Alerts**, **Voice input**, **Subscription usage**,
   **Shortcuts** (the platform-resolved global bindings, then **Paging** with a 0–100 line overlap stepper; one line by default, zero for a full viewport), **Phone & devices** (the phone address,
