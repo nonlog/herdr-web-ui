@@ -148,7 +148,8 @@ for (const sensitive of [false, true]) {
       target = git(root, "rev-parse", "HEAD");
       git(root, "switch", "main");
     }
-    git(upstream, "fetch", root, `${target}:refs/heads/main`);
+    git(upstream, "fetch", root, target);
+    git(upstream, "update-ref", "refs/heads/main", target);
     git(root, "clone", "--bare", root, origin);
     git(root, "remote", "add", "origin", origin);
     git(root, "config", `url.${upstream.replaceAll("\\", "/")}.insteadOf`, "https://github.com/devswha/herdr-web-ui.git");
