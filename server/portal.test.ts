@@ -150,7 +150,7 @@ describe("what Portal is given and says", () => {
   });
 
   it("preserves Darwin argv boundaries and excludes the process environment", () => {
-    const argv = ["/Applications/My Tools/portal", "expose", "", "--identity-path", "/Users/test/a 'quoted' \\ path/identity.json"];
+    const argv = ["/Applications/My Tools/portal", "expose", "", "--identity-path", "/Users/test/a 'quoted' \\ path/identity.json", "\uFEFFexpose", "\uFEFF--identity-path"];
     const body = new TextEncoder().encode(`/bin/portal\0\0\0${argv.join("\0")}\0TOKEN=not-an-argument\0`);
     const bytes = new Uint8Array(4 + body.length);
     new DataView(bytes.buffer).setInt32(0, argv.length, true);

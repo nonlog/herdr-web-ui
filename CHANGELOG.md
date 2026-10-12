@@ -6,6 +6,7 @@
 - Integrate upstream source through `5a9fe391e823`, keep fork browser checks independent
   of upstream script counts, and verify macOS Portal cleanup with paths containing spaces.
   Require review for future Portal changes and cover automatic main promotion and Pages dispatch.
+  ([#6](https://github.com/nonlog/herdr-web-ui/pull/6) by @nonlog)
 - Integrate upstream source through `10fd26f5f13f` while preserving native Windows
   terminals and local history. Report blocked syncs as failed Actions runs instead
   of document-only PRs, require full CI for dispatched candidates, and explicitly

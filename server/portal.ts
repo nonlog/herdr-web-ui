@@ -171,7 +171,7 @@ export function parseDarwinArgv(bytes: Uint8Array): string[] | null {
   if (offset < 0) return null;
   while (offset < bytes.length && bytes[offset] === 0) offset++;
   const argv: string[] = [];
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   try {
     for (let i = 0; i < argc; i++) {
       const end = bytes.indexOf(0, offset);
