@@ -721,7 +721,7 @@ try {
           assert.deepEqual(await answersOf(page), [{ pane_id: panes.web, prompt_id: "demo-plan", option_index: 0 }], "only the first asking was answered");
           await page.evaluate(() => { (window as unknown as { formDelay: number }).formDelay = 0; });
           await page.locator(".prompt-card-confirm").getByRole("button", { name: "Confirm" }).click();
-          await page.locator(".prompt-card").waitFor({ state: "detached" });
+          await page.locator(".prompt-card").getByText(PLAN.question).waitFor({ state: "detached" });
           assert.deepEqual((await answersOf(page)).at(-1), { pane_id: panes.web, prompt_id: "demo-plan-asked-again", option_index: 2 }, "Confirm answers the second asking under its own id");
           assert.deepEqual(errors, []);
         } catch (error) { await preserveFailure(page, error); } finally { await close(); }

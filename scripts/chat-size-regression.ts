@@ -782,7 +782,8 @@ if (import.meta.main) {
 
 /**
  * A window that keeps its focus gets no focus event when another device sized the pane meanwhile
- * (a phone used beside a PC left in front): a click or a key in its terminal takes the pane back.
+ * (another desktop used beside a PC left in front): a click or a key takes the pane back.
+ * Touch clients retain the shared grid instead of becoming resize owners.
  */
 export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, origin: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-reclaim-size-"));
@@ -818,17 +819,21 @@ export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, o
     await sizeBecomes(desktopSize, "the desktop took the pane at its own size");
     const phone = await openRecording(browser, contexts, origin, paneId, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }, settings, false, inFront);
     await attached(phone);
-    const phoneSize = await askedGrid(phone);
-    await sizeBecomes(phoneSize, "the phone took the pane at its own size");
+    await sizeBecomes(desktopSize, "the phone keeps the desktop's shared grid");
+    assert.equal((await framesOf(phone)).filter((frame) => frame.dir === "out" && frame.type === "resize").length, 0, "the phone sends no resize");
 
     await desktop.locator(".xterm").click();
     await sizeBecomes(desktopSize, "a click in the desktop terminal");
     await phone.locator(".xterm").tap();
-    await sizeBecomes(phoneSize, "a tap in the phone terminal");
-    // a right-click is for the pane menu, not the user taking the pane: the grid stays the phone's
+    await sizeBecomes(desktopSize, "a tap in the phone terminal preserves the shared grid");
+    const other = await openRecording(browser, contexts, origin, paneId, { viewport: { width: 1000, height: 600 } }, settings, false, inFront);
+    await attached(other);
+    const otherSize = await askedGrid(other);
+    await sizeBecomes(otherSize, "another desktop took the pane at its own size");
+    // A right-click opens the menu without taking the pane back from that desktop.
     await desktop.locator(".xterm").click({ button: "right" });
     await Bun.sleep(500);
-    assert.equal(await size(), phoneSize, "a right-click in the desktop terminal leaves the pane at the phone's size");
+    assert.equal(await size(), otherSize, "a right-click leaves the pane at the other desktop's size");
     // Escape closes the menu where one opened; in the terminal it is a key like any other
     await desktop.keyboard.press("Escape");
     await desktop.keyboard.press("Shift");
