@@ -130,7 +130,7 @@ describe("native conversation invalidation", () => {
     await herdrRpc("pane.report_agent", { pane_id: paneId, source: "herdr:omp", agent: "omp", state: "idle", seq: ++reportSeq });
     await report();
     process.env["HOME"] = root;
-    bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false });
+    bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false, terminalControl: false });
     bridges.push(bridge);
     expect((await read()).source).toBe("omp-transcript");
   });

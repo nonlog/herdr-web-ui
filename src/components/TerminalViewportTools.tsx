@@ -124,7 +124,8 @@ export function TerminalViewportTools({ viewportIntent, terminal, paneId, pageSc
         data = output === outputVersion ? found : null;
         paint();
         // a page held on stale metrics runs on the first read after the latest output, while it is recent
-        if (heldPage && output === outputVersion) {
+        // Positive history permits a scroll despite newer ANSI frames; application keys still require current metrics.
+        if (heldPage && (output === outputVersion || (validScroll(metrics) && metrics.max_offset_from_bottom > 0))) {
           const held = heldPage;
           heldPage = null;
           if (Date.now() - held.at < HELD_PAGE_MS) scrollPage(held.direction);

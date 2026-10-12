@@ -7,6 +7,16 @@
  * keep their English names.
  */
 export const TR: Record<string, string> = {
+  "Live": "Canlı",
+  "Instant local history": "Anlık yerel geçmiş",
+  "Application scroll": "Uygulamada kaydırma",
+  "Loading history...": "Geçmiş yükleniyor…",
+  "History unavailable; scroll to retry": "Geçmiş kullanılamıyor; tekrar denemek için kaydırın",
+  "Cached history": "Önbellekteki geçmiş",
+  "Manual viewport": "Elle görüntüleme",
+  "Back to live": "Canlıya dön",
+  "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "Yerel geçmiş, diğer istemcilerin görünümünü değiştirmeden önbellekteki çıktıyı hemen kaydırır. Uygulamada kaydırma, paylaşılan programa tekerlek girdisi gönderir.",
+  "Live terminal is unavailable on this bridge": "Bu köprüde canlı terminal kullanılamıyor",
   "Antigravity chat is unavailable. Open Terminal to see activity and tool calls.": "Antigravity sohbeti kullanılamıyor. Etkinliği ve araç çağrılarını görmek için Terminal'i açın.",
   "Chat read timed out.": "Sohbet okunurken zaman aşımına uğradı.",
   "Thinking…": "Düşünüyor…",
@@ -159,9 +169,7 @@ export const TR: Record<string, string> = {
   "Toggle sidebar (⌘⇧B)": "Kenar çubuğunu aç/kapat (⌘⇧B)",
   "Chat transcript (⌘⇧J)": "Sohbet dökümü (⌘⇧J)",
   "Live terminal (⌘⇧J)": "Canlı terminal (⌘⇧J)",
-  "Live terminal: coming to Windows PCs once herdr can attach there": "Canlı terminal, herdr Windows bilgisayarlara terminal bağlantısını desteklediğinde kullanılabilecek",
   "soon": "yakında",
-  "Live terminal is coming to Windows PCs: herdr cannot attach a terminal there yet. The chat lens works now.": "Canlı terminal Windows bilgisayarlara geliyor: herdr orada henüz terminal bağlayamıyor. Sohbet görünümü şimdiden çalışıyor.",
   "Terminal": "Terminal",
   "Terminal for {title}": "{title} için terminal",
   "Anyone who can reach {host} on your network can type into every pane: no access token is set and no device is paired yet.": "Ağınızda {host} adresine ulaşabilen herkes her panele yazabilir: erişim anahtarı ayarlanmamış ve henüz eşleştirilmiş bir cihaz yok.",

@@ -159,12 +159,12 @@ fi
 if [[ -s "$tmp/security" ]]; then
   details="$(sed 's/^/- /' "$tmp/security")"
   number="$(gh pr list --repo "$GH_REPO" --state open --base main --head "$branch" --json number --jq '.[0].number // empty')"
-  body="Upstream source $latest passed complete CI (run $run_id), but changes security-sensitive files:\n\n$details\n\nReview before merging; do not force-push the base."
+  printf 'Upstream source %s passed complete CI (run %s), but changes security-sensitive files:\n\n%s\n\nReview before merging; do not force-push the base.\n' "$latest" "$run_id" "$details" > "$tmp/security-review.md"
   if [[ -z "$number" ]]; then
     gh pr create --repo "$GH_REPO" --base main --head "$branch" --draft \
-      --title 'chore: upstream source sync security review' --body "$body"
+      --title 'chore: upstream source sync security review' --body-file "$tmp/security-review.md"
   else
-    gh pr edit "$number" --repo "$GH_REPO" --body "$body"
+    gh pr edit "$number" --repo "$GH_REPO" --body-file "$tmp/security-review.md"
   fi
   echo "Full CI passed; security-sensitive paths require review" | tee -a "$GITHUB_STEP_SUMMARY"
   exit 0

@@ -1060,7 +1060,7 @@ export type ServerMessage =
   | { type: "input-ready"; pane_id: string; ready?: boolean }
   /** the shared terminal grid changed: observe clients adopt it, interact clients drive it.
    * fixed: pane.read mirror, so nobody resizes it. control: herdr terminal-session controller,
-   * so the browser may resize it and sends semantic wheel events instead of xterm mouse bytes. */
+   * so the browser adopts native geometry and sends semantic wheel events instead of xterm mouse bytes. */
   | { type: "pane-geometry"; pane_id: string; cols: number; rows: number; fixed?: boolean; control?: boolean }
   | { type: "role-ack"; mode: ClientRole }
   /** ok after Enter delivery, or bridge acceptance (`pending`); never an agent execution acknowledgement.

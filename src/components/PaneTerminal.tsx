@@ -1650,7 +1650,7 @@ export function PaneTerminal({
     // a wheel at the cell under it (without one, every report said row 1, column 1).
     // An adopted grid has no history to send a wheel to (an observer's reports are dropped, a
     // mirror reports nothing): there the drag pans the mount, both ways, to the cells past its edge.
-    // Two fingers pinch the font size: the font follows them locally, and the shared pty resizes once when one lifts.
+    // Two fingers pinch the font locally; an adopted native grid keeps its shared PTY size.
     let touchX = 0;
     let touchY = 0;
     let tracking = false;
