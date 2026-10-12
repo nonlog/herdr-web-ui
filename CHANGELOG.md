@@ -3,6 +3,10 @@
 ## [Unreleased - nonlog fork]
 
 ### Fork changes
+- Preserve the 87 upstream commits as real ancestors of the fork, replace source-patch
+  synchronization with Git merge, and verify the behind count through ancestry.
+  Workflow-history permission limits now require explicit review instead of silently
+  copying source; manually edited candidates are never force-pushed.
 - Integrate upstream source through `5a9fe391e823`, keep fork browser checks independent
   of upstream script counts, and verify macOS Portal cleanup with paths containing spaces.
   Require review for future Portal changes and cover automatic main promotion and Pages dispatch.

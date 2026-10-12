@@ -8,7 +8,7 @@
 
 - Fork：`nonlog/herdr-web-ui`；插件 ID 仍为 `devswha.herdr-web-ui`，不得因仓库名称不同而更改。
 - Windows 工作区：`D:\Workspace\herdr-web-ui`。
-- 上游同步：最初吸收 v0.4.1 后，继续合并 v0.4.5（`21d1b9208ac489f8690fe8ba758dc5cd73842cf6`），保留完整两侧提交历史；后续源码增量由 `docs/upstream-sync-state.json` 记录基线。本次从 v0.4.5 合入 87 个上游提交的源码变化，至 `5a9fe391e8239c5f038c129e885b7cec15a68b99`；新版只读 CI 经人工审查移植，保留 Windows Codex 回归、运行包产物和四项完整验证门禁。
+- 上游同步：最初吸收 v0.4.1 后，继续合并 v0.4.5（`21d1b9208ac489f8690fe8ba758dc5cd73842cf6`）；现已真正合并其后 87 个上游提交至 `5a9fe391e8239c5f038c129e885b7cec15a68b99`，保留完整祖先关系。`docs/upstream-sync-state.json` 的 `last_merged_sha` 与 Git 历史共同验证同步状态。Fork 保留 Windows Codex 回归、运行包产物和四项完整验证门禁。
 - 验证使用的 Herdr 基线：0.9.3；原生 Windows 不具备直接 `terminal attach`，不能误当成 Unix 平台。
 - 只向用户 Fork 推送，不向上游提交 PR。所有助手创建的提交，author 与 committer 均为 `Codex <codex@openai.com>`。
 
@@ -50,7 +50,7 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 
 继续合并 v0.4.5 后，还包含上游终端搜索、Pane 拆分/移动/缩放与管理、自定义 Agent 名称、插件操作入口、后台失焦时释放和只读观察模式、快捷键/鼠标点击处理、通知与会话管理优化。Fork 的独立历史滚动仍为浏览器本地行为；上游的终端搜索和后台观察模式不得使用会调整 Windows 原生控制 PTY 的 resize 覆盖它。
 
-后续增量自动同步不再让上游 `.github/workflows/` 改动堵住整个工作流：普通源码改动采用自上次已处理上游 SHA 起的 Git 三方补丁，经过 Windows/macOS/Fast/浏览器完整 CI 后才自动快进 Fork `main`；上游工作流变动记录在 `docs/upstream-sync-state.json`，由有工作流写入权限的维护者另行审查合并。冲突与安全敏感改动不自动覆盖 Fork。详见 [自动同步设计](upstream-sync.md)。
+后续自动同步保留真正的上游提交历史：普通提交使用 Git merge，经 Windows/macOS/Fast/集成和浏览器完整 CI 后才快进 Fork main。涉及工作流的提交历史因 token 权限限制需维护者审核，不再复制源码冒充已同步。冲突和安全敏感改动同样保留审核；同步 PR 不可 squash。详见 [自动同步设计](upstream-sync.md)。
 
 上游 `c04c760` / PR #582 已覆盖一部分 Codex Windows 路径前缀问题。本 Fork 同时保留上游的 `withoutVerbatimPrefix` / `storedCwds` 测试与 Fork 的路径安全检查、更多 cwd 变体及跨目录恢复逻辑。不要因为上游也修了“Windows 路径”就整块删除 Fork 的恢复算法。
 

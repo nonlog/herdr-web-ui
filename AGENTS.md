@@ -84,6 +84,8 @@ The app is only a bridge: herdr owns every pty, scrollback and agent state.
 
 ## Maintainer workflow
 
+- Fork upstream synchronization is the squash exception: preserve the actual upstream merge parent and fast-forward the exact verified commit. Follow `docs/upstream-sync.md`; copied source or baseline equality does not prove upstream ancestry.
+
 - PRs only, squash merged; the title is `type(scope): summary` and the merge adds `(#N)`. `main`
   requires the "Fast checks", "Integration and browser" and "Native Windows install" (GitHub App
   ID `15368`) checks, plus every review thread resolved.

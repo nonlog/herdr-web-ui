@@ -4,8 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// The auto-sync workflow runs git apply --3way against a previous upstream
-// baseline. Test with disposable repositories, not this checkout or herdr.
+// Exercise real Git merge ancestry with disposable repositories, never this checkout or herdr.
 const fixtures: string[] = [];
 afterEach(() => {
   for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -20,7 +19,7 @@ function git(root: string, ...args: string[]): string {
   }).trim();
 }
 
-function fixture(): { root: string; previous: string; latest: string } {
+function fixture(workflow = false): { root: string; previous: string; latest: string } {
   const root = mkdtempSync(join(tmpdir(), "herdr-upstream-sync-"));
   fixtures.push(root);
   git(root, "init", "-q");
@@ -36,7 +35,7 @@ function fixture(): { root: string; previous: string; latest: string } {
   const previous = git(root, "rev-parse", "HEAD");
   git(root, "switch", "-qc", "upstream");
   writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'base';\nexport const search = true;\n");
-  writeFileSync(join(root, ".github", "workflows", "ci.yml"), "name: new-upstream-workflow\n");
+  if (workflow) writeFileSync(join(root, ".github", "workflows", "ci.yml"), "name: new-upstream-workflow\n");
   git(root, "add", ".");
   git(root, "commit", "-qm", "upstream additions");
   const latest = git(root, "rev-parse", "HEAD");
@@ -44,25 +43,21 @@ function fixture(): { root: string; previous: string; latest: string } {
   return { root, previous, latest };
 }
 
-function sourcePatch(root: string, previous: string, latest: string): string {
-  return git(root, "diff", "--binary", previous, latest, "--", ".", ":(exclude).github/workflows") + "\n";
-}
-
-test("non-workflow upstream features apply without replacing fork-specific fixes", () => {
-  const { root, previous, latest } = fixture();
+test("upstream commits become ancestors without replacing fork-specific fixes", () => {
+  const { root, latest } = fixture();
   writeFileSync(join(root, "src", "local-history.ts"), "export const nativeGeometry = true;\n");
   git(root, "add", ".");
   git(root, "commit", "-qm", "fork-only Windows controller");
-  const patch = sourcePatch(root, previous, latest);
-  const applied = spawnSync("git", ["apply", "--index", "--3way", "-"], { cwd: root, input: patch, encoding: "utf8" });
-  expect(applied.status).toBe(0);
+  git(root, "merge", "--no-ff", "--no-commit", latest);
+  git(root, "commit", "-qm", "merge upstream history");
+  expect(git(root, "rev-list", "--count", `HEAD..${latest}`)).toBe("0");
   expect(readFileSync(join(root, "src", "terminal.ts"), "utf8")).toContain("search = true");
   expect(readFileSync(join(root, "src", "local-history.ts"), "utf8")).toContain("nativeGeometry = true");
   expect(readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8")).toBe("name: existing\n");
 });
 
 test("conflicting edits are rejected for review rather than choosing incoming code", () => {
-  const { root, previous } = fixture();
+  const { root } = fixture();
   git(root, "switch", "upstream");
   writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'upstream';\nexport const search = true;\n");
   git(root, "add", ".");
@@ -72,17 +67,20 @@ test("conflicting edits are rejected for review rather than choosing incoming co
   writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'fork';\n");
   git(root, "add", ".");
   git(root, "commit", "-qm", "fork behavior");
-  const applied = spawnSync("git", ["apply", "--index", "--3way", "-"], { cwd: root, input: sourcePatch(root, previous, latest), encoding: "utf8" });
+  const applied = spawnSync("git", ["merge", "--no-ff", "--no-commit", latest], { cwd: root, encoding: "utf8" });
   expect(applied.status).not.toBe(0);
   expect(git(root, "diff", "--name-only", "--diff-filter=U")).toContain("src/terminal.ts");
 });
 
-test.skipIf(process.platform === "win32")("the sync script fails with a conflict summary without publishing a tracking PR", () => {
-  const { root, previous } = fixture();
+for (const reason of ["conflict", "workflow", "legacy", "manual", "merged"]) {
+test.skipIf(process.platform === "win32")(`the sync script holds ${reason} for review without publishing a tracking PR`, () => {
+  const { root, previous } = fixture(reason === "workflow");
   git(root, "switch", "upstream");
-  writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'upstream';\nexport const search = true;\n");
-  git(root, "add", ".");
-  git(root, "commit", "-qm", "upstream changes the same terminal setting");
+  if (reason === "conflict") {
+    writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'upstream';\nexport const search = true;\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "upstream changes the same terminal setting");
+  }
   const latest = git(root, "rev-parse", "HEAD");
   git(root, "switch", "fork");
   const remotes = mkdtempSync(join(tmpdir(), "herdr-upstream-remotes-"));
@@ -92,15 +90,19 @@ test.skipIf(process.platform === "win32")("the sync script fails with a conflict
   git(root, "clone", "--bare", root, upstream);
   git(upstream, "update-ref", "refs/heads/main", latest);
   git(root, "switch", "-c", "main");
-  writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'fork';\n");
+  if (reason === "merged") git(root, "merge", "--no-ff", "--no-commit", latest);
+  if (reason === "conflict") writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'fork';\n");
+  if (reason === "legacy") writeFileSync(join(root, "src", "terminal.ts"), git(root, "show", `${latest}:src/terminal.ts`) + "\n");
   mkdirSync(join(root, "docs"));
   writeFileSync(join(root, "docs", "upstream-sync-state.json"), JSON.stringify({
-    upstream: "devswha/herdr-web-ui", last_applied_sha: previous, workflow_changes_pending: [],
+    upstream: "devswha/herdr-web-ui", last_merged_sha: reason === "legacy" || reason === "merged" ? latest : previous,
   }));
   git(root, "add", ".");
   git(root, "commit", "-qm", "fork baseline and incompatible terminal");
   const base = git(root, "rev-parse", "HEAD");
   git(root, "clone", "--bare", root, origin);
+  const branch = `automation/upstream-sync-${base.slice(0, 12)}-${latest.slice(0, 12)}`;
+  if (reason === "manual") git(origin, "update-ref", `refs/heads/${branch}`, base);
   git(root, "remote", "add", "origin", origin);
   git(root, "config", `url.${upstream.replaceAll("\\", "/")}.insteadOf`, "https://github.com/devswha/herdr-web-ui.git");
   const summary = join(remotes, "summary.md");
@@ -113,13 +115,17 @@ test.skipIf(process.platform === "win32")("the sync script fails with a conflict
     cwd: root, encoding: "utf8", timeout: 15_000,
     env: { ...process.env, GH_REPO: "nonlog/herdr-web-ui", GITHUB_STEP_SUMMARY: summary, GH_CALL_LOG: calls },
   });
-  expect(result.status).toBe(1);
-  expect(readFileSync(summary, "utf8")).toContain("src/terminal.ts");
-  expect(result.stdout).toContain("::error::Upstream source sync requires review");
+  expect(result.status).toBe(reason === "merged" ? 0 : 1);
+  if (reason === "legacy") expect(readFileSync(summary, "utf8")).toContain("baseline is not in main history");
+  if (reason === "merged") expect(readFileSync(summary, "utf8")).toContain("upstream is an ancestor of main");
+  if (reason === "conflict" || reason === "workflow") expect(readFileSync(summary, "utf8")).toContain(reason === "workflow" ? ".github/workflows/ci.yml" : "src/terminal.ts");
+  if (reason === "manual") expect(result.stderr).toContain("refusing to overwrite");
+  else if (reason !== "merged") expect(result.stdout).toContain("::error::Upstream commit sync requires review");
   expect(git(origin, "rev-parse", "main")).toBe(base);
-  expect(git(origin, "for-each-ref", "--format=%(refname)", "refs/heads/automation/")).toBe("");
+  expect(git(origin, "for-each-ref", "--format=%(refname)", "refs/heads/automation/")).toBe(reason === "manual" ? `refs/heads/${branch}` : "");
   expect(() => readFileSync(calls)).toThrow();
 });
+}
 
 for (const sensitive of ["", "portal.ts", "index.ts"]) {
   test.skipIf(process.platform === "win32")(`complete sync ${sensitive ? `holds ${sensitive} changes for review` : "promotes the tested commit and dispatches Pages"}`, () => {
@@ -127,7 +133,7 @@ for (const sensitive of ["", "portal.ts", "index.ts"]) {
     git(root, "switch", "-c", "main");
     mkdirSync(join(root, "docs"));
     writeFileSync(join(root, "docs", "upstream-sync-state.json"), JSON.stringify({
-      upstream: "devswha/herdr-web-ui", last_applied_sha: previous, workflow_changes_pending: [],
+      upstream: "devswha/herdr-web-ui", last_merged_sha: previous,
     }));
     writeFileSync(join(root, "src", "local-history.ts"), "export const nativeGeometry = true;\n");
     git(root, "add", ".");
@@ -173,22 +179,25 @@ for (const sensitive of ["", "portal.ts", "index.ts"]) {
       env: { ...process.env, GH_REPO: "nonlog/herdr-web-ui", GITHUB_STEP_SUMMARY: summary, GH_CALL_LOG: calls },
     });
     expect(result.status).toBe(0);
-    const candidate = git(origin, "rev-parse", "automation/upstream-source-sync");
+    const branch = `automation/upstream-sync-${base.slice(0, 12)}-${target.slice(0, 12)}`;
+    const candidate = git(origin, "rev-parse", branch);
     expect(JSON.parse(git(origin, "show", `${candidate}:docs/upstream-sync-state.json`))).toMatchObject({
-      last_applied_sha: target, workflow_changes_pending: [".github/workflows/ci.yml"],
+      last_merged_sha: target,
     });
+    expect(git(origin, "show", "-s", "--format=%P", candidate)).toBe(`${base} ${target}`);
+    expect(git(origin, "rev-list", "--count", `${candidate}..${target}`)).toBe("0");
     expect(git(origin, "show", `${candidate}:src/local-history.ts`)).toContain("nativeGeometry = true");
     expect(git(origin, "show", `${candidate}:.github/workflows/ci.yml`)).toBe("name: existing");
     expect(git(origin, "show", "-s", "--format=%an <%ae>%n%cn <%ce>", candidate)).toBe("Codex <codex@openai.com>\nCodex <codex@openai.com>");
     const published = readFileSync(calls, "utf8");
-    expect(published).toContain("workflow run ci.yml --repo nonlog/herdr-web-ui --ref automation/upstream-source-sync");
+    expect(published).toContain(`workflow run ci.yml --repo nonlog/herdr-web-ui --ref ${branch}`);
     expect(git(origin, "rev-parse", "main")).toBe(sensitive ? base : candidate);
     if (sensitive) {
-      expect(published).toContain("pr create --repo nonlog/herdr-web-ui --base main --head automation/upstream-source-sync --draft");
+      expect(published).toContain(`pr create --repo nonlog/herdr-web-ui --base main --head ${branch} --draft`);
       expect(published).not.toContain("workflow run pages.yml");
     } else {
       expect(published).toContain("workflow run pages.yml --repo nonlog/herdr-web-ui --ref main");
-      expect(readFileSync(summary, "utf8")).toContain(`Integrated upstream source through ${target}`);
+      expect(readFileSync(summary, "utf8")).toContain(`Merged upstream commits through ${target}`);
     }
   });
 }

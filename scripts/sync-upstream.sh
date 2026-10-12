@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Integrate upstream *source* changes with 3-way patching while retaining fork
-# history. The temporary GITHUB_TOKEN deliberately never updates workflow files.
+# Merge actual upstream commits. Never substitute copied source for ancestry.
 set -euo pipefail
 export LC_ALL=C
 export GIT_AUTHOR_NAME=Codex GIT_AUTHOR_EMAIL=codex@openai.com
@@ -8,7 +7,6 @@ export GIT_COMMITTER_NAME=Codex GIT_COMMITTER_EMAIL=codex@openai.com
 
 [[ "${GH_REPO:-}" == "nonlog/herdr-web-ui" ]] || { echo "Unexpected repository" >&2; exit 1; }
 upstream_url="https://github.com/devswha/herdr-web-ui.git"
-branch="automation/upstream-source-sync"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -21,103 +19,104 @@ base="$(git rev-parse refs/remotes/origin/main)"
 latest="$(git rev-parse refs/remotes/upstream/main)"
 state="docs/upstream-sync-state.json"
 [[ -f "$state" ]] || { echo "Missing tracked upstream integration baseline" >&2; exit 1; }
-previous="$(jq -er '.last_applied_sha' "$state")"
+previous="$(jq -er '.last_merged_sha // .last_applied_sha' "$state")"
 [[ "$(jq -r .upstream "$state")" == devswha/herdr-web-ui ]] || { echo "Unknown upstream state owner" >&2; exit 1; }
 git cat-file -e "${previous}^{commit}"
 git merge-base --is-ancestor "$previous" "$latest" || {
   echo "Upstream history was rewritten; existing baseline is not its ancestor" >&2
   exit 1
 }
-if [[ "$previous" == "$latest" ]]; then
-  echo "No new upstream changes" | tee -a "$GITHUB_STEP_SUMMARY"
+if git merge-base --is-ancestor "$latest" "$base"; then
+  echo "No new upstream commits; upstream is an ancestor of main" | tee -a "$GITHUB_STEP_SUMMARY"
   exit 0
 fi
 
-git diff --name-only "$previous" "$latest" -- .github/workflows > "$tmp/workflows"
-git diff --name-only "$previous" "$latest" -- . ':(exclude).github/workflows' > "$tmp/source-files"
-git diff --binary --no-ext-diff "$previous" "$latest" -- . ':(exclude).github/workflows' > "$tmp/source.patch"
+git log --format= --name-only "$base..$latest" -- .github/workflows | sed '/^$/d' | sort -u > "$tmp/workflows"
+git diff --name-only "$previous" "$latest" > "$tmp/source-files"
+: > "$tmp/conflicts"
 
 # A conflict report belongs to this run, not a mergeable document-only PR.
 review() {
   local reason="$1"
   {
-    echo '# Upstream source update requires review'
+    echo '# Upstream commit update requires review'
     echo
     echo '**No upstream code was promoted to main. Resolve the listed conflicts and run full CI.**'
     echo
     echo "Reason: $reason"
     echo "Fork base: $base"
-    echo "Last processed upstream: $previous"
+    echo "Recorded upstream baseline: $previous"
     echo "New upstream tip: $latest"
     echo
     echo 'Unresolved paths:'
     if [[ -s "$tmp/conflicts" ]]; then sed 's/^/- /' "$tmp/conflicts"; else echo '- Not identified'; fi
     echo
-    echo 'Upstream source changes (workflow files excluded):'
+    echo 'Upstream changes:'
     sed 's/^/- /' "$tmp/source-files"
     echo
-    echo 'Upstream workflow files excluded because GITHUB_TOKEN cannot modify them:'
+    echo 'Workflow history requiring maintainer permissions:'
     if [[ -s "$tmp/workflows" ]]; then sed 's/^/- /' "$tmp/workflows"; else echo '- None'; fi
     echo
     echo 'Resolve using a fresh branch, keep docs/fork-features.md capabilities,'
     echo 'and submit the exact result to GitHub Actions CI before merging.'
-    echo 'Update docs/upstream-sync-state.json only for changes actually integrated.'
+    echo 'Keep the upstream merge parent; do not squash the synchronization commit.'
   } | tee -a "$GITHUB_STEP_SUMMARY"
-  echo "::error::Upstream source sync requires review: $reason"
+  echo "::error::Upstream commit sync requires review: $reason"
 }
 
-git checkout -B upstream-sync-candidate "$base"
-: > "$tmp/conflicts"
-if [[ -s "$tmp/source.patch" ]]; then
-  if ! git apply --index --3way "$tmp/source.patch" > "$tmp/apply.log" 2>&1; then
-    git diff --name-only --diff-filter=U > "$tmp/conflicts" || true
-    if [[ ! -s "$tmp/conflicts" ]]; then cat "$tmp/apply.log" >> "$tmp/conflicts"; fi
-    review 'source code conflicts during three-way patch application'
-    exit 1
-  fi
+if ! git merge-base --is-ancestor "$previous" "$base"; then
+  review 'recorded source baseline is not in main history; a real maintainer merge is required'
+  exit 1
+fi
+if [[ -s "$tmp/workflows" ]]; then
+  review 'upstream workflow commits require maintainer review and workflow write permission'
+  exit 1
 fi
 
-# Source integration deliberately squashes only non-workflow changes. This avoids
-# the GitHub App workflows permission restriction, without storing a PAT.
-changed_workflows="$(jq -R -s 'split("\n") | map(select(length>0))' < "$tmp/workflows")"
-jq -n --arg sha "$latest" --argjson old "$(cat "$state")" \
-  --argjson changed "$changed_workflows" \
-  '{upstream:"devswha/herdr-web-ui",last_applied_sha:$sha,
-    workflow_changes_pending:( ($old.workflow_changes_pending // []) + $changed | unique | sort )}' > "$tmp/newstate"
+branch="automation/upstream-sync-${base:0:12}-${latest:0:12}"
+git checkout -B upstream-sync-candidate "$base"
+if ! git merge --no-ff --no-commit "$latest" > "$tmp/merge.log" 2>&1; then
+  git diff --name-only --diff-filter=U > "$tmp/conflicts" || true
+  if [[ ! -s "$tmp/conflicts" ]]; then cat "$tmp/merge.log" >> "$tmp/conflicts"; fi
+  review 'source code conflicts during Git merge'
+  exit 1
+fi
+
+jq -n --arg sha "$latest" \
+  '{upstream:"devswha/herdr-web-ui",last_merged_sha:$sha}' > "$tmp/newstate"
 cp "$tmp/newstate" "$state"
 git add "$state"
-if git diff --cached --quiet; then
-  echo "No source or state changes; nothing to promote" | tee -a "$GITHUB_STEP_SUMMARY"
-  exit 0
-fi
 
 # Changes to authentication and ingress enforcement need scrutiny beyond
 # application CI. Regular terminal, UI, API, tests, installers and dependencies
-# auto-integrate if Git's 3-way apply and all platform CI jobs succeed.
+# auto-integrate if Git merge and all platform CI jobs succeed.
 git diff --cached --name-only > "$tmp/changed"
 : > "$tmp/security"
 while IFS= read -r file; do
   case "$file" in
-    server/auth.ts|server/access.ts|server/machine-security.ts|server/ssh.ts|server/input-guard.ts|server/http.ts|server/open-access.ts|server/portal.ts|server/index.ts)
+    server/auth.ts|server/access.ts|server/machine-security.ts|server/ssh.ts|server/input-guard.ts|server/http.ts|server/open-access.ts|server/portal.ts|server/index.ts|scripts/sync-upstream.sh|.github/actions/*)
       echo "$file" >> "$tmp/security" ;;
   esac
 done < "$tmp/changed"
 
-git diff --cached --check || { review 'source patch has whitespace errors'; exit 1; }
-git commit -m "chore: integrate upstream source $(git rev-parse --short=12 "$latest")" \
-  -m 'Sync-Generated-By: nonlog/upstream-source-sync' -m "Upstream-Source-SHA: $latest"
+git diff --cached --check || { review 'merge has whitespace errors'; exit 1; }
+git commit -m "chore(sync): merge upstream $(git rev-parse --short=12 "$latest")" \
+  -m 'Sync-Generated-By: nonlog/upstream-commit-sync' -m "Upstream-Merged-SHA: $latest"
 candidate="$(git rev-parse HEAD)"
+git merge-base --is-ancestor "$latest" "$candidate" || { echo "Candidate lost upstream history" >&2; exit 1; }
 ref="refs/heads/$branch"
 earlier=""
 if git ls-remote --heads --exit-code origin "$ref" >/dev/null 2>&1; then
   git fetch --no-tags origin "+$ref:refs/remotes/origin/$branch"
   earlier="$(git rev-parse "refs/remotes/origin/$branch")"
-  if ! git merge-base --is-ancestor "$earlier" "$base" &&
-     ! git show -s --format=%B "$earlier" | grep -qx 'Sync-Generated-By: nonlog/upstream-source-sync'; then
-    echo "Existing candidate branch contains manual work; refusing to overwrite" >&2
+  if [[ "$(git rev-parse "$earlier^{tree}")" != "$(git rev-parse "$candidate^{tree}")" ]] ||
+     [[ "$(git show -s --format=%P "$earlier")" != "$base $latest" ]] ||
+     ! git show -s --format=%B "$earlier" | grep -qx 'Sync-Generated-By: nonlog/upstream-commit-sync'; then
+    echo "Existing candidate branch differs from the generated merge; refusing to overwrite" >&2
     exit 1
   fi
-  git push "--force-with-lease=$ref:$earlier" origin "HEAD:$ref"
+  git checkout --detach "$earlier"
+  candidate="$earlier"
 else
   git push origin "HEAD:$ref"
 fi
@@ -159,10 +158,10 @@ fi
 if [[ -s "$tmp/security" ]]; then
   details="$(sed 's/^/- /' "$tmp/security")"
   number="$(gh pr list --repo "$GH_REPO" --state open --base main --head "$branch" --json number --jq '.[0].number // empty')"
-  printf 'Upstream source %s passed complete CI (run %s), but changes security-sensitive files:\n\n%s\n\nReview before merging; do not force-push the base.\n' "$latest" "$run_id" "$details" > "$tmp/security-review.md"
+  printf 'Upstream commits through %s passed complete CI (run %s), but change security-sensitive files:\n\n%s\n\nReview before merging; preserve upstream ancestry and do not squash or force-push this branch.\n' "$latest" "$run_id" "$details" > "$tmp/security-review.md"
   if [[ -z "$number" ]]; then
     gh pr create --repo "$GH_REPO" --base main --head "$branch" --draft \
-      --title 'chore: upstream source sync security review' --body-file "$tmp/security-review.md"
+      --title 'chore(sync): upstream commit security review' --body-file "$tmp/security-review.md"
   else
     gh pr edit "$number" --repo "$GH_REPO" --body-file "$tmp/security-review.md"
   fi
@@ -182,10 +181,6 @@ git push origin "$candidate:refs/heads/main"
 # GITHUB_TOKEN pushes do not trigger push workflows; publish the validated source explicitly.
 gh workflow run pages.yml --repo "$GH_REPO" --ref main
 {
-  echo "Integrated upstream source through $latest"
+  echo "Merged upstream commits through $latest; upstream is an ancestor of main"
   echo "CI: https://github.com/$GH_REPO/actions/runs/$run_id"
-  if [[ -s "$tmp/workflows" ]]; then
-    echo "Workflow changes recorded but not applied:"
-    sed 's/^/- /' "$tmp/workflows"
-  fi
 } >> "$GITHUB_STEP_SUMMARY"

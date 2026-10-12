@@ -1,7 +1,7 @@
 name: Upstream sync
 
-# Follow devswha/herdr-web-ui without replacing the Windows and multi-client
-# functionality maintained by this fork. Conflicts fail with a report in the run summary.
+# Merge real upstream commits while retaining fork features. Conflicts and
+# workflow-history permission limits fail with a report instead of copying source.
 on:
   schedule:
     - cron: '23 2 * * *'
