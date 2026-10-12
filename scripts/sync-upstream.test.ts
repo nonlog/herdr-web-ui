@@ -120,3 +120,75 @@ test.skipIf(process.platform === "win32")("the sync script fails with a conflict
   expect(git(origin, "for-each-ref", "--format=%(refname)", "refs/heads/automation/")).toBe("");
   expect(() => readFileSync(calls)).toThrow();
 });
+
+for (const sensitive of ["", "portal.ts", "index.ts"]) {
+  test.skipIf(process.platform === "win32")(`complete sync ${sensitive ? `holds ${sensitive} changes for review` : "promotes the tested commit and dispatches Pages"}`, () => {
+    const { root, previous, latest } = fixture();
+    git(root, "switch", "-c", "main");
+    mkdirSync(join(root, "docs"));
+    writeFileSync(join(root, "docs", "upstream-sync-state.json"), JSON.stringify({
+      upstream: "devswha/herdr-web-ui", last_applied_sha: previous, workflow_changes_pending: [],
+    }));
+    writeFileSync(join(root, "src", "local-history.ts"), "export const nativeGeometry = true;\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "fork baseline and Windows feature");
+    const base = git(root, "rev-parse", "HEAD");
+    const remotes = mkdtempSync(join(tmpdir(), "herdr-upstream-success-"));
+    fixtures.push(remotes);
+    const upstream = join(remotes, "upstream.git");
+    const origin = join(remotes, "origin.git");
+    git(root, "clone", "--bare", root, upstream);
+    let target = latest;
+    if (sensitive) {
+      git(root, "switch", "upstream");
+      mkdirSync(join(root, "server"));
+      writeFileSync(join(root, "server", sensitive), "export const publicIngress = true;\n");
+      git(root, "add", ".");
+      git(root, "commit", "-qm", "upstream public ingress");
+      target = git(root, "rev-parse", "HEAD");
+      git(root, "switch", "main");
+    }
+    git(upstream, "fetch", root, target);
+    git(upstream, "update-ref", "refs/heads/main", target);
+    git(root, "clone", "--bare", root, origin);
+    git(root, "remote", "add", "origin", origin);
+    git(root, "config", `url.${upstream.replaceAll("\\", "/")}.insteadOf`, "https://github.com/devswha/herdr-web-ui.git");
+    const summary = join(remotes, "summary.md");
+    const calls = join(remotes, "gh-calls");
+    const result = spawnSync("bash", ["-c", `
+      gh() {
+        printf '%s\\n' "$*" >> "$GH_CALL_LOG"
+        case "$1 $2" in
+          'workflow run'|'pr create') return 0;;
+          'run list') printf '[{"databaseId":123,"headSha":"%s","createdAt":"%s"}]\\n' "$(git rev-parse HEAD)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)";;
+          'run view') printf '{"status":"completed","conclusion":"success","headSha":"%s","jobs":[{"name":"Native Windows install","conclusion":"success"},{"name":"Native macOS session identity","conclusion":"success"},{"name":"Fast checks","conclusion":"success"},{"name":"Integration and browser","conclusion":"success"}]}\\n' "$(git rev-parse HEAD)";;
+          'pr list') return 0;;
+          *) return 99;;
+        esac
+      }
+      export -f gh
+      source "$1"
+    `, "sync-test", join(import.meta.dir, "sync-upstream.sh")], {
+      cwd: root, encoding: "utf8", timeout: 15_000,
+      env: { ...process.env, GH_REPO: "nonlog/herdr-web-ui", GITHUB_STEP_SUMMARY: summary, GH_CALL_LOG: calls },
+    });
+    expect(result.status).toBe(0);
+    const candidate = git(origin, "rev-parse", "automation/upstream-source-sync");
+    expect(JSON.parse(git(origin, "show", `${candidate}:docs/upstream-sync-state.json`))).toMatchObject({
+      last_applied_sha: target, workflow_changes_pending: [".github/workflows/ci.yml"],
+    });
+    expect(git(origin, "show", `${candidate}:src/local-history.ts`)).toContain("nativeGeometry = true");
+    expect(git(origin, "show", `${candidate}:.github/workflows/ci.yml`)).toBe("name: existing");
+    expect(git(origin, "show", "-s", "--format=%an <%ae>%n%cn <%ce>", candidate)).toBe("Codex <codex@openai.com>\nCodex <codex@openai.com>");
+    const published = readFileSync(calls, "utf8");
+    expect(published).toContain("workflow run ci.yml --repo nonlog/herdr-web-ui --ref automation/upstream-source-sync");
+    expect(git(origin, "rev-parse", "main")).toBe(sensitive ? base : candidate);
+    if (sensitive) {
+      expect(published).toContain("pr create --repo nonlog/herdr-web-ui --base main --head automation/upstream-source-sync --draft");
+      expect(published).not.toContain("workflow run pages.yml");
+    } else {
+      expect(published).toContain("workflow run pages.yml --repo nonlog/herdr-web-ui --ref main");
+      expect(readFileSync(summary, "utf8")).toContain(`Integrated upstream source through ${target}`);
+    }
+  });
+}
