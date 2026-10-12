@@ -121,8 +121,8 @@ test.skipIf(process.platform === "win32")("the sync script fails with a conflict
   expect(() => readFileSync(calls)).toThrow();
 });
 
-for (const sensitive of [false, true]) {
-  test.skipIf(process.platform === "win32")(`complete sync ${sensitive ? "holds Portal changes for review" : "promotes the tested commit and dispatches Pages"}`, () => {
+for (const sensitive of ["", "portal.ts", "index.ts"]) {
+  test.skipIf(process.platform === "win32")(`complete sync ${sensitive ? `holds ${sensitive} changes for review` : "promotes the tested commit and dispatches Pages"}`, () => {
     const { root, previous, latest } = fixture();
     git(root, "switch", "-c", "main");
     mkdirSync(join(root, "docs"));
@@ -142,7 +142,7 @@ for (const sensitive of [false, true]) {
     if (sensitive) {
       git(root, "switch", "upstream");
       mkdirSync(join(root, "server"));
-      writeFileSync(join(root, "server", "portal.ts"), "export const publicIngress = true;\n");
+      writeFileSync(join(root, "server", sensitive), "export const publicIngress = true;\n");
       git(root, "add", ".");
       git(root, "commit", "-qm", "upstream public ingress");
       target = git(root, "rev-parse", "HEAD");
