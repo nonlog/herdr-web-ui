@@ -117,7 +117,7 @@ it("watch credentials cannot mutate HTTP state, read credential files, or elevat
   }, websocket: { open(ws) { ws.data.relay.bind(ws); }, message(ws, raw) { ws.data.relay.message(raw); }, close(ws) { ws.data.relay.close(); } } });
   try {
     expect((await fetch(`${base}/api/session`, { headers })).status).toBe(200);
-    for (const path of ["pane/input", "workspace/create", "tab/create", "tab/rename", "tab/close", "machines/setup", "updates/install", "herdr/update"]) {
+    for (const path of ["pane/input", "workspace/create", "tab/create", "tab/rename", "tab/close", "machines/setup", "updates/install", "herdr/update", "portal/start", "portal/stop"]) {
       expect((await fetch(`${base}/api/${path}`, { method: "POST", headers, body: "{}" })).status).toBe(403);
     }
     // the shared settings: a watching device reads them, and cannot change them for every browser

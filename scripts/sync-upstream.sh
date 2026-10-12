@@ -98,7 +98,7 @@ git diff --cached --name-only > "$tmp/changed"
 : > "$tmp/security"
 while IFS= read -r file; do
   case "$file" in
-    server/auth.ts|server/access.ts|server/machine-security.ts|server/ssh.ts|server/input-guard.ts|server/http.ts|server/open-access.ts)
+    server/auth.ts|server/access.ts|server/machine-security.ts|server/ssh.ts|server/input-guard.ts|server/http.ts|server/open-access.ts|server/portal.ts)
       echo "$file" >> "$tmp/security" ;;
   esac
 done < "$tmp/changed"

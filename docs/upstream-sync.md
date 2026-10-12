@@ -11,6 +11,7 @@
 - 原生 `GITHUB_TOKEN` 仅在检查工作流中申请源代码、PR 与 Actions 所需权限，**不会运行来自上游的代码**。实际验证通过只读权限的独立 CI 执行。
 - 合并候选发布到 `automation/upstream-source-sync`，工作流**显式触发完整 CI**。须全部通过 **Native Windows install**、**Native macOS session identity**、**Fast checks**、**Integration and browser**，且 Fork / 上游 / 候选提交 SHA 都未变化，才会把**经测试的同一提交快进到 `main`**。
 - 正常成功不创建重复 PR；CI 失败保留候选分支，不更新 `main`；认证和入口保护文件变更即使 CI 全绿也留 Draft PR 审核。
+- 公网 Portal 管理的 `server/portal.ts` 同样需要审核。Windows 专属浏览器检查独立验证，不改变上游测试对脚本数量的断言，避免上游增加检查时反复冲突。
 - Git 三方补丁无法自动处理的冲突会让工作流失败，具体文件列在该次 Actions 的 Summary 中；不创建只有报告的 PR，避免把报告误当作源码更新合并。已有人工 review 分支不会被改动。
 - 自动同步使用 `GITHUB_TOKEN` 推进 `main` 后会显式启动 Website 工作流，因为这种推送不会触发 GitHub 的 `push` 工作流。Pages 的发布来源须设为 **GitHub Actions**。
 

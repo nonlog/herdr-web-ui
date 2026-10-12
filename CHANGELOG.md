@@ -3,6 +3,9 @@
 ## [Unreleased - nonlog fork]
 
 ### Fork changes
+- Integrate upstream source through `5a9fe391e823`, keep fork browser checks independent
+  of upstream script counts, and verify macOS Portal cleanup with paths containing spaces.
+  Require review for future Portal changes and cover automatic main promotion and Pages dispatch.
 - Integrate upstream source through `10fd26f5f13f` while preserving native Windows
   terminals and local history. Report blocked syncs as failed Actions runs instead
   of document-only PRs, require full CI for dispatched candidates, and explicitly
@@ -43,6 +46,13 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
 ## [Unreleased]
 
 ### Added
+- **Settings → Phone & devices → Portal** gives this PC a public HTTPS address through
+  [Portal](https://github.com/gosuda/portal-tunnel), with no account and no domain of your own.
+  With Portal v2.6.1 or later installed, **Start** runs it on a relay you enter, dropping any
+  `Tailscale-User-Login` header a visitor sends; it starts only with `HERDR_WEB_TOKEN` set. The
+  address and its QR code show on every signed-in device, any device that can type into your
+  terminals can stop it, and an address left on comes back when the app restarts.
+  ([#746](https://github.com/devswha/herdr-web-ui/pull/746) by @rabbitson87)
 - **Two tabs side by side** on a desktop, from different workspaces or PCs: drag a tab down out
   of its strip, or a sidebar row over the pane area, and drop it on the left or right half. A guide
   shows the two halves as soon as the drag starts and keeps its side steady at the centre; Escape
@@ -105,6 +115,16 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#860](https://github.com/devswha/herdr-web-ui/pull/860))
 
 ### Fixed
+- A message another Claude Code session sends into a pane (its `peer` messages) shows in the chat as
+  a folded **Message from another session: {name}** that opens its own turn, instead of being skipped so the work it
+  started was appended to the answer before it.
+- Attached files upload three at a time instead of one after another, and each file's `@path` goes
+  to the start of the message in the order the files were picked, once a `/command` being typed or
+  an IME composition is finished. It used to go where the caret
+  was, so a path that arrived while you typed landed in the middle of your words and moved the caret.
+- One paste, pick or drop attaches up to 20 files instead of silently keeping the first four, and
+  the message box says how many it left out. **Settings → Chat → Files at once** sets the number
+  for the device, from 1 to 50.
 - Web UI SSH connections no longer open extra tunnels configured in the account’s SSH config.
   ([#606](https://github.com/devswha/herdr-web-ui/pull/606) by @sobir-git)
 - **Send now** on a working Codex pane sends the message at once. Codex kept it until its next
