@@ -1,6 +1,6 @@
 /**
- * The demo's authoritative binary split tree. Recorded fixtures carry only rects, so their
- * initial tree is recovered once. Every subsequent split, resize, swap and close edits that
+ * The demo's authoritative binary split tree. Recorded split paths preserve their hierarchy;
+ * older fixtures with rects alone have their initial tree recovered once. Every subsequent split, resize, swap and close edits that
  * same tree; reconstructing a grid after each operation would lose its creation hierarchy.
  * Zoom changes visibility only, never this tree. Descendant minimum sizes keep every leaf
  * at least one cell wide and tall even when an ancestor shrinks.
@@ -32,19 +32,22 @@ function cutLine(panes: LayoutPane[], rect: PaneLayoutRect, direction: SplitDire
   return lines.find((line) => panes.every((pane) => end(pane.rect, direction) <= line || start(pane.rect, direction) >= line)) ?? null;
 }
 
-function build(panes: LayoutPane[], rect: PaneLayoutRect): Node | null {
+function build(panes: LayoutPane[], rect: PaneLayoutRect, splits: Map<string, PaneLayoutSnapshot["splits"][number]>, path = ""): Node | null {
   if (panes.length === 0) return null;
   if (panes.length === 1) return { pane: panes[0]!, rect };
-  for (const direction of ["right", "down"] as const) {
-    const line = cutLine(panes, rect, direction);
+  const recorded = splits.get(path);
+  const directions: SplitDirection[] = recorded?.direction === "right" ? ["right"] : recorded?.direction === "down" ? ["down"] : ["right", "down"];
+  for (const direction of directions) {
+    const extent = direction === "right" ? rect.width : rect.height;
+    const line = recorded ? start(rect, direction) + Math.round(extent * recorded.ratio) : cutLine(panes, rect, direction);
     if (line === null) continue;
     const horizontal = direction === "right";
     const firstRect = horizontal ? { ...rect, width: line - rect.x } : { ...rect, height: line - rect.y };
     const secondRect = horizontal ? { ...rect, x: line, width: rect.x + rect.width - line } : { ...rect, y: line, height: rect.y + rect.height - line };
-    const first = build(panes.filter((pane) => end(pane.rect, direction) <= line), firstRect);
-    const second = build(panes.filter((pane) => start(pane.rect, direction) >= line), secondRect);
+    const first = build(panes.filter((pane) => end(pane.rect, direction) <= line), firstRect, splits, `${path}0`);
+    const second = build(panes.filter((pane) => start(pane.rect, direction) >= line), secondRect, splits, `${path}1`);
     if (!first || !second) return null;
-    return { direction, ratio: (line - start(rect, direction)) / (horizontal ? rect.width : rect.height), rect, first, second };
+    return { direction, ratio: recorded?.ratio ?? (line - start(rect, direction)) / extent, rect, first, second };
   }
   return null;
 }
@@ -52,7 +55,12 @@ function build(panes: LayoutPane[], rect: PaneLayoutRect): Node | null {
 function tree(layout: PaneLayoutSnapshot): Node | null {
   const existing = trees.get(layout);
   if (existing) return existing;
-  const root = build(layout.panes, layout.area);
+  const splits = new Map<string, PaneLayoutSnapshot["splits"][number]>();
+  for (const split of layout.splits) {
+    const path = /^split_\d+_(root|[01]+)$/.exec(split.id)?.[1];
+    if (path !== undefined) splits.set(path === "root" ? "" : path, split);
+  }
+  const root = build(layout.panes, layout.area, splits);
   if (root) trees.set(layout, root);
   return root;
 }
@@ -102,7 +110,7 @@ function render(layout: PaneLayoutSnapshot, root: Node): LayoutPane[] {
   layout.splits = [];
   const collect = (node: Node, path: string): void => {
     if (!isSplit(node)) return;
-    layout.splits.push({ id: `split_${path}`, direction: node.direction, ratio: node.ratio, rect: node.rect });
+    layout.splits.push({ id: `split_${layout.splits.length}_${path || "root"}`, direction: node.direction, ratio: node.ratio, rect: node.rect });
     collect(node.first, `${path}0`);
     collect(node.second, `${path}1`);
   };
@@ -164,6 +172,21 @@ export function swapLayoutPanes(layout: PaneLayoutSnapshot, paneId: string, othe
   if (!first || !second) return;
   [first.pane, second.pane] = [second.pane, first.pane];
   layout.panes = render(layout, root);
+}
+
+/** herdr's layout.set_split_ratio: [] names the root, false the first child, true the second. */
+export function setLayoutSplitRatio(layout: PaneLayoutSnapshot, path: readonly boolean[], ratio: number): boolean {
+  const root = tree(layout);
+  if (!root || !Number.isFinite(ratio)) return false;
+  let node = root;
+  for (const second of path) {
+    if (!isSplit(node)) return false;
+    node = second ? node.second : node.first;
+  }
+  if (!isSplit(node)) return false;
+  node.ratio = Math.max(0.1, Math.min(0.9, ratio));
+  layout.panes = render(layout, root);
+  return true;
 }
 
 const OPPOSITE: Record<PaneDirection, PaneDirection> = { left: "right", right: "left", up: "down", down: "up" };

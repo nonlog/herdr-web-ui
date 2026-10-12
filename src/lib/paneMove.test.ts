@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { SessionSnapshot } from "../../shared/protocol.ts";
 import { ComposerDraftStore } from "./composerDraft.ts";
-import { carryPaneRecords, moveRefusal, paneMoveTargets } from "./paneMove.ts";
+import { carryPaneRecords, moveRefusal, paneMovedTo, paneMoveTargets, recordPaneMove } from "./paneMove.ts";
 import { readTerminalDraft, setTerminalDraftSending, writeTerminalDraft } from "./terminalDraft.ts";
 
 const t = (key: string, vars?: Record<string, string | number>): string => key.replace(/\{(\w+)\}/g, (_, name: string) => String(vars?.[name] ?? ""));
@@ -39,6 +39,20 @@ describe("paneMoveTargets", () => {
       { type: "new_tab", workspace_id: "w3" },
       { type: "new_workspace" },
     ]);
+  });
+
+  it("names tabs by their place in the strip after a reorder, so a numeric custom name is not mistaken for another tab", () => {
+    // herdr keeps each tab's number when tabs are reordered: "2" named by the user now sits first
+    const reordered = {
+      workspaces: snapshot.workspaces,
+      tabs: [
+        { tab_id: "w1:tb", workspace_id: "w1", label: "2", number: 3 },
+        { tab_id: "w1:ta", workspace_id: "w1", label: "", number: 1 },
+        { tab_id: "w1:tc", workspace_id: "w1", label: "", number: 2 },
+      ],
+    } as unknown as Pick<SessionSnapshot, "tabs" | "workspaces">;
+    const labels = paneMoveTargets(reordered, { workspace_id: "w1", tab_id: "w1:tc" }, t).filter((target) => target.kind === "tab").map((target) => [target.id, target.label]);
+    expect(labels).toEqual([["tab:w1:tb", "2"], ["tab:w1:ta", "Tab 2"]]);
   });
 
   it("offers a lone pane a new tab and the other workspaces only", () => {
@@ -126,5 +140,26 @@ describe("moveRefusal", () => {
     expect(moveRefusal("locked_layout", t)).toBe("locked_layout");
     expect(moveRefusal(null, t)).toBe("herdr left the pane where it was");
     expect(moveRefusal(undefined, t)).toBe("herdr left the pane where it was");
+  });
+});
+
+describe("paneMovedTo", () => {
+  it("follows a pane through every move this tab saw, on its own PC only", () => {
+    expect(paneMovedTo("pc-moves", "p1")).toBeNull();
+    recordPaneMove("pc-moves", "p1", "p2");
+    recordPaneMove("pc-moves", "p2", "p3");
+    expect(paneMovedTo("pc-moves", "p1")).toBe("p3");
+    expect(paneMovedTo("pc-moves", "p2")).toBe("p3");
+    expect(paneMovedTo("pc-moves", "p3")).toBeNull();
+    expect(paneMovedTo("pc-other", "p1")).toBeNull();
+    expect(paneMovedTo("pc-moves", null)).toBeNull();
+  });
+
+  it("ignores a move that kept the id, and stops on a cycle", () => {
+    recordPaneMove("pc-same", "p1", "p1");
+    expect(paneMovedTo("pc-same", "p1")).toBeNull();
+    recordPaneMove("pc-cycle", "a", "b");
+    recordPaneMove("pc-cycle", "b", "a");
+    expect(["a", "b", null]).toContain(paneMovedTo("pc-cycle", "a"));
   });
 });

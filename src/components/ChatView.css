@@ -10,17 +10,10 @@
 /* The chat's text has its own size (Settings → Chat font size): the view scales the type
    tokens by --chat-scale (lib/settings.ts) and the transcript uses the scaled ones under
    the same names, so every message and code block grows together. The prompt card is outside
-   this view, over the message box, and grows with them: its dock does the same (Composer.css) */
-.chat-view {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  overflow-y: auto;
-  /* at its top, a drag down for older messages is still the transcript's: handed on to the
-     page, Android Chrome takes it for pull-to-refresh and reloads the app */
-  overscroll-behavior: contain;
-  padding: var(--space-4) var(--space-4) var(--space-5);
-  background: var(--bg);
+   this view, over the message box, and grows with them: its dock does the same (Composer.css).
+   A file viewer's Markdown preview is the same rendering, so it takes the chat's size and font too */
+.chat-view,
+.file-viewer-content {
   --chat-fs-2xs: calc(var(--fs-2xs) * var(--chat-scale, 1));
   --chat-fs-xs: calc(var(--fs-xs) * var(--chat-scale, 1));
   --chat-fs-sm: calc(var(--fs-sm) * var(--chat-scale, 1));
@@ -30,6 +23,38 @@
   --chat-fs-body: calc(var(--fs-chat) * var(--chat-scale, 1));
   --chat-fs-lg: calc(var(--fs-lg) * var(--chat-scale, 1));
   --chat-fs-xl: calc(var(--fs-xl) * var(--chat-scale, 1));
+}
+
+.chat-transcript,
+.file-viewer-markdown {
+  --fs-2xs: var(--chat-fs-2xs);
+  --fs-xs: var(--chat-fs-xs);
+  --fs-sm: var(--chat-fs-sm);
+  --fs-md: var(--chat-fs-md);
+  --fs-lg: var(--chat-fs-lg);
+  --fs-xl: var(--chat-fs-xl);
+  /* Settings -> Chat font (lib/settings.ts): the prose only; code, work rows and paths keep --font-mono */
+  font-family: var(--font-chat, var(--font-ui));
+  font-size: var(--fs-md);
+}
+
+.chat-view {
+  position: absolute;
+  inset: 0;
+  /* up under a phone's glass header (styles.css), into the room the stack keeps for it */
+  top: calc(-1 * var(--header-over, 0px));
+  z-index: 1;
+  overflow-y: auto;
+  /* at its top, a drag down for older messages is still the transcript's: handed on to the
+     page, Android Chrome takes it for pull-to-refresh and reloads the app */
+  overscroll-behavior: contain;
+  padding: var(--space-4) var(--space-4) var(--space-5);
+  /* a phone's glass header lies over the transcript's top, and the input card over its end
+     (styles.css, Composer.css): the first and last lines start clear of both */
+  padding-top: calc(var(--space-4) + var(--header-over, 0px));
+  padding-bottom: calc(var(--space-5) + var(--composer-over, 0px));
+  scroll-padding-top: var(--header-over, 0px);
+  background: var(--bg);
 }
 
 /* From 769px the header over the chat has no bar and no rule (styles.css): the transcript
@@ -49,12 +74,6 @@
 }
 
 .chat-transcript {
-  --fs-2xs: var(--chat-fs-2xs);
-  --fs-xs: var(--chat-fs-xs);
-  --fs-sm: var(--chat-fs-sm);
-  --fs-md: var(--chat-fs-md);
-  --fs-lg: var(--chat-fs-lg);
-  --fs-xl: var(--chat-fs-xl);
   width: min(100%, var(--chat-w));
   min-height: 100%;
   margin-inline: auto;
@@ -62,9 +81,6 @@
   flex-direction: column;
   /* an answer sits close under its prompt; the larger space falls between exchanges */
   gap: var(--space-3);
-  /* Settings -> Chat font (lib/settings.ts): the prose only; code, work rows and paths keep --font-mono */
-  font-family: var(--font-chat, var(--font-ui));
-  font-size: var(--fs-md);
 }
 
 .chat-turn {
@@ -261,6 +277,40 @@
   margin-bottom: var(--space-3);
 }
 
+.markdown-image {
+  max-width: 100%;
+  height: auto;
+}
+
+/* a README's centered logo and badges (lib/markdownHtml.ts) */
+.markdown .markdown-center {
+  text-align: center;
+}
+
+.markdown-mermaid-frame {
+  position: relative;
+  margin-bottom: var(--space-3);
+}
+
+.markdown-mermaid {
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+
+.markdown-mermaid svg {
+  max-width: 100%;
+  max-height: 24rem;
+  height: auto;
+}
+
+.markdown-mermaid-zoom {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+}
+
 .markdown p,
 .markdown-h1,
 .markdown-h2,
@@ -271,6 +321,10 @@
 .markdown blockquote,
 .markdown-list {
   margin: 0 0 var(--space-3);
+}
+
+[data-conversation-source="hermes-transcript"] .markdown p {
+  white-space: pre-line;
 }
 
 /* Every agent heading is an h3 (Markdown.tsx: an agent's markdown must not shadow the app's own
@@ -720,7 +774,8 @@
 
 .chat-tool-io pre,
 .chat-tool-io p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-tool-io > :not(:first-child) { margin-top: var(--space-2); }
+/* blocks stacked in a call's detail; a file link inside an output's text is not one */
+.chat-tool-io > :not(:first-child):not(.markdown-file) { margin-top: var(--space-2); }
 
 /* a tool's own pictures (pi reads a file into the result): left-aligned, unlike a user's
    attachments, and only fetched when the row is opened, so the bytes are not on the page */
@@ -781,6 +836,17 @@
 
 .chat-inline-error { color: var(--status-blocked); }
 
+.chat-activity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--status-working);
+  font-size: var(--fs-sm);
+}
+
+.chat-activity svg { width: 1em; height: 1em; flex: none; }
+
 .chat-endcap {
   width: 100%;
   display: flex;
@@ -811,7 +877,7 @@
 .chat-new-messages {
   position: sticky;
   z-index: var(--z-popover);
-  bottom: var(--space-2);
+  bottom: calc(var(--space-2) + var(--composer-over, 0px));
   left: 50%;
   min-height: var(--control-h);
   transform: translateX(-50%);
@@ -823,6 +889,8 @@
 /* chat mode is ONE surface: the stack, the transcript and the composer region all sit on
    --bg; the only card is the composer's input box, on the same column as the transcript */
 .terminal-stack.is-chat {
+  /* a phone's glass header lies over the stack's top: what the stack holds starts below it */
+  padding-top: var(--header-over, 0px);
   background: var(--bg);
 }
 

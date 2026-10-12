@@ -3,11 +3,12 @@
 # history. The temporary GITHUB_TOKEN deliberately never updates workflow files.
 set -euo pipefail
 export LC_ALL=C
+export GIT_AUTHOR_NAME=Codex GIT_AUTHOR_EMAIL=codex@openai.com
+export GIT_COMMITTER_NAME=Codex GIT_COMMITTER_EMAIL=codex@openai.com
 
 [[ "${GH_REPO:-}" == "nonlog/herdr-web-ui" ]] || { echo "Unexpected repository" >&2; exit 1; }
 upstream_url="https://github.com/devswha/herdr-web-ui.git"
 branch="automation/upstream-source-sync"
-review_branch="automation/upstream-source-sync-review"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -36,17 +37,13 @@ git diff --name-only "$previous" "$latest" -- .github/workflows > "$tmp/workflow
 git diff --name-only "$previous" "$latest" -- . ':(exclude).github/workflows' > "$tmp/source-files"
 git diff --binary --no-ext-diff "$previous" "$latest" -- . ':(exclude).github/workflows' > "$tmp/source.patch"
 
-# Save a draft *tracking* PR when a source merge is not safe. It contains only
-# a report: it is NOT a diff that anyone should merge to gain upstream features.
+# A conflict report belongs to this run, not a mergeable document-only PR.
 review() {
   local reason="$1"
-  git reset --hard "$base"
-  git checkout -B upstream-sync-review "$base"
-  mkdir -p docs
   {
     echo '# Upstream source update requires review'
     echo
-    echo '**TRACKING ONLY: DO NOT MERGE THIS DOCUMENT AS AN UPSTREAM UPDATE.**'
+    echo '**No upstream code was promoted to main. Resolve the listed conflicts and run full CI.**'
     echo
     echo "Reason: $reason"
     echo "Fork base: $base"
@@ -65,43 +62,8 @@ review() {
     echo 'Resolve using a fresh branch, keep docs/fork-features.md capabilities,'
     echo 'and submit the exact result to GitHub Actions CI before merging.'
     echo 'Update docs/upstream-sync-state.json only for changes actually integrated.'
-  } > docs/upstream-sync-pending.md
-  git add docs/upstream-sync-pending.md
-
-  local ref="refs/heads/$review_branch" earlier=""
-  if git ls-remote --heads --exit-code origin "$ref" >/dev/null 2>&1; then
-    git fetch --no-tags origin "+$ref:refs/remotes/origin/$review_branch"
-    earlier="$(git rev-parse "refs/remotes/origin/$review_branch")"
-    if ! git show -s --format=%B "$earlier" | grep -qx 'Sync-Generated-By: nonlog/upstream-source-sync'; then
-      echo "Review branch has manual commits; leaving them untouched" >&2
-      return 0
-    fi
-    if git show -s --format=%B "$earlier" | grep -qx "Upstream-Source-SHA: $latest" &&
-       git show -s --format=%B "$earlier" | grep -qx "Fork-Base-SHA: $base"; then
-      git reset --hard "$earlier"
-    fi
-  fi
-  if [[ "$(git rev-parse HEAD)" == "$base" ]]; then
-    git commit -m 'chore: track upstream source conflicts for review' \
-      -m 'Sync-Generated-By: nonlog/upstream-source-sync' \
-      -m "Upstream-Source-SHA: $latest" -m "Fork-Base-SHA: $base"
-  fi
-  if [[ -n "$earlier" ]]; then
-    git push "--force-with-lease=$ref:$earlier" origin "HEAD:$ref"
-  else
-    git push origin "HEAD:$ref"
-  fi
-  local number
-  number="$(gh pr list --repo "$GH_REPO" --state open --base main --head "$review_branch" --json number --jq '.[0].number // empty')"
-  if [[ -z "$number" ]]; then
-    gh pr create --repo "$GH_REPO" --base main --head "$review_branch" --draft \
-      --title 'chore: upstream source update needs conflict review (tracking only)' \
-      --body "Source sync of $latest needs review ($reason). **DO NOT MERGE THIS TRACKING PR.** The report in docs/upstream-sync-pending.md lists unresolved paths; the upstream code was not incorporated."
-  else
-    gh pr edit "$number" --repo "$GH_REPO" \
-      --body "Source sync of $latest needs review ($reason). **DO NOT MERGE THIS TRACKING PR.** The report in docs/upstream-sync-pending.md lists unresolved paths; the upstream code was not incorporated."
-  fi
-  echo "Upstream source sync held: $reason" | tee -a "$GITHUB_STEP_SUMMARY"
+  } | tee -a "$GITHUB_STEP_SUMMARY"
+  echo "::error::Upstream source sync requires review: $reason"
 }
 
 git checkout -B upstream-sync-candidate "$base"
@@ -111,7 +73,7 @@ if [[ -s "$tmp/source.patch" ]]; then
     git diff --name-only --diff-filter=U > "$tmp/conflicts" || true
     if [[ ! -s "$tmp/conflicts" ]]; then cat "$tmp/apply.log" >> "$tmp/conflicts"; fi
     review 'source code conflicts during three-way patch application'
-    exit 0
+    exit 1
   fi
 fi
 
@@ -141,7 +103,7 @@ while IFS= read -r file; do
   esac
 done < "$tmp/changed"
 
-git diff --cached --check || { review 'source patch has whitespace errors'; exit 0; }
+git diff --cached --check || { review 'source patch has whitespace errors'; exit 1; }
 git commit -m "chore: integrate upstream source $(git rev-parse --short=12 "$latest")" \
   -m 'Sync-Generated-By: nonlog/upstream-source-sync' -m "Upstream-Source-SHA: $latest"
 candidate="$(git rev-parse HEAD)"
@@ -217,6 +179,8 @@ if [[ "$now_base" != "$base" || "$now_latest" != "$latest" || "$now_branch" != "
   exit 0
 fi
 git push origin "$candidate:refs/heads/main"
+# GITHUB_TOKEN pushes do not trigger push workflows; publish the validated source explicitly.
+gh workflow run pages.yml --repo "$GH_REPO" --ref main
 {
   echo "Integrated upstream source through $latest"
   echo "CI: https://github.com/$GH_REPO/actions/runs/$run_id"

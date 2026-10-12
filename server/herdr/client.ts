@@ -310,6 +310,13 @@ export async function tabRename(tabId: string, label: string, socketPath?: strin
   await herdrRpc("tab.rename", { tab_id: tabId, label }, socketPath);
 }
 
+/** Native insertion boundary (before removal), within this tab's workspace; focus is unchanged. */
+export async function tabMove(tabId: string, insertIndex: number, socketPath?: string): Promise<{
+  type: "tab_list"; tabs: TabInfo[];
+}> {
+  return herdrRpc("tab.move", { tab_id: tabId, insert_index: insertIndex }, socketPath);
+}
+
 /** Closes the tab and every pane in it; a workspace's last tab takes the workspace with it. */
 export async function tabClose(tabId: string, socketPath?: string): Promise<void> {
   await herdrRpc("tab.close", { tab_id: tabId }, socketPath);
@@ -489,7 +496,8 @@ export async function paneFind(request: PaneFindRequest, socketPath?: string): P
     content_revision: motion.content_revision, ...(previous ? { previous } : {}),
   }, socketPath);
   const match = result.current == null ? null : result.matches[result.current] ?? null;
-  if (match) {
+  let finalScroll: PaneScrollInfo | null;
+  if (match && request.jump !== false) {
     // A browser resize can reflow history while searching. Use the viewport herdr has now,
     // not the one read to choose the search's starting cursor.
     const currentScroll = await paneScrollInfo(request.pane_id, socketPath);
@@ -497,8 +505,9 @@ export async function paneFind(request: PaneFindRequest, socketPath?: string): P
     await herdrRpc("pane.copy_motion", {
       pane_id: request.pane_id, cursor: match.start, motion: "line_end", content_revision: result.content_revision,
     }, socketPath);
+    finalScroll = currentScroll;
     if (currentScroll) {
-      await paneScroll(request.pane_id, Math.max(0, currentScroll.max_offset_from_bottom - match.start.row), socketPath);
+      finalScroll = await paneScroll(request.pane_id, Math.max(0, currentScroll.max_offset_from_bottom - match.start.row), socketPath);
       // herdr 0.9.3 cannot guard pane.scroll atomically. Refuse success if output or reflow
       // arrived after the pre-scroll check; the shared view may already have moved.
       await herdrRpc("pane.copy_motion", {
@@ -506,6 +515,14 @@ export async function paneFind(request: PaneFindRequest, socketPath?: string): P
       }, socketPath);
     }
   } else {
+    finalScroll = await paneScrollInfo(request.pane_id, socketPath);
+    // Scrolling does not change content_revision. A no-jump refresh must still refuse
+    // coordinates whose viewport moved while the native match window was being read.
+    if (request.jump === false && (
+      scroll?.offset_from_bottom !== finalScroll?.offset_from_bottom
+      || scroll?.max_offset_from_bottom !== finalScroll?.max_offset_from_bottom
+      || scroll?.viewport_rows !== finalScroll?.viewport_rows
+    )) throw new HerdrError("stale_content", "Pane changed. Search again.");
     // No match is an answer about one revision too: output since copy_search may hold the text.
     await herdrRpc("pane.copy_motion", {
       pane_id: request.pane_id, cursor: { row, col: 0 }, motion: "line_end", content_revision: result.content_revision,
@@ -513,7 +530,7 @@ export async function paneFind(request: PaneFindRequest, socketPath?: string): P
   }
   return {
     total: result.total, current: result.current_global == null ? null : result.current_global + 1,
-    match, content_revision: result.content_revision,
+    match, content_revision: result.content_revision, matches: result.matches, scroll: finalScroll,
   };
 }
 
@@ -545,6 +562,11 @@ export async function paneSendKeys(paneId: string, keys: string[], socketPath?: 
 
 export async function paneClose(paneId: string, socketPath?: string): Promise<void> {
   await herdrRpc("pane.close", { pane_id: paneId }, socketPath);
+}
+
+/** Focuses this exact pane, its tab and workspace, as a click in herdr's TUI does. */
+export async function paneFocus(paneId: string, socketPath?: string): Promise<void> {
+  await herdrRpc("pane.focus", { pane_id: paneId }, socketPath);
 }
 
 /**
@@ -585,6 +607,17 @@ export async function paneZoom(paneId: string, mode: "toggle" | "on" | "off", so
 export async function paneSwap(paneId: string, direction: PaneDirection, socketPath?: string): Promise<PaneLayoutOutcome & { target_pane_id: string | null }> {
   const result = await herdrRpc<{ swap: PaneLayoutOutcome & { target_pane_id?: string | null; reason?: string | null } }>("pane.swap", { pane_id: paneId, direction }, socketPath);
   return { ...result.swap, reason: result.swap.reason ?? null, target_pane_id: result.swap.target_pane_id ?? null };
+}
+
+/** Explicit swaps use source_pane_id, not the directional form's pane_id (herdr's PaneSwapParams). */
+export async function paneSwapWith(paneId: string, targetPaneId: string, socketPath?: string): Promise<PaneLayoutOutcome & { target_pane_id: string | null }> {
+  const result = await herdrRpc<{ swap: PaneLayoutOutcome & { target_pane_id?: string | null; reason?: string | null } }>("pane.swap", { source_pane_id: paneId, target_pane_id: targetPaneId }, socketPath);
+  return { ...result.swap, reason: result.swap.reason ?? null, target_pane_id: result.swap.target_pane_id ?? null };
+}
+
+/** A split's absolute ratio: [] is the root, false descends first, true descends second. */
+export async function layoutSetSplitRatio(tabId: string, path: boolean[], ratio: number, socketPath?: string): Promise<void> {
+  await herdrRpc("layout.set_split_ratio", { tab_id: tabId, path, ratio }, socketPath);
 }
 
 /**

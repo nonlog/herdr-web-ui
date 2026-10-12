@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { PaneLayoutRect, PaneLayoutSnapshot } from "../../shared/protocol.ts";
-import { closeLayoutPane, resizeLayout, splitLayout, swapLayoutPanes } from "./layoutTree.ts";
+import { closeLayoutPane, resizeLayout, setLayoutSplitRatio, splitLayout, swapLayoutPanes } from "./layoutTree.ts";
 
 const rect = (x: number, y: number, width: number, height: number): PaneLayoutRect => ({ x, y, width, height });
 const area = rect(0, 0, 120, 40);
@@ -39,6 +39,29 @@ beforeEach(() => {
 });
 
 describe("resizeLayout", () => {
+  it("sets an absolute ratio on a binary path and preserves separate aligned splits", () => {
+    const layout = tab([{ id: "top-left", rect: area }]);
+    split(layout, "top-left", "bottom-left", "down");
+    split(layout, "top-left", "top-right", "right");
+    split(layout, "bottom-left", "bottom-right", "right");
+    expect(layout.splits.map((split) => split.id)).toEqual(["split_0_root", "split_1_0", "split_2_1"]);
+    // A saved fixture's aligned grid has two possible geometric trees. Its native paths disambiguate them.
+    const saved = structuredClone(layout);
+    expect(setLayoutSplitRatio(saved, [true], 0.75)).toBe(true);
+    expect(rectOf(saved.panes, "bottom-left").width).toBe(90);
+    expect(rectOf(saved.panes, "top-left").width).toBe(60);
+    const top = layout.panes.filter((pane) => pane.pane_id.startsWith("top")).map((pane) => structuredClone(pane));
+    expect(setLayoutSplitRatio(layout, [true], 0.75)).toBe(true);
+    expect(layout.panes.filter((pane) => pane.pane_id.startsWith("top"))).toEqual(top);
+    expect(rectOf(layout.panes, "bottom-left").width).toBe(90);
+    expect(rectOf(layout.panes, "bottom-right").width).toBe(30);
+    expect(layout.splits.map((split) => split.id)).toEqual(["split_0_root", "split_1_0", "split_2_1"]);
+    expect(setLayoutSplitRatio(layout, [true, false], 0.5)).toBe(false);
+    expect(setLayoutSplitRatio(layout, [], 0.6)).toBe(true);
+    expect(rectOf(layout.panes, "top-left").height).toBe(24);
+    expect(rectOf(layout.panes, "bottom-left").height).toBe(16);
+    expectTiling(layout.panes);
+  });
   it("keeps the tree and current focus through swap, zoom and close before resizing again", () => {
     const layout = tab([{ id: "top-left", rect: area }]);
     split(layout, "top-left", "bottom-left", "down");

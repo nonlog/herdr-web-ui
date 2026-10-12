@@ -11,7 +11,8 @@
 - 原生 `GITHUB_TOKEN` 仅在检查工作流中申请源代码、PR 与 Actions 所需权限，**不会运行来自上游的代码**。实际验证通过只读权限的独立 CI 执行。
 - 合并候选发布到 `automation/upstream-source-sync`，工作流**显式触发完整 CI**。须全部通过 **Native Windows install**、**Native macOS session identity**、**Fast checks**、**Integration and browser**，且 Fork / 上游 / 候选提交 SHA 都未变化，才会把**经测试的同一提交快进到 `main`**。
 - 正常成功不创建重复 PR；CI 失败保留候选分支，不更新 `main`；认证和入口保护文件变更即使 CI 全绿也留 Draft PR 审核。
-- Git 三方补丁无法自动处理的冲突会在 Draft PR 中报告具体文件（跟踪文档 **不可直接合并**）。此前人工在 review 分支进行的修复不会被下一次定时检查强制覆盖。
+- Git 三方补丁无法自动处理的冲突会让工作流失败，具体文件列在该次 Actions 的 Summary 中；不创建只有报告的 PR，避免把报告误当作源码更新合并。已有人工 review 分支不会被改动。
+- 自动同步使用 `GITHUB_TOKEN` 推进 `main` 后会显式启动 Website 工作流，因为这种推送不会触发 GitHub 的 `push` 工作流。Pages 的发布来源须设为 **GitHub Actions**。
 
 ## 当前与之前自动同步方案的区别
 
@@ -23,7 +24,7 @@
 
 在 [Actions → Upstream sync](https://github.com/nonlog/herdr-web-ui/actions/workflows/upstream-sync.yml) 可以手动运行。日志会说明最新上游提交、CI 状态、是否更新 `main` 以及未自动同步的工作流文件。
 
-合并失败的 Draft PR 仅用于定位冲突。维护者需从最新 Fork `main` 建分支，根据 `docs/fork-features.md` 解决冲突并验证；只有真正应用过的上游增量才可更新 `docs/upstream-sync-state.json`。
+冲突报告仅用于定位问题。维护者需从最新 Fork `main` 建分支，根据 `docs/fork-features.md` 解决冲突并验证；只有真正应用过的上游增量才可更新 `docs/upstream-sync-state.json`。过去仅含 `docs/upstream-sync-pending.md` 的跟踪 PR 即使被合并，也不会推进同步基线。
 
 **代码自动同步不等于自动部署。** 安装中的 Windows 插件、正在运行的 Claude Code/Pi、`herdr.414222.xyz` 不由同步工作流停止、构建或重启。发行构建和生产安装更新必须遵守项目既有 GitHub Actions 验收规则。
 

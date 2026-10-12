@@ -2,26 +2,31 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Search, X } from "lucide-react";
 import type { PaneFindResponse } from "../../shared/protocol.ts";
 import { ApiError } from "../lib/api.ts";
+import type { ViewportIntentGate } from "../lib/viewportIntent.ts";
 import { findResultAfterError } from "../lib/paneFind.ts";
 import { useMachineApi } from "../lib/machineContext.tsx";
 import { useT } from "../lib/i18n.ts";
+import type { TerminalSearchState } from "./TerminalViewportTools.tsx";
 import "./FindBar.css";
 
-export function FindBar({ paneId, disabled, focusRequest, onClose }: { paneId: string; disabled: boolean; focusRequest: number; onClose: () => void }) {
+export function FindBar({ paneId, viewportIntent, disabled, focusRequest, activePane = true, onClose, onResult }: { paneId: string; viewportIntent: ViewportIntentGate; disabled: boolean; focusRequest: number; activePane?: boolean; onClose: () => void; onResult?: (state: TerminalSearchState | null) => void }) {
   const t = useT();
   const { findPane } = useMachineApi();
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<PaneFindResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => { onResult?.(result ? { query, result } : null); }, [query, result, onResult]);
+  useEffect(() => () => onResult?.(null), [onResult]);
   const active = useRef(true);
+  const disabledRef = useRef(disabled); disabledRef.current = disabled;
   const pending = useRef(false);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     active.current = true;
     return () => { active.current = false; };
   }, []);
-  useEffect(() => { input.current?.focus(); }, [focusRequest]);
+  useEffect(() => { if (activePane && focusRequest > 0) input.current?.focus(); }, [focusRequest]);
 
   const search = async (direction: "forward" | "backward") => {
     if (!query || disabled || pending.current) return;
@@ -29,7 +34,12 @@ export function FindBar({ paneId, disabled, focusRequest, onClose }: { paneId: s
     pending.current = true;
     setBusy(true);
     setError(null);
+    let releaseViewport: (() => void) | null = null;
     try {
+      releaseViewport = await viewportIntent.beginSearch();
+      // A pending scrollbar request may outlive this pane, the search bar or the connection.
+      // Never turn its late completion into a search on a pane the user has already left.
+      if (!releaseViewport || !active.current || disabledRef.current) return;
       const answer = await findPane({
         pane_id: paneId, query, direction,
         ...(result?.match ? { previous: result.match, content_revision: result.content_revision } : {}),
@@ -43,6 +53,7 @@ export function FindBar({ paneId, disabled, focusRequest, onClose }: { paneId: s
         : cause instanceof Error ? cause.message : String(cause));
       }
     } finally {
+      releaseViewport?.();
       pending.current = false;
       if (active.current) setBusy(false);
     }

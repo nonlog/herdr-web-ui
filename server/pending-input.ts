@@ -12,7 +12,7 @@ export interface PendingRecord<Owner, Lease> {
 type Fault = { code: string; message: string };
 type Removed = { id: string; outcome: "sent" | "discarded" };
 /** `by`: the message whose send opened the gate */
-interface TurnGate { by: string; committed: boolean; sawWorking: boolean; completed: boolean; deadline: number | null }
+interface TurnGate { by: string; committed: boolean; sawWorking: boolean; completed: boolean; deadline: number | null; restart?: "interruption" | "working" }
 const ready = (status: AgentStatus | undefined) => status === "idle" || status === "done";
 export const PENDING_START_TIMEOUT_MS = 10_000;
 export const MAX_PENDING_PER_OWNER = 32;
@@ -57,7 +57,8 @@ export class PendingInputs<Owner, Lease> {
     return receipt?.owner === owner && receipt.paneId === paneId ? receipt.outcome : undefined;
   }
 
-  enqueue(owner: Owner, paneId: string, requestId: number, text: string, lease: Lease, identity: PendingIdentity): PendingRecord<Owner, Lease> {
+  /** `held`: the message waits for an explicit send; `next` never offers it to automatic delivery. */
+  enqueue(owner: Owner, paneId: string, requestId: number, text: string, lease: Lease, identity: PendingIdentity, held = false): PendingRecord<Owner, Lease> {
     const previous = [...this.records.values()].find((item) => item.owner === owner && item.message.request_id === requestId);
     if (previous) {
       if (previous.paneId !== paneId || previous.message.text !== text) throw new PendingInputError("invalid_submit_id", "This submit id already belongs to another message");
@@ -70,7 +71,7 @@ export class PendingInputs<Owner, Lease> {
     if ([...this.records.values()].some((item) => item.paneId === paneId && item.message.state === "uncertain")) throw new PendingInputError("pending_uncertain", "Check the terminal before sending more pending messages");
     const item: PendingRecord<Owner, Lease> = {
       owner, paneId, lease, identity, inFlight: false,
-      message: { id: this.newId(), request_id: requestId, text, state: "queued", created_at: new Date(this.now()).toISOString() },
+      message: { id: this.newId(), request_id: requestId, text, state: held ? "held" : "queued", created_at: new Date(this.now()).toISOString() },
     };
     this.records.set(item.message.id, item);
     this.publish(owner, paneId);
@@ -103,9 +104,12 @@ export class PendingInputs<Owner, Lease> {
   }
 
   /** Status cycles before the committing key belong to earlier work, never this submission. */
-  committing(item: PendingRecord<Owner, Lease>, steeringWorkingTurn = false): void {
+  committing(item: PendingRecord<Owner, Lease>, steeringWorkingTurn = false, restartingWorkingTurn = false): void {
     if (this.records.get(item.message.id) !== item || !item.inFlight) return;
-    this.gates.set(item.paneId, { by: item.message.id, committed: true, sawWorking: steeringWorkingTurn, completed: false, deadline: steeringWorkingTurn ? null : this.now() + this.startTimeoutMs });
+    this.gates.set(item.paneId, { by: item.message.id, committed: true, sawWorking: steeringWorkingTurn && !restartingWorkingTurn, completed: false,
+      deadline: steeringWorkingTurn && !restartingWorkingTurn ? null : this.now() + this.startTimeoutMs,
+      ...(restartingWorkingTurn ? { restart: "interruption" as const } : {}),
+    });
   }
 
   settle(item: PendingRecord<Owner, Lease>, fault?: Fault, uncertain = false, retryWhenReady = false): void {
@@ -137,6 +141,9 @@ export class PendingInputs<Owner, Lease> {
   /** The pane's status events so far. A snapshot read after this point is applied with it (observe). */
   mark(paneId: string): number { return this.events.get(paneId) ?? 0; }
 
+  /** The pane's last applied status, from an event or an observed snapshot. */
+  current(paneId: string): AgentStatus | undefined { return this.statuses.get(paneId); }
+
   /** A status event from the collector. */
   status(paneId: string, status: AgentStatus): void {
     this.events.set(paneId, this.mark(paneId) + 1);
@@ -160,6 +167,16 @@ export class PendingInputs<Owner, Lease> {
     this.statuses.set(paneId, status);
     const gate = this.gates.get(paneId);
     if (!gate?.committed) return;
+    // Escape may expose ready before the submitted steering starts its replacement turn.
+    // Neither that readiness nor another old-working snapshot can drain the next message.
+    if (gate.restart === "interruption") {
+      if (ready(status)) gate.restart = "working";
+      return;
+    }
+    if (gate.restart === "working") {
+      if (status !== "working") return;
+      delete gate.restart;
+    }
     if (status === "working") { gate.sawWorking = true; gate.deadline = null; }
     if (ready(status) && gate.sawWorking) {
       gate.completed = true;

@@ -1,17 +1,184 @@
 /**
  * Anonymous install and update counts (server/telemetry.ts). On by default after a one-time
  * notice in the app; nothing is sent before that notice was shown (and a grace period after it,
- * server/telemetry.ts NOTICE_GRACE_MS), and nothing between an install and an update.
+ * server/telemetry.ts NOTICE_GRACE_MS), and nothing between an install and an update. An event
+ * also carries the browser's latest allowlisted settings snapshot; no raw user-entered values or
+ * account identifiers are included.
  *
  *  GET  /api/telemetry  -> TelemetryStatus, no-store
- *  POST /api/telemetry  { enabled?: boolean, notice_seen?: true } -> TelemetryStatus
+ *  POST /api/telemetry  { enabled?: boolean, notice_seen?: true, notice_version?: number, settings?: TelemetrySettings } -> TelemetryStatus
  *       (same-origin, `x-herdr-update: 1`)
+ *       The server accepts notice_seen only with notice_version === NOTICE_VERSION.
  *
  * A server that sends nothing (tests, a remote PC's bridge, an older server) answers 404 to
  * both, and the app shows neither the notice nor the switch.
  */
 
 export type TelemetryEventName = "install" | "update";
+
+/**
+ * The notice's wording as a number: an install that saw an older one sees the notice again, and
+ * sends nothing until it has (3: events now carry an allowlisted settings snapshot).
+ */
+export const NOTICE_VERSION = 3;
+
+/**
+ * Current setting values safe to report. Only finite enums, booleans and bounded numbers are
+ * represented; user-entered strings and account identifiers are summarized or omitted by the
+ * browser producer in src/lib/settings.ts.
+ */
+export interface TelemetrySettings {
+  terminalInputMode: "auto" | "line" | "direct";
+  theme: "dark" | "light" | "system";
+  density: "compact" | "comfortable";
+  sidebarRows: "one" | "two";
+  agentOrder: "workspace" | "activity";
+  agentCards: boolean;
+  agentPins: boolean;
+  quietOpenedDone: boolean;
+  agentMarks: "color" | "mono";
+  palette: "amber" | "report" | "charcoal" | "catppuccin" | "lilac" | "forest";
+  terminalFontSize: number;
+  terminalCursorStyle: "block" | "bar" | "underline";
+  terminalCursorBlink: boolean;
+  terminalWheelSpeed: number;
+  paneClipboard: boolean;
+  releasePaneAway: boolean;
+  narrowPaneFont: boolean;
+  chatFontSize: number | null;
+  chatWidth: "narrow" | "default" | "wide" | "full";
+  enterSends: boolean;
+  autoSendQueued: boolean;
+  showThinking: boolean;
+  keepScreenOn: boolean;
+  language: "system" | "en" | "zh" | "ja" | "ko" | "tr";
+  alertsOn: boolean;
+  alertInput: boolean;
+  alertDone: "off" | "long" | "always";
+  alertInApp: boolean;
+  alertSound: boolean;
+  showQuickReplies: boolean;
+  showSuggestionChip: boolean;
+  showUsage: boolean;
+  usageCount: "used" | "left";
+  usagePace: boolean;
+  usageGlance: "week" | "session";
+  defaultView: "auto" | "chat" | "terminal";
+  voiceInput: "auto" | "on" | "off";
+  voiceLanguage: "auto" | "ar-SA" | "cs-CZ" | "da-DK" | "de-DE" | "el-GR" | "en-GB" | "en-US" | "es-ES" | "fi-FI" | "fr-FR" | "he-IL" | "hi-IN" | "hu-HU" | "id-ID" | "it-IT" | "ja-JP" | "ko-KR" | "nb-NO" | "nl-NL" | "pl-PL" | "pt-BR" | "pt-PT" | "ro-RO" | "ru-RU" | "sk-SK" | "sv-SE" | "th-TH" | "tr-TR" | "uk-UA" | "vi-VN" | "zh-CN" | "zh-TW";
+  voicePolishChat: boolean;
+  voicePolishTerminal: boolean;
+  wrapCode: boolean;
+  highlightCode: boolean;
+  markdownWidth: "readable" | "full";
+  terminalFontCustom: boolean;
+  chatFontCustom: boolean;
+  shortcutsCustom: boolean;
+  keyBarCustom: boolean;
+  quickRepliesCustom: boolean;
+  quickReplyCount: number;
+  usageHiddenCount: number;
+  /** paging shortcuts (#811): lines kept between pages, and plain PageUp/PageDown while composing */
+  pageOverlapRows: number;
+  chatPageKeys: boolean;
+}
+
+/** The browser's full, non-sensitive snapshot. */
+export interface TelemetryChange {
+  enabled?: boolean;
+  notice_seen?: true;
+  notice_version?: number;
+  settings?: TelemetrySettings;
+}
+
+const oneOf = <const T extends readonly string[]>(choices: T) => (value: unknown): boolean =>
+  typeof value === "string" && (choices as readonly string[]).includes(value);
+const booleanValue = (value: unknown): boolean => typeof value === "boolean";
+const integerBetween = (min: number, max: number) => (value: unknown): boolean =>
+  typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+const nullableIntegerBetween = (min: number, max: number) => (value: unknown): boolean =>
+  value === null || integerBetween(min, max)(value);
+
+// This explicit shared schema must track the producer without importing frontend code at runtime.
+const TELEMETRY_SETTINGS_VALIDATORS = {
+  terminalInputMode: oneOf(["auto", "line", "direct"]),
+  theme: oneOf(["dark", "light", "system"]),
+  density: oneOf(["compact", "comfortable"]),
+  sidebarRows: oneOf(["one", "two"]),
+  agentOrder: oneOf(["workspace", "activity"]),
+  agentCards: booleanValue,
+  agentPins: booleanValue,
+  quietOpenedDone: booleanValue,
+  agentMarks: oneOf(["color", "mono"]),
+  palette: oneOf(["amber", "report", "charcoal", "catppuccin", "lilac", "forest"]),
+  terminalFontSize: integerBetween(10, 22),
+  terminalCursorStyle: oneOf(["block", "bar", "underline"]),
+  terminalCursorBlink: booleanValue,
+  terminalWheelSpeed: integerBetween(1, 10),
+  paneClipboard: booleanValue,
+  releasePaneAway: booleanValue,
+  narrowPaneFont: booleanValue,
+  chatFontSize: nullableIntegerBetween(11, 24),
+  chatWidth: oneOf(["narrow", "default", "wide", "full"]),
+  enterSends: booleanValue,
+  autoSendQueued: booleanValue,
+  showThinking: booleanValue,
+  keepScreenOn: booleanValue,
+  language: oneOf(["system", "en", "zh", "ja", "ko", "tr"]),
+  alertsOn: booleanValue,
+  alertInput: booleanValue,
+  alertDone: oneOf(["off", "long", "always"]),
+  alertInApp: booleanValue,
+  alertSound: booleanValue,
+  showQuickReplies: booleanValue,
+  showSuggestionChip: booleanValue,
+  showUsage: booleanValue,
+  usageCount: oneOf(["used", "left"]),
+  usagePace: booleanValue,
+  usageGlance: oneOf(["week", "session"]),
+  defaultView: oneOf(["auto", "chat", "terminal"]),
+  voiceInput: oneOf(["auto", "on", "off"]),
+  voiceLanguage: oneOf(["auto", "ar-SA", "cs-CZ", "da-DK", "de-DE", "el-GR", "en-GB", "en-US", "es-ES", "fi-FI", "fr-FR", "he-IL", "hi-IN", "hu-HU", "id-ID", "it-IT", "ja-JP", "ko-KR", "nb-NO", "nl-NL", "pl-PL", "pt-BR", "pt-PT", "ro-RO", "ru-RU", "sk-SK", "sv-SE", "th-TH", "tr-TR", "uk-UA", "vi-VN", "zh-CN", "zh-TW"]),
+  voicePolishChat: booleanValue,
+  voicePolishTerminal: booleanValue,
+  wrapCode: booleanValue,
+  highlightCode: booleanValue,
+  markdownWidth: oneOf(["readable", "full"]),
+  terminalFontCustom: booleanValue,
+  chatFontCustom: booleanValue,
+  shortcutsCustom: booleanValue,
+  keyBarCustom: booleanValue,
+  quickRepliesCustom: booleanValue,
+  quickReplyCount: integerBetween(0, 12),
+  usageHiddenCount: integerBetween(0, 64),
+  pageOverlapRows: integerBetween(0, 100),
+  chatPageKeys: booleanValue,
+} satisfies Record<keyof TelemetrySettings, (value: unknown) => boolean>;
+
+const TELEMETRY_SETTINGS_KEYS = Object.keys(TELEMETRY_SETTINGS_VALIDATORS) as (keyof TelemetrySettings)[];
+
+/** Validate the complete snapshot and return a fresh object containing only schema keys. */
+export function telemetrySettings(value: unknown): TelemetrySettings | null {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== TELEMETRY_SETTINGS_KEYS.length
+      || keys.some((key) => typeof key !== "string" || !Object.prototype.hasOwnProperty.call(TELEMETRY_SETTINGS_VALIDATORS, key))) return null;
+
+    const clean: Record<string, unknown> = {};
+    for (const key of TELEMETRY_SETTINGS_KEYS) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor) || !TELEMETRY_SETTINGS_VALIDATORS[key](descriptor.value)) return null;
+      clean[key] = descriptor.value;
+    }
+    return clean as unknown as TelemetrySettings;
+  } catch {
+    return null;
+  }
+}
 export type InstallMethod = "plugin" | "managed" | "source";
 
 /**
@@ -30,6 +197,8 @@ export interface TelemetryEvent {
   os: string;
   arch: string;
   install_method: InstallMethod;
+  /** the latest browser's allowlisted settings snapshot; null before one has told */
+  settings: TelemetrySettings | null;
 }
 
 export interface TelemetryStatus {
@@ -37,7 +206,7 @@ export interface TelemetryStatus {
   enabled: boolean;
   /** HERDR_WEB_TELEMETRY=0, DO_NOT_TRACK or a CI/test environment: nothing is sent whatever the switch says */
   blocked_by_env: boolean;
-  /** the app has shown its notice once; no event goes out before that */
+  /** the app has shown its current notice (NOTICE_VERSION) once; no event goes out before that */
   notice_seen: boolean;
   /** what the next event would be, as it would be sent; null when there is nothing left to send for this version */
   next: TelemetryEvent | null;

@@ -3,8 +3,11 @@
  * A Cloudflare Worker over one D1 table. It never reads the visitor's address or any header
  * beyond the content type; of where a request came from it keeps the country Cloudflare names
  * and nothing finer. It keeps the day rather than the time, and stores each
- * (install, event, version) once, so a replayed event counts once. Deploy: telemetry/README.md.
+ * (install, event, version) once, so a replayed event counts once. It stores only the app's
+ * validated, allowlisted settings snapshot. Deploy: telemetry/README.md.
  */
+
+import { telemetrySettings, type TelemetrySettings } from "../shared/telemetry.ts";
 
 /** the part of Cloudflare's D1 binding this Worker uses */
 interface D1Statement { bind(...values: unknown[]): { run(): Promise<unknown> } }
@@ -19,9 +22,11 @@ export interface StoredEvent {
   os: string;
   arch: string;
   install_method: "plugin" | "managed" | "source";
+  /** complete validated snapshot, or null when the sender has not provided one */
+  settings: TelemetrySettings | null;
 }
 
-const MAX_BODY_BYTES = 2048;
+const MAX_BODY_BYTES = 8192;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** a release, or a prerelease of one (0.5.0-rc.1): the sender reports package.json's version as it is */
 const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}(-[0-9a-z.]{1,24})?$/;
@@ -41,9 +46,13 @@ export function requestCountry(request: Request): string | null {
 }
 
 /** the event as it is stored, or null when the body is not one */
+/** the fields an event has ever carried; `changed_settings` is what senders before 0.4.9 told and is not kept */
+const EVENT_KEYS = new Set(["event", "install_id", "version", "previous_version", "os", "arch", "install_method", "settings", "changed_settings"]);
+
 export function readEvent(body: unknown, now: Date): StoredEvent | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const value = body as Record<string, unknown>;
+  if (Object.keys(value).some((key) => !EVENT_KEYS.has(key))) return null;
   const { event, install_id, version, previous_version, os, arch, install_method } = value;
   if (typeof event !== "string" || !EVENTS.has(event)) return null;
   if (typeof install_id !== "string" || !UUID.test(install_id)) return null;
@@ -52,10 +61,15 @@ export function readEvent(body: unknown, now: Date): StoredEvent | null {
   if (event === "install" && previous_version !== null) return null;
   if (typeof os !== "string" || !WORD.test(os) || typeof arch !== "string" || !WORD.test(arch)) return null;
   if (typeof install_method !== "string" || !METHODS.has(install_method)) return null;
+  const hasSettings = Object.prototype.hasOwnProperty.call(value, "settings");
+  const settingsValue = hasSettings ? value["settings"] : null;
+  const settings = settingsValue === null ? null : telemetrySettings(settingsValue);
+  if (hasSettings && settingsValue !== null && settings === null) return null;
   return {
     day: now.toISOString().slice(0, 10),
     event: event as StoredEvent["event"], install_id, version, previous_version, os, arch,
     install_method: install_method as StoredEvent["install_method"],
+    settings,
   };
 }
 
@@ -89,9 +103,10 @@ export async function handle(request: Request, env: Env, now = new Date()): Prom
   try { body = JSON.parse(text); } catch { return new Response(null, { status: 400 }); }
   const stored = readEvent(body, now);
   if (!stored) return new Response(null, { status: 400 });
+  const settings = stored.settings === null ? null : JSON.stringify(stored.settings);
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO events (day, event, install_id, version, previous_version, os, arch, install_method, country) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(stored.day, stored.event, stored.install_id, stored.version, stored.previous_version, stored.os, stored.arch, stored.install_method, requestCountry(request)).run();
+    "INSERT OR IGNORE INTO events (day, event, install_id, version, previous_version, os, arch, install_method, country, settings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).bind(stored.day, stored.event, stored.install_id, stored.version, stored.previous_version, stored.os, stored.arch, stored.install_method, requestCountry(request), settings).run();
   return new Response(null, { status: 204 });
 }
 

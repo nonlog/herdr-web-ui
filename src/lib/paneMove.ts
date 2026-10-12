@@ -26,7 +26,8 @@ export interface MoveTarget {
  * then a workspace of its own. The pane's own tab is left out: herdr would answer same_tab.
  */
 export function paneMoveTargets(snapshot: Pick<SessionSnapshot, "tabs" | "workspaces">, pane: Pick<PaneInfo, "workspace_id" | "tab_id">, t: Translate): MoveTarget[] {
-  const tabs = snapshot.tabs.filter((tab) => tab.workspace_id === pane.workspace_id).sort((a, b) => a.number - b.number);
+  // snapshot order, as the strip shows them: after a reorder a tab's number no longer says its place
+  const tabs = snapshot.tabs.filter((tab) => tab.workspace_id === pane.workspace_id);
   const own: MoveTarget[] = [
     { id: "new-tab", kind: "new-tab", label: t("New tab"), destination: { type: "new_tab" } },
     ...tabs.flatMap((tab, index): MoveTarget[] => tab.tab_id === pane.tab_id ? [] : [{ id: `tab:${tab.tab_id}`, kind: "tab", label: tabLabel(tab, t, index + 1), destination: { type: "tab", tab_id: tab.tab_id } }]),
@@ -67,6 +68,27 @@ export function paneMovesVersion(): number { return moveVersion; }
 export function beginPaneMove(machineId: string, paneId: string): void { pendingMoves.add(paneStorageId(machineId, paneId)); movesChanged(); }
 export function endPaneMove(machineId: string, paneId: string): void { pendingMoves.delete(paneStorageId(machineId, paneId)); movesChanged(); }
 export function paneMovePending(machineId: string, paneId: string | null): boolean { return paneId !== null && pendingMoves.has(paneStorageId(machineId, paneId)); }
+
+/*
+ * The ids this tab has seen moves give panes, old to new. An entry of the history written before
+ * a move names the old id: followed through every move since, it is the same pane again.
+ */
+const movedPanes = new Map<string, string>();
+export function recordPaneMove(machineId: string, previousPaneId: string, paneId: string): void {
+  if (previousPaneId !== paneId) movedPanes.set(paneStorageId(machineId, previousPaneId), paneId);
+}
+/** the id a pane has now, after the moves this tab saw; null when none moved it */
+export function paneMovedTo(machineId: string, paneId: string | null): string | null {
+  if (paneId === null) return null;
+  let current = paneId;
+  // bounded: herdr does not hand an id out twice, but a cycle here would hang the tab
+  for (let step = 0; step <= movedPanes.size; step += 1) {
+    const next = movedPanes.get(paneStorageId(machineId, current));
+    if (next === undefined) break;
+    current = next;
+  }
+  return current === paneId ? null : current;
+}
 
 type CarriedStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 /** the phone's terminal line (lib/terminalDraft.ts): a store of its own, in memory where storage is blocked */

@@ -2,6 +2,7 @@
  * The ⋯ menu of a sidebar row. On a desktop it is a popover under its button, drawn through a
  * portal at fixed coordinates: the roster scrolls, and a menu inside it would be cut off at the
  * list's edge. At phone width it is the modal primitive, which is already a bottom sheet there.
+ * The system Back closes the sheet (lib/sheetHistory.ts).
  * Escape, a press outside, focus leaving it (the palette opening over it, a Tab out) and, on a
  * desktop, a scroll of what holds the button or a resize close it. Focus goes back to the button when the menu goes,
  * unless what an item mounted (a rename field, a confirm) takes it first: the button is focused
@@ -15,6 +16,8 @@ import "./RowMenu.css";
 
 import { useT } from "../lib/i18n.ts";
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
+import { SHEET_QUERY, useSheetSwipe } from "../lib/sheets.ts";
+import { useSheetHistory } from "../lib/sheetHistory.ts";
 
 export interface RowMenuItem {
   id: string;
@@ -38,6 +41,9 @@ export interface RowMenuItem {
 
 interface Props {
   anchor: HTMLElement;
+  /** A native context menu opens at the pointer, without focusing its target first. */
+  point?: { x: number; y: number };
+  restoreFocusTo?: HTMLElement | null;
   /** the menu's accessible name, and the sheet's title */
   title: string;
   subtitle?: string;
@@ -47,25 +53,31 @@ interface Props {
   /** which edge of the button the popover lines up with: its right one (a row's ⋯), or its left one (a tab) */
   align?: "start" | "end";
   onClose: () => void;
+  /** `paths`: each hint is a path; the menu is wider and a long path gives way before its label */
+  variant?: "paths";
 }
 
-/** where the menu is the bottom sheet; a caller that lays its header out for the sheet reads the same line */
-export const SHEET_QUERY = "(max-width: 640px)";
 const GAP = 4;
 const EDGE = 8;
 const POPOVER_ITEMS = '[role="menuitem"], [role="menuitemcheckbox"]';
 // the sheet is modal: its Cancel is one of the stops
 const SHEET_ITEMS = '.row-sheet-item, .row-sheet-cancel';
 
-export function RowMenu({ anchor, title, subtitle, header, items, align = "end", onClose }: Props) {
+export function RowMenu({ anchor, point, restoreFocusTo, title, subtitle, header, items, align = "end", onClose, variant }: Props) {
   const t = useT();
   const sheet = useMediaQuery(SHEET_QUERY);
   const surface = useRef<HTMLDivElement>(null);
+  useSheetSwipe(surface, sheet ? onClose : null);
+  // Back closes the sheet, not the pane under it
+  useSheetHistory(sheet, onClose);
   const [place, setPlace] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   // where the button was when the menu was placed: a scroll that leaves it there is not a reason to close
   const placedAt = useRef<{ top: number; left: number } | null>(null);
 
-  useLayoutEffect(() => () => { if (anchor.isConnected) anchor.focus({ preventScroll: true }); }, [anchor]);
+  useLayoutEffect(() => () => {
+    const target = restoreFocusTo === undefined ? anchor : restoreFocusTo;
+    if (target?.isConnected) target.focus({ preventScroll: true });
+  }, [anchor, restoreFocusTo]);
 
   // under the button, right edges aligned (left ones for a tab); above it when the screen ends
   // first. The height is capped to the room on that side, and only to that: a tab's menu lists
@@ -78,6 +90,14 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
     if (!menu || !anchor.isConnected) { onClose(); return; }
     const rect = anchor.getBoundingClientRect();
     placedAt.current = { top: rect.top, left: rect.left };
+    if (point) {
+      setPlace({
+        left: Math.max(EDGE, Math.min(point.x, window.innerWidth - menu.offsetWidth - EDGE)),
+        top: Math.max(EDGE, Math.min(point.y, window.innerHeight - menu.offsetHeight - EDGE)),
+        maxHeight: window.innerHeight - EDGE * 2,
+      });
+      return;
+    }
     const left = Math.max(EDGE, Math.min(align === "start" ? rect.left : rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - EDGE));
     const below = rect.bottom + GAP;
     const roomBelow = window.innerHeight - below - EDGE;
@@ -85,7 +105,7 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
     const up = below + menu.offsetHeight + EDGE > window.innerHeight && roomAbove > roomBelow;
     const top = up ? Math.max(EDGE, rect.top - GAP - menu.offsetHeight) : below;
     setPlace({ top, left, maxHeight: Math.max(EDGE, up ? roomAbove : roomBelow) });
-  }, [align, anchor, onClose, sheet]);
+  }, [align, anchor, onClose, point, sheet]);
 
   useEffect(() => {
     const first = surface.current?.querySelector<HTMLElement>(sheet ? SHEET_ITEMS : POPOVER_ITEMS);
@@ -96,12 +116,13 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
       event.stopPropagation();
+      event.preventDefault();
       onClose();
     };
     // the button's own click toggles the menu, so a press on it is not "outside"
     const onPointer = (event: PointerEvent): void => {
       const target = event.target as Node;
-      if (surface.current?.contains(target) || anchor.contains(target)) return;
+      if (surface.current?.contains(target) || (!point && anchor.contains(target))) return;
       onClose();
     };
     // only a scroll that moves the button out from under the menu: a terminal printing in the
@@ -125,14 +146,14 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onClose);
     };
-  }, [anchor, onClose, sheet]);
+  }, [anchor, onClose, point, sheet]);
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
     const buttons = [...(surface.current?.querySelectorAll<HTMLElement>(sheet ? SHEET_ITEMS : POPOVER_ITEMS) ?? [])];
     const index = buttons.indexOf(document.activeElement as HTMLElement);
     const move = (next: number): void => {
       event.preventDefault();
-      buttons[(next + buttons.length) % buttons.length]?.focus();
+      buttons[point ? Math.max(0, Math.min(buttons.length - 1, next)) : (next + buttons.length) % buttons.length]?.focus();
     };
     if (event.key === "ArrowDown") move(index + 1);
     else if (event.key === "ArrowUp") move(index - 1);
@@ -172,7 +193,7 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
           {/* the items scroll between the head and Cancel: a tab's menu is taller than a short phone, and `.modal` hides its overflow */}
           <div className="row-sheet-items">
             {items.map((item) => (
-              <button key={item.id} type="button" className={`row-sheet-item${item.danger ? " is-danger" : ""}${item.divider ? " has-divider" : ""}`} aria-current={item.current ? "true" : undefined} aria-pressed={item.checked} title={item.title} onMouseDown={keepFocus} onClick={() => run(item)}>
+              <button key={item.id} type="button" className={`row-sheet-item${item.danger ? " is-danger" : ""}${item.divider ? " has-divider" : ""}`} aria-current={item.current ? "true" : undefined} aria-pressed={item.checked} title={item.title} onMouseDown={keepFocus} onMouseEnter={point ? (event) => event.currentTarget.focus({ preventScroll: true }) : undefined} onClick={() => run(item)}>
                 {item.glyph ?? <item.icon aria-hidden="true" />}
                 <span className="row-sheet-label">{item.label}</span>
                 {item.hint && <span className="row-sheet-hint">{item.hint}</span>}
@@ -187,12 +208,12 @@ export function RowMenu({ anchor, title, subtitle, header, items, align = "end",
   }
 
   return createPortal(
-    <div ref={surface} className="menu row-menu" role="menu" aria-label={title} style={place ?? { visibility: "hidden" }} onKeyDown={onKeyDown} onBlur={onBlur}>
+    <div ref={surface} className={`menu row-menu${anchor.closest('[aria-modal="true"]') ? " is-over-modal" : ""}${variant === "paths" ? " row-menu-paths" : ""}`} role="menu" aria-label={title} style={place ?? { visibility: "hidden" }} onKeyDown={onKeyDown} onBlur={onBlur}>
       {header && <div className="row-menu-header" role="presentation">{header}</div>}
       {items.map((item) => (
         <Fragment key={item.id}>
           {item.divider && <span className="row-menu-divider" role="separator" />}
-          <button type="button" role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"} aria-checked={item.checked} className={`menu-item${item.danger ? " is-danger" : ""}`} aria-current={item.current ? "true" : undefined} title={item.title} onMouseDown={keepFocus} onClick={() => run(item)}>
+          <button type="button" role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"} aria-checked={item.checked} className={`menu-item${item.danger ? " is-danger" : ""}`} aria-current={item.current ? "true" : undefined} title={item.title} onMouseDown={keepFocus} onMouseEnter={point ? (event) => event.currentTarget.focus({ preventScroll: true }) : undefined} onClick={() => run(item)}>
             {item.glyph ?? <item.icon aria-hidden="true" />}
             <span className="menu-item-main">{item.label}</span>
             {item.hint && <span className="menu-item-hint">{item.hint}</span>}
