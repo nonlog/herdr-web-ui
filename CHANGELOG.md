@@ -6,7 +6,7 @@
 - Integrate upstream source through `10fd26f5f13f` while preserving native Windows
   terminals and local history. Report blocked syncs as failed Actions runs instead
   of document-only PRs, require full CI for dispatched candidates, and explicitly
-  start Website publishing after automatic main updates.
+  start Website publishing after automatic main updates. ([#4](https://github.com/nonlog/herdr-web-ui/pull/4) by @nonlog)
 - Fix oversized native Herdr grids in the web Terminal lens: mouse wheels in
   Instant local history pan the visible grid before entering older cached output;
   scrollbar drags suspend cursor-follow instead of jumping back on every ANSI
