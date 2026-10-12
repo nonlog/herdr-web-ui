@@ -26,6 +26,7 @@ function fixture(): { root: string; previous: string; latest: string } {
   git(root, "init", "-q");
   git(root, "config", "user.name", "Codex");
   git(root, "config", "user.email", "codex@openai.com");
+  git(root, "config", "core.autocrlf", "false");
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, ".github", "workflows"), { recursive: true });
   writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'base';\n");
@@ -74,4 +75,48 @@ test("conflicting edits are rejected for review rather than choosing incoming co
   const applied = spawnSync("git", ["apply", "--index", "--3way", "-"], { cwd: root, input: sourcePatch(root, previous, latest), encoding: "utf8" });
   expect(applied.status).not.toBe(0);
   expect(git(root, "diff", "--name-only", "--diff-filter=U")).toContain("src/terminal.ts");
+});
+
+test.skipIf(process.platform === "win32")("the sync script fails with a conflict summary without publishing a tracking PR", () => {
+  const { root, previous } = fixture();
+  git(root, "switch", "upstream");
+  writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'upstream';\nexport const search = true;\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "upstream changes the same terminal setting");
+  const latest = git(root, "rev-parse", "HEAD");
+  git(root, "switch", "fork");
+  const remotes = mkdtempSync(join(tmpdir(), "herdr-upstream-remotes-"));
+  fixtures.push(remotes);
+  const upstream = join(remotes, "upstream.git");
+  const origin = join(remotes, "origin.git");
+  git(root, "clone", "--bare", root, upstream);
+  git(upstream, "update-ref", "refs/heads/main", latest);
+  git(root, "switch", "-c", "main");
+  writeFileSync(join(root, "src", "terminal.ts"), "export const mode = 'fork';\n");
+  mkdirSync(join(root, "docs"));
+  writeFileSync(join(root, "docs", "upstream-sync-state.json"), JSON.stringify({
+    upstream: "devswha/herdr-web-ui", last_applied_sha: previous, workflow_changes_pending: [],
+  }));
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "fork baseline and incompatible terminal");
+  const base = git(root, "rev-parse", "HEAD");
+  git(root, "clone", "--bare", root, origin);
+  git(root, "remote", "add", "origin", origin);
+  git(root, "config", `url.${upstream.replaceAll("\\", "/")}.insteadOf`, "https://github.com/devswha/herdr-web-ui.git");
+  const summary = join(remotes, "summary.md");
+  const calls = join(remotes, "gh-calls");
+  const result = spawnSync("bash", ["-c", `
+    gh() { printf '%s\\n' "$*" >> "$GH_CALL_LOG"; return 99; }
+    export -f gh
+    source "$1"
+  `, "sync-test", join(import.meta.dir, "sync-upstream.sh")], {
+    cwd: root, encoding: "utf8", timeout: 15_000,
+    env: { ...process.env, GH_REPO: "nonlog/herdr-web-ui", GITHUB_STEP_SUMMARY: summary, GH_CALL_LOG: calls },
+  });
+  expect(result.status).toBe(1);
+  expect(readFileSync(summary, "utf8")).toContain("src/terminal.ts");
+  expect(result.stdout).toContain("::error::Upstream source sync requires review");
+  expect(git(origin, "rev-parse", "main")).toBe(base);
+  expect(git(origin, "for-each-ref", "--format=%(refname)", "refs/heads/automation/")).toBe("");
+  expect(() => readFileSync(calls)).toThrow();
 });

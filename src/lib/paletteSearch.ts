@@ -43,6 +43,7 @@ export function statusCounts(panes: readonly HerdrPane[]): Record<PaletteStatusF
 
 export interface PaletteSearchContext {
   tabs?: readonly TabInfo[];
+  machineName?: string;
   /** a linked worktree's branch per workspace id, as useWorktreeBranches reads the inventory */
   branches?: ReadonlyMap<string, { branch: string | null }>;
   /** names a tab the way the strip and the footer show it ("Tab 2" in the user's language); the module's `t` otherwise */
@@ -132,15 +133,15 @@ function searchableText(pane: HerdrPane, workspaceLabel: string, tabNames: reado
 }
 
 /** Fuzzy pane search across everything visible in a palette row. Ties retain session order. */
-export function rankPanes(query: string, panes: readonly HerdrPane[], workspaces: readonly WorkspaceInfo[], context: PaletteSearchContext = {}): HerdrPane[] {
-  if (query.trim().length === 0) return [...panes];
+export function scorePanes(query: string, panes: readonly HerdrPane[], workspaces: readonly WorkspaceInfo[], context: PaletteSearchContext = {}): { pane: HerdrPane; score: number }[] {
+  if (query.trim().length === 0) return panes.map((pane) => ({ pane, score: 0 }));
   const workspaceLabels = new Map(workspaces.map((workspace) => [workspace.workspace_id, workspace.label]));
   const tabsByName = tabNames(context.tabs ?? [], context.t ?? moduleT);
   return panes
     .map((pane, index) => {
       let score: number | null = null;
       const branch = context.branches?.get(pane.workspace_id)?.branch ?? "";
-      for (const candidate of searchableText(pane, workspaceLabels.get(pane.workspace_id) ?? "", tabsByName.get(pane.tab_id) ?? [], branch)) {
+      for (const candidate of [...searchableText(pane, workspaceLabels.get(pane.workspace_id) ?? "", tabsByName.get(pane.tab_id) ?? [], branch), context.machineName ?? ""]) {
         const candidateScore = fuzzyScore(query, candidate);
         if (candidateScore !== null && (score === null || candidateScore > score)) score = candidateScore;
       }
@@ -148,7 +149,11 @@ export function rankPanes(query: string, panes: readonly HerdrPane[], workspaces
     })
     .filter((entry): entry is typeof entry & { score: number } => entry.score !== null)
     .sort((a, b) => b.score - a.score || a.index - b.index)
-    .map(({ pane }) => pane);
+    .map(({ pane, score }) => ({ pane, score }));
+}
+
+export function rankPanes(query: string, panes: readonly HerdrPane[], workspaces: readonly WorkspaceInfo[], context: PaletteSearchContext = {}): HerdrPane[] {
+  return scorePanes(query, panes, workspaces, context).map(({ pane }) => pane);
 }
 
 export interface PaletteSection {

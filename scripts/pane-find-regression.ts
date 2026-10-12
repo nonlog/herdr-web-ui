@@ -78,7 +78,7 @@ export async function checkPaneFind(browser: Browser, origin: string): Promise<v
     const field = page.getByRole("searchbox", { name: "Find in terminal" });
     await field.fill("find_browser_marker");
     const search = async (action: () => Promise<unknown>): Promise<PaneFindResponse> => {
-      const response = page.waitForResponse((answer) => answer.url().endsWith("/pane/find") && answer.request().method() === "POST");
+      const response = page.waitForResponse((answer) => answer.url().endsWith("/pane/find") && answer.request().method() === "POST" && answer.request().postDataJSON()?.jump !== false);
       await action();
       const answered = await response;
       assert.equal(answered.status(), 200);
@@ -117,13 +117,13 @@ export async function checkPaneFind(browser: Browser, origin: string): Promise<v
       }, undefined, 12000);
       await herdrRpc("pane.send_input", { pane_id: pane, text: `${value}\n` });
       await output;
-      const response = page.waitForResponse((answer) => answer.url().endsWith("/pane/find") && answer.request().method() === "POST");
+      const response = page.waitForResponse((answer) => answer.url().endsWith("/pane/find") && answer.request().method() === "POST" && answer.request().postDataJSON()?.jump !== false);
       await page.getByRole("button", { name: "Next match", exact: true }).click();
       assert.equal((await response).status(), 409);
       await page.getByRole("alert").filter({ hasText: "Pane changed. Search again." }).waitFor();
       await page.waitForFunction(() => document.querySelector(".find-bar-count")?.textContent === "");
       await capture(`${name}-stale`);
-      const request = page.waitForRequest((message) => message.url().endsWith("/pane/find") && message.method() === "POST");
+      const request = page.waitForRequest((message) => message.url().endsWith("/pane/find") && message.method() === "POST" && message.postDataJSON()?.jump !== false);
       const fresh = await search(() => field.press("Enter"));
       assert.equal((await request).postDataJSON().previous, undefined, "retry must not reuse the stale native range");
       assert.equal(fresh.total, 2);
@@ -191,7 +191,12 @@ export async function checkPaneFind(browser: Browser, origin: string): Promise<v
     await page.keyboard.press("Escape");
     await uploadClosedGeometry;
 
+    // Let the narrow viewport's own resize land first: a phone's More sheet rises (styles.css) for
+    // longer than the terminal waits for a size to settle (PaneTerminal.tsx), so phoneGeometry would
+    // otherwise answer to that resize, and the search below would race the find bar's.
+    const phoneViewport = resized();
     await page.setViewportSize({ width: 320, height: 844 });
+    await phoneViewport;
     await page.getByRole("button", { name: "More", exact: true }).click();
     const phoneGeometry = resized();
     await page.getByRole("button", { name: "Find in terminal", exact: true }).click();

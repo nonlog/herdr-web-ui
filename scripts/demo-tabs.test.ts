@@ -39,6 +39,16 @@ it("the demo relabels automatic tab names by place and leaves custom numeric nam
     await post("/api/pane/close", { pane_id: pane.pane_id });
     await post("/api/tab/create", { workspace_id: workspace, label: "build" });
     assert.deepEqual((await labels(workspace)).map((entry: string) => entry.split("=")[1]), ["1", "3", "build"]);
+    const beforeMove = (await (await demo.fetch("/api/session")).json()).snapshot;
+    const ordered = beforeMove.tabs.filter((tab: any) => tab.workspace_id === workspace);
+    const moved = await post("/api/tab/move", { tab_id: ordered[0].tab_id, insert_index: 3 });
+    assert.deepEqual(moved.tabs.map((tab: any) => tab.tab_id), [ordered[1].tab_id, ordered[2].tab_id, ordered[0].tab_id]);
+    assert.deepEqual((await labels(workspace)).map((entry: string) => entry.split("=")[1]), ["3", "build", "3"]);
+    const afterMove = (await (await demo.fetch("/api/session")).json()).snapshot;
+    assert.equal(afterMove.focused_pane_id, beforeMove.focused_pane_id);
+    assert.equal(afterMove.focused_tab_id, beforeMove.focused_tab_id);
+    const invalid = await demo.fetch("/api/tab/move", { method: "POST", body: JSON.stringify({ tab_id: ordered[0].tab_id, insert_index: -1 }) });
+    assert.equal(invalid.status, 400);
   } finally {
     for (const [key, descriptor] of saved) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);

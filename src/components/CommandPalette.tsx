@@ -1,15 +1,16 @@
-import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { MachineContext, useMachineApi, useMachineId } from "../lib/machineContext.tsx";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { Bell, Columns2, FolderOpen, LoaderCircle, LockKeyhole, Maximize2, MessageSquarePlus, Minimize2, Monitor, PanelLeft, Plus, Puzzle, RefreshCw, Rows2, Settings, SunMoon, SwitchCamera, X } from "lucide-react";
 
 import "./CommandPalette.css";
 
-import type { HerdrPane, PluginActions, SessionSnapshot } from "../../shared/protocol.ts";
+import type { HerdrPane, PluginActions, SessionSnapshot, TabInfo } from "../../shared/protocol.ts";
+import type { Machine } from "../../shared/machines.ts";
 import { ApiError } from "../lib/api.ts";
 import { paneStatus, STATUS_WORD } from "../lib/status.ts";
 import { zoomMode } from "../lib/layoutMap.ts";
 import type { AppActions, PaneView } from "../lib/actions.ts";
-import { FILTER_KEYS, filterPanesByStatus, groupByWorkspace, offeredPluginActions, parseQuery, rankPanes, recentPanes, STATUS_FILTERS, statusCounts, type OfferedPluginAction, type PaletteStatusFilter } from "../lib/paletteSearch.ts";
+import { FILTER_KEYS, offeredPluginActions, parseQuery, STATUS_FILTERS, statusCounts, type OfferedPluginAction, type PaletteStatusFilter } from "../lib/paletteSearch.ts";
 import { Ownership, runPluginActionToEnd } from "../lib/pluginRun.ts";
 import { shortcutDisplayKeys, formatKeys, type ShortcutId } from "../lib/shortcuts.ts";
 import { useSettings } from "../lib/settings.ts";
@@ -20,17 +21,21 @@ import { agentTabName } from "../lib/sidebarAgents.ts";
 import { tabLabel } from "../lib/tabName.ts";
 import { useT } from "../lib/i18n.ts";
 import { useFocusTrap } from "../lib/useFocusTrap.ts";
+import { useSheetSwipe } from "../lib/sheets.ts";
+import { usePhoneSheetBack } from "../lib/sheetHistory.ts";
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { useWorktreeBranches } from "../lib/useWorktreeBranches.ts";
 import { worktreeLabel } from "../lib/worktreeName.ts";
 
-const RECENT_KEY = "herdr-web-ui:recent-panes";
-const RECENT_LIMIT = 8;
+import { availableTarget, groupMachinePanes, loadRecentTargets, rankMachinePanes, recentTargets, rememberTarget, targetKey, RECENT_KEY, type MachineBranches, type MachinePane, type RecentPane } from "../lib/machinePalette.ts";
+import { worktreeWorkspaceSignature, type WorkspaceBranch } from "../lib/worktreeBranches.ts";
 const RECENT_SHOWN = 3;
 
 interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
+  machines: readonly Machine[];
+  onSelect(machineId: string, paneId: string): void;
   snapshot: SessionSnapshot | null;
   online: boolean;
   selectedPaneId: string | null;
@@ -46,7 +51,7 @@ interface PaletteAction {
   run: () => void;
 }
 
-interface PaneRow { kind: "pane"; pane: HerdrPane }
+interface PaneRow extends MachinePane { kind: "pane" }
 interface ActionRow { kind: "action"; action: PaletteAction }
 interface PluginRow { kind: "plugin"; offered: OfferedPluginAction }
 type PaletteRow = PaneRow | ActionRow | PluginRow;
@@ -54,6 +59,9 @@ type PaletteRow = PaneRow | ActionRow | PluginRow;
 interface PaletteSectionView {
   id: string;
   heading: string;
+  machineName?: string;
+  workspaceId?: string;
+  machineId?: string;
   branch: string | null;
   placeNamesWorkspace: boolean;
   rows: PaletteRow[];
@@ -78,26 +86,21 @@ function pluginActionKey({ plugin, action }: OfferedPluginAction): string {
 }
 
 function rowKey(sectionId: string, row: PaletteRow): string {
-  return `${sectionId}:${row.kind === "pane" ? row.pane.pane_id : row.kind === "action" ? row.action.id : pluginActionKey(row.offered)}`;
+  return `${sectionId}:${row.kind === "pane" ? targetKey(row) : row.kind === "action" ? row.action.id : pluginActionKey(row.offered)}`;
 }
 
-function loadRecentPanes(machineId: string): string[] {
-  try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(machineId === "local" ? RECENT_KEY : `${RECENT_KEY}:${machineId}`) ?? "[]");
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, RECENT_LIMIT) : [];
-  } catch {
-    return [];
-  }
-}
-
-function rememberPane(paneId: string, current: readonly string[], machineId: string): string[] {
-  const recent = [paneId, ...current.filter((id) => id !== paneId)].slice(0, RECENT_LIMIT);
-  try {
-    window.localStorage.setItem(machineId === "local" ? RECENT_KEY : `${RECENT_KEY}:${machineId}`, JSON.stringify(recent));
-  } catch {
-    /* private mode: recent ordering remains available for this page */
-  }
+function storeRecent(recent: RecentPane[]): RecentPane[] {
+  try { window.localStorage.setItem(RECENT_KEY, JSON.stringify(recent)); } catch { /* private mode: keep this page's history */ }
   return recent;
+}
+
+interface BranchInventory { signature: string; branches: ReadonlyMap<string, WorkspaceBranch> }
+/** One owner-bound hook per PC. Closed/offline palettes never poll inventories. */
+function PaletteBranchReader({ machine, onChange }: { machine: Machine; onChange(machineId: string, inventory: BranchInventory): void }) {
+  const { branches } = useWorktreeBranches(machine.snapshot, machine.state === "connected");
+  const signature = worktreeWorkspaceSignature(machine.snapshot?.workspaces ?? []);
+  useEffect(() => { onChange(machine.id, { signature, branches }); }, [machine.id, signature, branches, onChange]);
+  return null;
 }
 
 function panePath(pane: HerdrPane): string {
@@ -118,7 +121,7 @@ function ShortcutHint({ shortcutId }: { shortcutId?: ShortcutId }) {
   return <span className="palette-shortcut" aria-label={keys.join(" + ")}>{keys.map((key) => <kbd className="kbd" key={key}>{key}</kbd>)}</span>;
 }
 
-export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId, view, actions }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, machines, onSelect, snapshot, online, selectedPaneId, view, actions }: CommandPaletteProps) {
   const t = useT();
   const machineId = useMachineId();
   const api = useMachineApi();
@@ -133,9 +136,17 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
   /** one claim per opening: an answer that arrives after the palette closed, or left for another PC, belongs to no one */
   const owner = useRef<Ownership | null>(null);
   owner.current ??= new Ownership();
-  const [recentPaneIds, setRecentPaneIds] = useState<string[]>(() => loadRecentPanes(machineId));
+  const loadRecent = () => loadRecentTargets((key) => window.localStorage.getItem(key), [machineId, ...machines.map((machine) => machine.id).filter((id) => id !== machineId)]);
+  const [recentPaneIds, setRecentPaneIds] = useState<RecentPane[]>(loadRecent);
   const inputRef = useRef<HTMLInputElement>(null);
-  const surface = useFocusTrap<HTMLElement>(open, { initialFocus: inputRef });
+  // a pane picked here is where the keyboard goes: giving it back to the opener (a sibling pane
+  // still mounted in the split) would select that pane again (PaneCanvas onFocusCapture)
+  const navigated = useRef(false);
+  useLayoutEffect(() => { if (open) navigated.current = false; }, [open]);
+  const surface = useFocusTrap<HTMLElement>(open, { initialFocus: inputRef, shouldRestore: () => !navigated.current });
+  // a plugin action under way keeps the palette open for its answer: no drag closes it meanwhile
+  useSheetSwipe(surface, running !== null ? null : onClose);
+  usePhoneSheetBack(() => { if (running !== null) return false; onClose(); }, open);
   const resultsRef = useRef<HTMLDivElement>(null);
   // a filter letter pressed over the list keeps the keyboard in the list: the first row takes the
   // focus once the filter is drawn, also when the letter named the filter already shown
@@ -144,8 +155,18 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
   const focusedRow = useRef<HTMLElement | null>(null);
   // the rows as the last roster listed them: where a row that left stood among the rows that stayed
   const previousRowKeys = useRef<readonly string[]>([]);
-  // the branch inventory is read only while the palette is open: the sidebar keeps its own
-  const { branches } = useWorktreeBranches(snapshot, open && online);
+  const [inventories, setInventories] = useState<ReadonlyMap<string, BranchInventory>>(new Map());
+  const onInventory = useCallback((id: string, inventory: BranchInventory): void => {
+    setInventories((previous) => {
+      const before = previous.get(id);
+      if (before?.signature === inventory.signature && JSON.stringify([...before.branches]) === JSON.stringify([...inventory.branches])) return previous;
+      return new Map(previous).set(id, inventory);
+    });
+  }, []);
+  const branches = useMemo<MachineBranches>(() => new Map(machines.flatMap((machine) => {
+    const inventory = inventories.get(machine.id);
+    return inventory?.signature === worktreeWorkspaceSignature(machine.snapshot?.workspaces ?? []) ? [[machine.id, inventory.branches] as const] : [];
+  })), [inventories, machines]);
 
   // Terminal attachment can move focus after the palette opens. Escape belongs to
   // this modal even then, and must not leak through to the underlying terminal.
@@ -169,7 +190,7 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
     setFilter("all");
     setSelection(NO_SELECTION);
     focusedRow.current = null;
-    setRecentPaneIds(loadRecentPanes(machineId));
+    setRecentPaneIds(loadRecent());
   }, [open]);
 
   // The PC's plugin actions, read on each opening. A herdr with no plugins, an older bridge
@@ -181,7 +202,7 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
     claims.end();
     setRunning(null);
     setPluginError(null);
-    if (!open) return;
+    if (!open || !online) { setPlugins([]); return; }
     const alive = claims.claim();
     void api.fetchPluginActions().then(
       (list) => { if (alive()) setPlugins(list); },
@@ -190,12 +211,16 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
     // also on unmount: App keys the palette by PC, and the answer of the PC left behind must
     // not select its pane ID on the PC now shown, nor close that PC's palette
     return () => claims.end();
-  }, [open, api]);
+  }, [open, online, api]);
 
+  const recentMachineIds = JSON.stringify(machines.map((machine) => machine.id));
+  const selectedAvailable = selectedPaneId !== null && availableTarget(machines, { machineId, paneId: selectedPaneId }) !== null;
   useEffect(() => {
-    if (selectedPaneId === null) return;
-    setRecentPaneIds((current) => rememberPane(selectedPaneId, current, machineId));
-  }, [selectedPaneId]);
+    if (selectedPaneId === null || !selectedAvailable) return;
+    // The first render may precede the roster. Load legacy histories once their PC IDs are known,
+    // before creating a global record that would otherwise mask their migration.
+    setRecentPaneIds(storeRecent(rememberTarget({ machineId, paneId: selectedPaneId }, loadRecent())));
+  }, [selectedPaneId, machineId, recentMachineIds, selectedAvailable]);
 
   // the selected pane's tab, for herdr's layout actions: a zoom means something only among several panes
   const selectedTab = snapshot?.panes.find((pane) => pane.pane_id === selectedPaneId)?.tab_id ?? null;
@@ -229,9 +254,9 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
     { id: "refresh", label: t("Refresh"), icon: RefreshCw, run: actions.refresh },
   ], [actions, splitPane, zoomPane, tabPanes, zoom, view, t, selectedPaneId]);
 
-  const allPanes: readonly HerdrPane[] = snapshot?.panes ?? [];
-  const workspaces = snapshot?.workspaces ?? [];
-  const tabs = snapshot?.tabs ?? [];
+  const allPanes = useMemo(() => machines.flatMap((machine) => machine.state === "connected" ? machine.snapshot?.panes ?? [] : []), [machines]);
+  const multiMachine = machines.length > 1;
+  const selectedMachineName = machines.find((machine) => machine.id === machineId)?.name;
   const counts = useMemo(() => statusCounts(allPanes), [allPanes]);
   const { actionsOnly, text } = parseQuery(query);
 
@@ -241,25 +266,25 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
   const sections = useMemo<PaletteSectionView[]>(() => {
     const list: PaletteSectionView[] = [];
     if (!actionsOnly) {
-      const panes = rankPanes(text, filterPanesByStatus(allPanes, filter), workspaces, { tabs, branches, t });
+      const panes = rankMachinePanes(text, machines, filter, branches, t);
       if (text === "" && filter === "all") {
-        const recent = recentPanes(panes, recentPaneIds, selectedPaneId, RECENT_SHOWN);
-        if (recent.length > 0) list.push({ id: "recent", heading: t("Recent"), branch: null, placeNamesWorkspace: true, rows: recent.map((pane) => ({ kind: "pane", pane })) });
+        const recent = recentTargets(panes, recentPaneIds, selectedPaneId === null ? null : { machineId, paneId: selectedPaneId }, RECENT_SHOWN);
+        if (recent.length > 0) list.push({ id: "recent", heading: t("Recent"), branch: null, placeNamesWorkspace: true, rows: recent.map((entry) => ({ kind: "pane", ...entry })) });
       }
-      for (const group of groupByWorkspace(panes, workspaces, text !== "")) {
+      for (const group of groupMachinePanes(panes, machines, text !== "")) {
         const heading = group.workspace?.label ?? t("Unknown workspace");
-        list.push({ id: group.workspaceId, heading, branch: branchBeside(heading, branches.get(group.workspaceId)?.branch), placeNamesWorkspace: false, rows: group.panes.map((pane) => ({ kind: "pane", pane })) });
+        list.push({ id: group.id, workspaceId: group.workspaceId, machineId: group.machine.id, machineName: multiMachine ? group.machine.name : undefined, heading, branch: branchBeside(heading, branches.get(group.machine.id)?.get(group.workspaceId)?.branch), placeNamesWorkspace: false, rows: group.panes.map((entry) => ({ kind: "pane", ...entry })) });
       }
     }
     if (actionsOnly || filter === "all") {
       const needle = text.toLocaleLowerCase();
       const visible = needle ? paletteActions.filter((action) => action.label.toLocaleLowerCase().includes(needle)) : paletteActions;
-      if (visible.length > 0) list.push({ id: "actions", heading: t("Actions"), branch: null, placeNamesWorkspace: false, rows: visible.map((action) => ({ kind: "action", action })) });
+      if (visible.length > 0) list.push({ id: "actions", heading: t("Actions"), machineName: multiMachine ? selectedMachineName : undefined, branch: null, placeNamesWorkspace: false, rows: visible.map((action) => ({ kind: "action", action })) });
       const offered = offeredPluginActions(plugins, selectedPaneId !== null, text);
-      if (offered.length > 0) list.push({ id: "plugins", heading: t("Plugin actions"), branch: null, placeNamesWorkspace: false, rows: offered.map((item) => ({ kind: "plugin", offered: item })) });
+      if (offered.length > 0) list.push({ id: "plugins", heading: t("Plugin actions"), machineName: multiMachine ? selectedMachineName : undefined, branch: null, placeNamesWorkspace: false, rows: offered.map((item) => ({ kind: "plugin", offered: item })) });
     }
     return list;
-  }, [actionsOnly, text, filter, allPanes, workspaces, tabs, branches, recentPaneIds, selectedPaneId, paletteActions, plugins, t]);
+  }, [actionsOnly, text, filter, machines, multiMachine, selectedMachineName, machineId, branches, recentPaneIds, selectedPaneId, paletteActions, plugins, t]);
 
   const rows = useMemo(() => sections.flatMap((section) => section.rows), [sections]);
   const rowKeys = useMemo(() => sections.flatMap((section) => section.rows.map((row) => rowKey(section.id, row))), [sections]);
@@ -331,9 +356,11 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
     const key = rowKeys[index] ?? null;
     setSelection((current) => (current.key === key && current.index === index ? current : { key, index }));
   };
-  const runPane = (pane: HerdrPane): void => {
-    setRecentPaneIds((current) => rememberPane(pane.pane_id, current, machineId));
-    actions.selectPane(pane.pane_id);
+  const runPane = (target: MachinePane): void => {
+    if (!availableTarget(machines, target)) return;
+    setRecentPaneIds((current) => storeRecent(rememberTarget({ machineId: target.machineId, paneId: target.paneId }, current)));
+    navigated.current = true;
+    onSelect(target.machineId, target.paneId);
     onClose();
   };
   const runAction = (action: PaletteAction): void => {
@@ -358,6 +385,7 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
       if (result.opened_pane_id !== null) {
         // the pane may be newer than the snapshot on screen
         actions.refresh();
+        navigated.current = true;
         actions.selectPane(result.opened_pane_id);
       }
       onClose();
@@ -371,7 +399,7 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
   const activate = (index: number): void => {
     const row = rows[index];
     if (!row) return;
-    if (row.kind === "pane") runPane(row.pane);
+    if (row.kind === "pane") runPane(row);
     else if (row.kind === "action") runAction(row.action);
     else void runPluginAction(row.offered);
   };
@@ -453,20 +481,20 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
   // a tab is named as the tab strip names it: by its given name, else "Tab n" by its place. A row's
   // subtitle says it only where it tells panes apart (as the sidebar's agent rows do); the footer's
   // location always says it
-  const tabOf = (pane: HerdrPane): { tab: (typeof tabs)[number] | undefined; place: number; all: typeof tabs } => {
-    const all = tabs.filter((tab) => tab.workspace_id === pane.workspace_id);
+  const tabOf = ({ pane, machine }: MachinePane): { tab: TabInfo | undefined; place: number; all: TabInfo[] } => {
+    const all = (machine.snapshot?.tabs ?? []).filter((tab) => tab.workspace_id === pane.workspace_id);
     const tab = all.find((item) => item.tab_id === pane.tab_id);
     return { tab, place: tab ? all.indexOf(tab) + 1 : 0, all };
   };
-  const tabName = (pane: HerdrPane): string | null => {
-    const { tab, all } = tabOf(pane);
+  const tabName = (row: MachinePane): string | null => {
+    const { tab, all } = tabOf(row);
     return agentTabName(tab, all, t);
   };
   const activeRow = rows[activeIndex];
-  const activeWorkspace = activeRow?.kind === "pane" ? workspaces.find((workspace) => workspace.workspace_id === activeRow.pane.workspace_id) : undefined;
-  const activeTab = activeRow?.kind === "pane" ? tabOf(activeRow.pane) : undefined;
+  const activeWorkspace = activeRow?.kind === "pane" ? activeRow.machine.snapshot?.workspaces.find((workspace) => workspace.workspace_id === activeRow.pane.workspace_id) : undefined;
+  const activeTab = activeRow?.kind === "pane" ? tabOf(activeRow) : undefined;
   const footerPlace = activeRow?.kind === "pane"
-    ? [activeWorkspace?.label ?? t("Unknown workspace"), activeTab?.tab ? tabLabel(activeTab.tab, t, activeTab.place) : null].filter(Boolean).join(" › ")
+    ? [multiMachine ? activeRow.machine.name : null, activeWorkspace?.label ?? t("Unknown workspace"), activeTab?.tab ? tabLabel(activeTab.tab, t, activeTab.place) : null].filter(Boolean).join(" › ")
     : activeRow?.kind === "action" ? activeRow.action.label
     : activeRow?.offered.action.title ?? "";
   const footerPath = activeRow?.kind === "pane" ? panePath(activeRow.pane) : "";
@@ -478,6 +506,7 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
   let rowIndex = 0;
   return (
     <div className="modal-scrim palette-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      {machines.filter((machine) => machine.state === "connected").map((machine) => <MachineContext.Provider key={machine.id} value={machine.id}><PaletteBranchReader machine={machine} onChange={onInventory} /></MachineContext.Provider>)}
       <section ref={surface} className="menu command-palette" role="dialog" aria-modal="true" aria-label={t("Command palette")} onKeyDown={onSurfaceKeyDown} onFocus={onSurfaceFocus}>
         <div className="palette-search">
           <input ref={inputRef} className="input" type="search" value={query} placeholder={t("Search panes and actions…")} aria-label={t("Search panes and actions")} aria-controls="palette-results" aria-activedescendant={itemCount ? `palette-item-${activeIndex}` : undefined} onKeyDown={onInputKeyDown} onChange={(event) => { setQuery(event.target.value); setSelection(NO_SELECTION); }} />
@@ -496,8 +525,9 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
         {pluginError !== null && <p className="palette-error" role="alert">{pluginError}</p>}
         <div ref={resultsRef} className="palette-results" id="palette-results" role="listbox">
           {sections.map((section) => (
-            <div key={section.id} className="palette-section" data-section={section.id}>
+            <div key={section.id} className="palette-section" data-section={section.workspaceId ?? section.id} data-machine={section.machineId}>
               <div className="menu-heading palette-section-heading">
+                {section.machineName && <span className="palette-section-machine">{section.machineName}</span>}
                 <span className="palette-section-name">{section.heading}</span>
                 {section.branch && <span className="palette-section-branch">{section.branch}</span>}
                 <span className="palette-section-count">{section.rows.length}</span>
@@ -521,14 +551,15 @@ export function CommandPalette({ open, onClose, snapshot, online, selectedPaneId
                   return <button key={row.action.id} id={`palette-item-${index}`} type="button" role="option" className="menu-item" aria-selected={activeIndex === index} onFocus={() => select(index)} onMouseMove={() => select(index)} onClick={() => runAction(row.action)}><Icon /><span className="menu-item-main">{row.action.label}</span><ShortcutHint shortcutId={row.action.shortcut} /></button>;
                 }
                 const { pane } = row;
-                const workspace = workspaces.find((item) => item.workspace_id === pane.workspace_id);
+                const workspace = row.machine.snapshot?.workspaces.find((item) => item.workspace_id === pane.workspace_id);
                 const folder = folderName(panePath(pane));
-                const place = section.placeNamesWorkspace
+                const panePlace = section.placeNamesWorkspace
                   ? placeLine(workspace?.label ?? t("Unknown workspace"), folder)
-                  : placeLine(tabName(pane) ?? "", folder);
-                const selected = pane.pane_id === selectedPaneId;
+                  : placeLine(tabName(row) ?? "", folder);
+                const place = multiMachine && section.placeNamesWorkspace ? `${row.machine.name} › ${panePlace}` : panePlace;
+                const selected = row.machineId === machineId && pane.pane_id === selectedPaneId;
                 return (
-                  <button key={pane.pane_id} id={`palette-item-${index}`} type="button" role="option" className="menu-item palette-pane" aria-selected={activeIndex === index} aria-current={selected ? "true" : undefined} onFocus={() => select(index)} onMouseMove={() => select(index)} onClick={() => runPane(pane)}>
+                  <button key={targetKey(row)} data-machine={row.machineId} data-pane={pane.pane_id} id={`palette-item-${index}`} type="button" role="option" className="menu-item palette-pane" aria-selected={activeIndex === index} aria-current={selected ? "true" : undefined} onFocus={() => select(index)} onMouseMove={() => select(index)} onClick={() => runPane(row)}>
                     <span className="palette-mark"><AgentMark agent={pane.agent ?? "shell"} /></span>
                     <span className="menu-item-main"><span className="palette-row-title">{displayPaneTitle(pane)}{selected && <span className="palette-selected">{t("Selected")}</span>}</span><span className="palette-row-subtitle">{place}</span></span>
                     <StatusBadge status={paneStatus(pane)} />

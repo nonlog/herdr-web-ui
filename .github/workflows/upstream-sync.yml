@@ -1,7 +1,7 @@
 name: Upstream sync
 
 # Follow devswha/herdr-web-ui without replacing the Windows and multi-client
-# functionality maintained by this fork. Every candidate is visible as a PR.
+# functionality maintained by this fork. Conflicts fail with a report in the run summary.
 on:
   schedule:
     - cron: '23 2 * * *'
@@ -26,7 +26,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Check upstream, open a review PR, and validate eligible updates
+      - name: Check upstream, report conflicts, and validate eligible updates
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

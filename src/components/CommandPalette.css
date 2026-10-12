@@ -365,3 +365,21 @@
 @media (max-width: 640px) {
   .palette-footer-keys { display: none; }
 }
+
+/* The PC stays visible beside its workspace, including matching names on different PCs. */
+.palette-section-machine {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.palette-section-machine::after {
+  content: "›";
+  margin-left: var(--space-2);
+  color: var(--text-dim);
+}

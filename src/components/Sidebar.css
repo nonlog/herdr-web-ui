@@ -392,17 +392,21 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   height: var(--space-4);
 }
 
-/* a stepped rotation draws its steps and nothing else, so the count is the frame rate: at this
-   arc's 6px radius, 48 steps over --dur-spin move it under a pixel every 33ms, which the eye
-   reads as a turn rather than a tick */
-.sidebar-status[data-status="working"] svg {
-  animation: sidebar-working var(--dur-spin) steps(48, end) infinite;
+/* A question mark asks for an answer; a dot, as an unread mark is, has finished and was not
+   looked at; a working-coloured dot runs and a ring of it waits on background work. Every state
+   keeps the color it has on every other surface. */
+
+/* Running breathes rather than spins: the dot holds full for most of the cycle and dims in a few
+   steps, so it reads as alive at a glance without tugging at the eye, and the browser draws only
+   those steps. Every dot shares one phase (alignBreath), so several runs breathe together. */
+.sidebar-status[data-status="working"] .sidebar-status-dot {
+  animation: sidebar-breathe var(--dur-breathe) steps(6) infinite;
 }
 
-/* A question mark asks for an answer; a dot, as an unread mark is, has finished and was not
-   looked at; running moves, so it needs no color. Waiting and done keep the colors they have
-   on every other surface. */
-.sidebar-status[data-status="working"] { color: var(--text-dim); }
+.sidebar-status[data-status="waiting"] .sidebar-status-dot {
+  border: calc(var(--hairline) * 2) solid currentColor;
+  background: transparent;
+}
 
 .sidebar-status-mark {
   font-size: var(--fs-sm);
@@ -419,12 +423,17 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
 
 .sidebar-status.badge-restore-error { color: var(--status-blocked); }
 
-@keyframes sidebar-working {
-  to { transform: rotate(360deg); }
+@keyframes sidebar-breathe {
+  0%,
+  40% { opacity: 1; }
+  50%,
+  90% { opacity: 0.5; }
+  100% { opacity: 1; }
 }
 
-/* background tasks still running: a number beside the state, quieter than it */
-.background-count {
+/* background tasks still running, and a pane's plan: a number beside the state, quieter than it */
+.background-count,
+.plan-count {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
@@ -436,7 +445,8 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   font-variant-numeric: tabular-nums;
 }
 
-.background-count svg {
+.background-count svg,
+.plan-count svg {
   width: var(--space-3);
   height: var(--space-3);
 }
@@ -456,6 +466,11 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   flex: 0 0 auto;
   flex-direction: column;
   padding: var(--space-2) var(--side-gutter) calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+}
+
+/* Keep the footer at the bottom when both lists are short after the upper section folds. */
+.sidebar-shell:not(:has(.machine-list .machine-workspaces)) .sidebar-footer {
+  margin-top: auto;
 }
 
 .sidebar-footer-action {
@@ -531,6 +546,26 @@ button.sidebar-section-label:focus-visible { outline-offset: calc(var(--ring-off
   .workspace-header {
     transition: none;
   }
+}
 
-  .sidebar-status[data-status="working"] svg { animation: none; }
+/* a finger presses a row as an iPhone list row is pressed: it fills, it does not dim (styles.css) */
+@media (hover: none) and (pointer: coarse) {
+  .workspace-header:has(> .pane-select:active),
+  .sidebar-footer-action:active {
+    background: var(--side-hover);
+  }
+
+  .pane-select:active,
+  .sidebar-footer-action:active {
+    opacity: 1;
+  }
+}
+
+/* a pane's plan: its glyph in the working color until every step is done */
+.plan-count svg {
+  color: var(--status-working);
+}
+
+.plan-count.is-done svg {
+  color: var(--status-done);
 }
