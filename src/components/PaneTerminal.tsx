@@ -2658,8 +2658,8 @@ export function PaneTerminal({
 
   const sendComposerText = useCallback((text: string, delivery: "queue" | "immediate" = "immediate"): false | Promise<true | string> => {
     const result = submitComposerMessage(text, delivery);
-    return result === null ? false : result.then((answer) => answer.ok ? true : submitNote(answer.code, answer.message));
-  }, [submitComposerMessage]);
+    return result === null ? false : result.then((answer) => answer.ok ? true : submitNote(answer.code, answer.message, agent));
+  }, [submitComposerMessage, agent]);
 
   // the terminal's input line: the text typed like the keyboard would, into an agent's open
   // menu too, then Enter after the server's gap; several lines go as one paste
@@ -2917,7 +2917,7 @@ export function PaneTerminal({
       // Send anyway answered a box seen at once: an agent that started working since would queue it unchecked
       if (sendAnyway && delivery !== "immediate") return t("Not sent: the agent started working since. Check the terminal, then send again.");
       const result = submitComposerMessage(text, delivery, delivery === "immediate" ? clearDraft : undefined, sendAnyway);
-      return result === null ? false : result.then((answer) => answer.ok ? true : submitRefusal(answer.code, answer.message, answer.draft, answer.box));
+      return result === null ? false : result.then((answer) => answer.ok ? true : submitRefusal(answer.code, answer.message, answer.draft, answer.box, agent));
     },
     [agent, agentStatus, answerPanePrompt, answering, heldByOpenQueue, submitComposerMessage, queueStore, machineId, settings.autoSendQueued],
   );
@@ -3311,6 +3311,7 @@ export function PaneTerminal({
         messages={pending.map((message) => !message.serverOwned || pendingMessages.isOwned(queueOwner, message.id, pendingScopeRef.current)
           ? message : { ...message, serverOwned: false, state: "uncertain" as const })}
         connected={connected}
+        agent={agent}
         blocked={held || secretActive || ended || heldByOpenQueue || answering !== null}
         unsaved={pendingMessages.isUnsaved(queueOwner)}
         isBusy={(id) => pendingMessages.isBusy(queueOwner, id)}

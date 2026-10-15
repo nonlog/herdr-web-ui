@@ -88,7 +88,7 @@ import {
   worktreeRemove,
 } from "./herdr/client.ts";
 import { type AlertTiming, createPushService, defaultStateDir, handlePushRequest } from "./push.ts";
-import { CLAUDE_CLEAR_INPUT_KEYS, claudeClearableDraft, claudeHeldIsGrey, claudeInputBoxContent, claudeInputDraft, shownInputBox, claudeInputEmpty, viewportShowsLive, codexQuestionsCollapsed, handlePromptRequest, isClaudeHeld, heldCandidate, modelListWaits, noteSubmitted, parseInteractivePrompt, promptWaitEnded, claudeRestoredDraft, lastChatSubmitted } from "./prompt.ts";
+import { CLAUDE_CLEAR_INPUT_KEYS, claudeClearableDraft, claudeHeldIsGrey, claudeInputBoxContent, claudeInputDraft, hermesInputDraft, shownInputBox, claudeInputEmpty, viewportShowsLive, codexQuestionsCollapsed, handlePromptRequest, isClaudeHeld, heldCandidate, modelListWaits, noteSubmitted, parseInteractivePrompt, promptWaitEnded, claudeRestoredDraft, lastChatSubmitted } from "./prompt.ts";
 import { secretPrompt, validSecret } from "../shared/secret-prompt.ts";
 import { PasteImageError, readImageBody, savePaneImage } from "./paste.ts";
 import { PtySession } from "./pty/session.ts";
@@ -203,6 +203,7 @@ const MAX_WAITING_KEYS = 256;
  */
 export const SUBMIT_DEADLINE_MS = 45_000;
 const CLAUDE_INPUT_DRAFT_MESSAGE = "Claude Code's input box is not empty (a draft, bash mode, or a box that could not be read); send or clear it in the terminal, then send this message";
+const HERMES_INPUT_DRAFT_MESSAGE = "Hermes' input in the terminal is not empty (a draft, or an input that could not be read); send or clear it there, then send this message";
 /** How long a cleared Claude input box may take to read empty before the send is refused after all. */
 const DRAFT_CLEAR_WAIT_MS = 1_500;
 const DRAFT_CLEAR_POLL_MS = 50;
@@ -214,8 +215,8 @@ const DRAFT_CLEAR_POLL_MS = 50;
  */
 class InputDraftError extends HerdrError {
   readonly draft: string | null;
-  constructor(draft: string | null, readonly identity?: PendingIdentity, readonly box: string | null = null) {
-    super("input_draft", CLAUDE_INPUT_DRAFT_MESSAGE);
+  constructor(draft: string | null, readonly identity?: PendingIdentity, readonly box: string | null = null, message = CLAUDE_INPUT_DRAFT_MESSAGE) {
+    super("input_draft", message);
     this.draft = draft;
   }
 }
@@ -770,6 +771,11 @@ export function createServer(
           }
           if (clearDraft !== undefined && !claudeInputEmpty(...reads)) throw new InputDraftError(null);
         }
+        // a clear request or send anyway reached a Hermes pane only to be refused above: both are Claude's
+        if ((pane?.agent ?? pane?.agent_session?.agent) === "hermes") {
+          await freeHermesInput(paneId, identity ?? undefined);
+          inTime();
+        }
         try {
           await agentPrompt(paneId, closeMention(text));
           noteSubmitted(paneId, text);
@@ -917,6 +923,24 @@ export function createServer(
    * they show it. Read last, the live screen holds anything typed meanwhile. An empty box (or none)
    * needs no colors.
    */
+  /**
+   * Hermes' input, refused with input_draft unless hermesInputDraft knows it empty. As claudeBoxReads,
+   * the viewport's colors are read only for an input row with text, and count only once
+   * viewportShowsLive verifies them; the live read comes last, so text typed meanwhile is in it.
+   * Hermes offers nothing to clear from here: the user sends or clears it in the terminal.
+   */
+  async function freeHermesInput(paneId: string, identity?: PendingIdentity): Promise<void> {
+    const before = (await paneRead({ paneId, source: "detection", format: "text" })).text;
+    if (!hermesInputDraft(before, null)) return;
+    const scrollBefore = await paneScrollInfo(paneId);
+    const colors = (await paneRead({ paneId, source: "visible", format: "ansi" })).text;
+    const scrollAfter = await paneScrollInfo(paneId);
+    const live = (await paneRead({ paneId, source: "detection", format: "text" })).text;
+    if (hermesInputDraft(live, viewportShowsLive(scrollBefore, scrollAfter, colors, before, live) ? colors : null)) {
+      throw new InputDraftError(null, identity, null, HERMES_INPUT_DRAFT_MESSAGE);
+    }
+  }
+
   async function claudeBoxReads(paneId: string): Promise<[string, string | null]> {
     const before = (await paneRead({ paneId, source: "detection", format: "text" })).text;
     if (!claudeInputDraft(before, null)) return [before, null];
@@ -974,6 +998,7 @@ export function createServer(
       // The box is the live screen's; only the viewport read tells Claude's grey text from a draft. The live
       // read comes after the colors, so text typed between the two is in the box and holds the message.
       if (context.identity.agent === "claude") await freeClaudeBox(paneId, context.working, () => authorizePending(owner, paneId, lease), arrivedAt + (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS));
+      else if (context.identity.agent === "hermes") await freeHermesInput(paneId, context.identity);
       if (Date.now() - arrivedAt > (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS)) throw new HerdrError("submit_timeout", "The pending message waited too long; nothing was typed");
       authorizePending(owner, paneId, lease);
       // asked again right before herdr is written to: its connect is awaited (#666)

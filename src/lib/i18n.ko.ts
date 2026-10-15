@@ -598,6 +598,7 @@ export const KO: Record<string, string> = {
   "Not sent: the agent is waiting for an answer in the terminal. Answer it first.": "보내지 않음: 에이전트가 터미널에서 답을 기다리고 있습니다. 먼저 답하세요.",
   "Not sent: this view only watches the pane.": "보내지 않음: 이 화면은 패널을 보기만 합니다.",
   "Not sent: Claude Code's input box in the terminal is not empty. Send or clear it there, then send this message.": "보내지 않음: 터미널의 Claude Code 입력란이 비어 있지 않습니다. 그곳에서 보내거나 지운 뒤 이 메시지를 보내세요.",
+  "Not sent: Hermes' input in the terminal is not empty. Send or clear it there, then send this message.": "보내지 않았습니다: 터미널의 Hermes 입력칸이 비어 있지 않습니다. 터미널에서 보내거나 지운 다음 이 메시지를 보내세요.",
   "Not sent: Claude Code's input box in the terminal already holds “{draft}”.": "보내지 않음: 터미널의 Claude Code 입력란에 이미 입력된 내용이 있습니다(“{draft}”).",
   "Clear it and send": "지우고 보내기",
   "Send anyway": "그래도 보내기",
