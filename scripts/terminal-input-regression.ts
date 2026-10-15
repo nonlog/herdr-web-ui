@@ -652,7 +652,9 @@ async function checkKeyBarWhileLineComposes(browser: Browser, origin: string, pa
     await until(() => frames.length > before, "Esc frame");
     await interrupt.tap();
     await until(() => frames.length > before + 1, "^C frame");
-    assert.deepEqual(frames.slice(before).map((frame) => [frame.type, frame.text ?? frame.keys]), [["input", "\x1b"], ["input", "\x03"]]);
+    // Key-bar Escape is a Herdr semantic chord (Kitty-aware), unlike Ctrl+C,
+    // which remains an explicit control byte. Both work during IME composition.
+    assert.deepEqual(frames.slice(before).map((frame) => [frame.type, frame.text ?? frame.keys]), [["keys", ["esc"]], ["input", "\x03"]]);
     assert.equal(await line.inputValue(), "fix the", "the composing line keeps its text");
     // the switch to direct typing would unmount the line mid-composition: it waits
     const direct = page.locator('.key-bar [data-key="direct"]');
