@@ -17,7 +17,7 @@ const SETTINGS_KEY = "herdr-web-ui:settings";
 const MIGRATED_KEYS = ["direct", "Escape", "Tab", "BackTab", "Control", "Alt", "Shift", "Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "ctrl-c", "ctrl-d", "ctrl-z", "pipe", "tilde", "slash"];
 const DEFAULT_KEY_BAR_KEYS = ["direct", "Escape", "Tab", "ctrl-c", "Control", "Alt", "Shift", "Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
 
-interface InputFrame { type: "input" | "keys"; pane_id: string; text?: string; keys?: string[] }
+interface InputFrame { type: "input" | "keys"; pane_id: string; text?: string; keys?: string[]; stop?: boolean }
 const framesOf = (page: Page): Promise<InputFrame[]> => page.evaluate(() => (window as unknown as { keyBarFrames: InputFrame[] }).keyBarFrames);
 const keysOf = (page: Page): Promise<string[]> => page.locator(".key-bar [data-key]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-key")!));
 const settingsOf = (page: Page): Promise<Record<string, unknown>> => page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), SETTINGS_KEY);
@@ -273,15 +273,15 @@ try {
         await dialog.locator(".key-bar-settings").getByRole("button", { name: "Restore defaults", exact: true }).tap();
         await closeSettings(page, dialog);
         assert.deepEqual(await keysOf(page), DEFAULT_KEY_BAR_KEYS);
-        // Fork regression: the raw ESC byte is not the semantic Kitty-aware
-        // key the active Pi/Codex terminal expects from the key bar and Stop.
+        // Physical/key-bar Escape uses Herdr's Kitty-aware semantic encoder.
+        // Chat Stop uses upstream's ordered input.stop contract instead.
         await input.focus();
         await expectFrame(page, () => input.press("Escape"), { type: "keys", keys: ["esc"] });
         await expectFrame(page, () => bar.locator('[data-key="Escape"]').tap(), { type: "keys", keys: ["esc"] });
         await page.getByTitle("Chat transcript (⌘⇧J)", { exact: true }).click();
         const stop = page.getByRole("button", { name: "Stop agent", exact: true });
         await stop.waitFor();
-        await expectFrame(page, () => stop.click(), { type: "keys", keys: ["esc"] });
+        await expectFrame(page, () => stop.click(), { type: "input", text: "\u001b", stop: true });
         await page.getByTitle("Live terminal (⌘⇧J)", { exact: true }).click();
         await ready(page);
         for (const width of [320, 390]) {

@@ -3,6 +3,11 @@
 ## [Unreleased - nonlog fork]
 
 ### Fork changes
+- Reduce upstream/fork duplication: adopt upstream #869's bounded Pi large-history
+  reader and drop the extra 4096-segment cutoff; use upstream #1112's ordered
+  `input.stop` contract for Chat Stop while retaining semantic physical/key-bar
+  Escape for Kitty-aware programs. Retain fork-only native Windows control,
+  independent ANSI history, WAN scroll coalescing and cross-directory Codex resume.
 - Preserve the 87 upstream commits as real ancestors of the fork, replace source-patch
   synchronization with Git merge, and verify the behind count through ancestry.
   Workflow-history permission limits now require explicit review instead of silently

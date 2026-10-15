@@ -1997,7 +1997,8 @@ export function PaneTerminal({
     const onTouchEnd = (event: TouchEvent): void => {
       // a lifted one-finger drag sends what is left once it reaches half a step: a flick shorter
       // than one step still scrolls, and a long drag loses at most half a step at its end
-      if (tracking && event.type === "touchend" && !pinchStroke && !adopted()) {
+      if (tracking && event.type === "touchend" && !pinchStroke
+        && !observeRef.current && !fixedGridRef.current) {
         sendTouchWheels(finalStep(touchPixels, cellHeight() * HERDR_MOUSE_SCROLL_LINES));
       }
       touchPixels = 0;
@@ -2720,16 +2721,14 @@ export function PaneTerminal({
     }
   }, [inputLine, coarse, chatView, directTyping, paneId]);
 
-  // A Stop is a semantic Escape key, not an injected raw ESC byte. The live hidden
-  // xterm may not accept input in Chat mode; more importantly, programs using the
-  // Kitty keyboard protocol require Herdr's own encoding for Escape. Do not send
-  // Ctrl+C as a fallback: it can terminate a shell or an agent process.
+  // Use the upstream ordered Stop input contract instead of an ordinary Esc key.
+  // Physical and key-bar Escape still use semantic keys (Kitty-compatible).
   const abortTurn = useCallback(() => {
     const socket = socketRef.current;
-    const pane = paneRef.current;
-    if (!socket || pane === null || !socket.sendKeys(pane, ["esc"])) {
-      setInputError(tRef.current("Not sent: the terminal is not ready for keys."));
-    }
+    const term = termRef.current;
+    if (!term || !socket || !socket.connected) return;
+    stopKeyRef.current = true;
+    try { term.input("\u001b"); } finally { stopKeyRef.current = false; }
   }, []);
 
   // While the agent runs, append to its held messages. Each requires an explicit send.

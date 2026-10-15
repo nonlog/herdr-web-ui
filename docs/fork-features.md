@@ -58,15 +58,15 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 
 ## Pi 大会话 Chat 读取
 
-Pi 的 `~/.pi/agent/sessions/` JSONL 是可分支的追加日志。之前 `piBranchSegments` 在活动分支总字节超过 64 MiB 时直接返回 `null`，服务端报 `branch_unreadable`，Chat 显示 `Conversation unavailable`，即使会话文件路径有效、Pi 本体仍正常运行。实测 97.6 MB、约 1.3 万条条目的真实 Pi 会话命中此问题。现在不以活动分支总字节数限制可读性；连续日志仍归并为一个 offset 区间，最新页读取最多 16 MiB、旧页最多 64 MiB，原来的有界扫描、分页和 `/tree` 分支选择全部保留。另以 4096 个非连续段限制极端碎片化历史的每次读取开销。真实会话只读诊断已恢复，读取最新 22 条历史约 220 ms；自动化测试另覆盖超 64 MiB 的区间元数据以及碎片化限制。
+Pi 的 `~/.pi/agent/sessions/` JSONL 是可分支的追加日志。之前在活动分支超过 64 MiB 时，Chat 会报 `branch_unreadable`。该修复现已**完全采用上游 #869（`2a9d4bd`）**：分页读取无整条分支总字节上限，索引按 4 MiB 分块、单记录最多 16 MiB、最多 100,000 条和 32 MiB 索引元数据预算；解析页和缓存也有独立预算。移除了 Fork 额外的 4096 非连续段上限及其冗余测试，继续运行上游覆盖超过 64 MiB、分支路径、缓存失效的完整测试。
 
 Fork 已包含上游 #582（对应 #518 的前两个 Windows Codex 路径前缀修复，`withoutVerbatimPrefix` 与 `cwd IN (?, ?)`）。`codex resume` / `codex resume --all` 交互恢复时缺失会话 ID 的第三项仍未被上游修复；Fork 自己的跨目录恢复候选匹配和 Windows CI 回归必须保留，不能被后续上游同步覆盖。这个 Codex 问题与 Pi 的大文件 Chat 不可用是两个独立故障。
 
 ## Chat Stop 与终端 Esc 中止链路
 
-Chat 的 Stop 按钮不能向隐藏的 xterm 注入原始 `0x1B` 代替按键；普通物理 Esc 和手机按键栏 Esc 也不能一律当作裸字节。Pi、Codex、Claude Code 等 TUI 可能启用 Kitty 键盘协议，Escape 的真实编码要由 Herdr 根据 pane 当前协商协议决定。现在三处均经 WebSocket `keys: ["esc"]` 走 `pane.send_keys`，保留组合键、粘贴文本、IME 及离线不重放的原有约束；不自动发送 Ctrl+C，避免终止进程。连接未就绪时在 Chat/Terminal 显示失败说明。
+**Chat Stop 采用上游 #1112 的 `input.stop: true` 有序中止协议**，不再由 Fork 额外注入普通语义 Esc，避免与等待发送的聊天消息重排。物理 Esc 和手机按键栏 Esc 则仍通过 Herdr 的 `keys: ["esc"]` 编码，兼容 Pi、Codex、Claude Code 等 TUI 的 Kitty 键盘协议。中止不自动回退 Ctrl+C，避免误杀 Shell 或 Agent。
 
-`scripts/key-bar-customization-demo-regression.ts` 断言物理 Esc、按键栏 Esc 和 Chat Stop 各发送一条语义按键而不是 `input` 原始字节；`scripts/windows-lens-browser-qa.ts` 还在隔离窗格启动声明 Kitty 键盘协议的程序，检查 Herdr 实际传给程序的 Escape 编码。绝不对用户正在运行的 Pi、Codex 或 Claude Code 会话执行中止测试。
+`scripts/key-bar-customization-demo-regression.ts` 分别断言物理/按键栏 Esc 语义按键与 Chat Stop 的 `input.stop`；`scripts/windows-lens-browser-qa.ts` 在隔离窗格启动 Kitty 测试程序，核对真实按键编码。绝不对正在运行的用户会话执行中止测试。
 
 ## 构建、验证与部署
 

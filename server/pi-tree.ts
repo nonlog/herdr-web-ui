@@ -14,16 +14,10 @@ export const MAX_PI_INDEX_ENTRIES = 100_000;
 export const MAX_PI_ENTRY_BYTES = 16 * 1024 * 1024;
 const MAX_PI_INDEX_METADATA_BYTES = 32 * 1024 * 1024;
 /**
- * Bound the number of disjoint ranges, not the accumulated transcript bytes. A
- * long-lived Pi session can exceed 64 MiB while its live branch remains one
- * contiguous range: the conversation reader only materializes bounded pages
- * (16 MiB for the latest page, up to 64 MiB for a requested older page), and
- * retaining a range's offsets never allocates its payload. A pathological
- * branch with many non-contiguous ranges would instead make each page open
- * thousands of little file slices, so keep that independent resource bound.
+ * The index cache keeps any index the builder accepts, so an unchanged history is never indexed
+ * twice whatever its size, and holds at most this much estimated metadata across at most
+ * PI_INDEX_CACHE_FILES files: the least recently read goes first, never the one just read.
  */
-export const MAX_BRANCH_SEGMENTS = 4096;
-/** Index cache is bounded by metadata size rather than the transcript's cumulative bytes. */
 export const PI_INDEX_CACHE_BYTES = MAX_PI_INDEX_METADATA_BYTES;
 const PI_INDEX_CACHE_FILES = 4;
 
@@ -185,9 +179,8 @@ export function forgetAllPiIndexes(): void {
  * The active branch: the last entry written back to its root, oldest first, as byte
  * ranges of the file. Adjacent entries merge into one range, so a session no /tree
  * touched reads as the single prefix it is. An id repeated (never pi, but never
- * trusted) keeps its last append; only a branch with too many disjoint byte
- * ranges is refused. A large contiguous branch remains readable one page at a
- * time. Null when the tree cannot be read, or holds no entry at all.
+ * trusted) keeps its last append. Only offsets are projected, never a branch-sized buffer.
+ * Index entry/record budgets still fail closed rather than invent a partial branch. Null when the tree cannot be read, or holds no entry at all.
  */
 export function piBranchSegments(path: string, size: number): TranscriptSegment[] | null {
   const index = piEntryIndex(path);
@@ -212,10 +205,7 @@ export function piBranchSegments(path: string, size: number): TranscriptSegment[
   for (const entry of chain.reverse()) {
     const last = segments[segments.length - 1];
     if (last !== undefined && last.end === entry.start) last.end = entry.end;
-    else {
-      if (segments.length === MAX_BRANCH_SEGMENTS) return null;
-      segments.push({ start: entry.start, end: entry.end });
-    }
+    else segments.push({ start: entry.start, end: entry.end });
   }
   return segments;
 }
