@@ -11,6 +11,7 @@
  * HERDR_TEST_SHARDS sets the worker count; 1 is the old serial run.
  */
 import { availableParallelism } from "node:os";
+import { collectTestOutput } from "./test-output-drain.ts";
 
 const suite = process.argv[2];
 if (suite !== "unit" && suite !== "integration") throw new Error("Usage: bun scripts/ci-tests.ts unit|integration");
@@ -59,12 +60,14 @@ if (suite === "unit") {
         env: { ...process.env, HERDR_TEST_MODE: suite! },
         stdin: "ignore", stdout: "pipe", stderr: "inherit",
       });
-      const [output, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      const result = await collectTestOutput(child.stdout, child.exited);
+      const { output, exitCode: code } = result;
+      if (result.inheritedPipe) console.warn(`unit: ${file} left stdout inherited after process exit; checking exit code and complete test summary`);
       const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
       const count = (word: keyof typeof totals) => Number(new RegExp(`^\\s*(\\d+) ${word}$`, "m").exec(plain)?.[1] ?? 0);
       for (const word of ["pass", "fail", "skip"] as const) totals[word] += count(word);
       if (!/^\s*\d+ pass$/m.test(plain) && !/^\s*\d+ fail$/m.test(plain)) unread.push(file);
-      if (code !== 0) failed.push(file);
+      if (code !== 0 || count("fail") !== 0) failed.push(file);
       console.log(`\n--- ${file} (worker-${workerId}, ${((Date.now() - fileStartedAt) / 1000).toFixed(1)}s, exit ${code})\n${output.trimEnd()}`);
     }
   }
@@ -102,13 +105,15 @@ async function work(session: string): Promise<void> {
       env: { ...process.env, HERDR_TEST_MODE: suite!, HERDR_TEST_SESSION: session },
       stdin: "ignore", stdout: "pipe", stderr: "inherit",
     });
-    const [output, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+    const result = await collectTestOutput(child.stdout, child.exited);
+    const { output, exitCode: code } = result;
+    if (result.inheritedPipe) console.warn(`integration: ${file} left stdout inherited after process exit; checking exit code and complete test summary`);
     const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
     const count = (word: keyof typeof totals) => Number(new RegExp(`^\\s*(\\d+) ${word}$`, "m").exec(plain)?.[1] ?? 0);
     for (const word of ["pass", "fail", "skip"] as const) totals[word] += count(word);
     // a run that never printed its counts cannot be told from one that ran nothing
     if (!/^\s*\d+ pass$/m.test(plain) && !/^\s*\d+ fail$/m.test(plain)) unread.push(file);
-    if (code !== 0) failed.push(file);
+    if (code !== 0 || count("fail") !== 0) failed.push(file);
     console.log(`\n--- ${file} (${session}, ${((Date.now() - fileStartedAt) / 1000).toFixed(1)}s, exit ${code})\n${output.trimEnd()}`);
   }
 }
