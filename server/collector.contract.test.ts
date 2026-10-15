@@ -97,6 +97,18 @@ describe("completion replay across a moved subscription key", () => {
     const queued = Promise.withResolvers<void>();
     const moved = Promise.withResolvers<void>();
     const finished = Promise.withResolvers<void>();
+    // Keep event-order regressions diagnosable: the suite-wide timeout cannot
+    // tell whether the old status, pane_moved, or post-move reconcile was lost.
+    const awaitStage = async (stage: string, promise: Promise<void>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([promise, new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`collector replay stalled at ${stage}: ${JSON.stringify(statuses)}`)), 5000);
+        })]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
     let moving = false;
     let delayedWorking: (() => void) | undefined;
     let reconciled = Promise.withResolvers<void>();
@@ -146,22 +158,22 @@ describe("completion replay across a moved subscription key", () => {
       },
     });
     try {
-      await collector.ready;
+      await awaitStage("initial subscription", collector.ready);
       await herdrRpc("pane.report_agent", { pane_id: workspace.root_pane.pane_id, source: "manual", agent: "codex", state: "working" });
-      await queued.promise;
+      await awaitStage("old-ID working event", queued.promise);
       expect(statuses).toEqual([]);
       moving = true;
       const { move_result } = await herdrRpc<{ move_result: { pane: { pane_id: string; workspace_id: string } } }>("pane.move", {
         pane_id: workspace.root_pane.pane_id, destination: { type: "new_workspace", label: "herdr-web-ui-test-moved-gap" }, focus: false,
       });
       workspaceId = move_result.pane.workspace_id;
-      await moved.promise;
+      await awaitStage("pane_moved lifecycle event", moved.promise);
       expect(statuses).toEqual([{ paneId: workspace.root_pane.pane_id, before: undefined }]);
       statuses.length = 0;
       reconciled = Promise.withResolvers<void>();
       await herdrRpc("pane.report_agent", { pane_id: move_result.pane.pane_id, source: "manual", agent: "codex", state: "idle" });
       finished.resolve();
-      await reconciled.promise;
+      await awaitStage("post-move reconciliation", reconciled.promise);
       expect(statuses).toEqual([{ paneId: move_result.pane.pane_id, before: "working" }]);
     } finally {
       finished.resolve();

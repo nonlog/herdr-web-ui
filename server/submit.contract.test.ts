@@ -1477,7 +1477,7 @@ describe("typing without terminal attach, at the edges", () => {
   }, 30_000);
 
   it("sends nothing typed by a connection that closed while it waited its turn", async () => {
-    const bare = createServer({ port: 0, stateDir: join(root, "push-gone"), terminalAttach: false });
+    const bare = createServer({ port: 0, stateDir: join(root, "push-gone"), terminalAttach: false, terminalControl: false });
     const gone = await Socket.connect(bare.port);
     const socket = await Socket.connect(bare.port);
     try {
@@ -1497,7 +1497,7 @@ describe("typing without terminal attach, at the edges", () => {
   }, 30_000);
 
   it("sends nothing typed into a mirrored pane that was left, or left and attached again, before its turn came (#546)", async () => {
-    const bare = createServer({ port: 0, stateDir: join(root, "push-left"), terminalAttach: false, submitDelayMs: 1000 });
+    const bare = createServer({ port: 0, stateDir: join(root, "push-left"), terminalAttach: false, terminalControl: false, submitDelayMs: 1000 });
     const socket = await Socket.connect(bare.port);
     const since = (mark: number, predicate: (message: any) => boolean) =>
       socket.waitFor((message) => socket.seen.indexOf(message) >= mark && predicate(message));
@@ -1527,7 +1527,7 @@ describe("typing without terminal attach, at the edges", () => {
   }, 30_000);
 
   it("sends nothing typed by a sender that left and rejoined a mirrored pane another client kept open, before its turn came", async () => {
-    const bare = createServer({ port: 0, stateDir: join(root, "push-rejoin"), terminalAttach: false });
+    const bare = createServer({ port: 0, stateDir: join(root, "push-rejoin"), terminalAttach: false, terminalControl: false });
     const sender = await Socket.connect(bare.port);
     const keeper = await Socket.connect(bare.port);
     const gate = deferred();
@@ -1564,7 +1564,7 @@ describe("typing without terminal attach, at the edges", () => {
   }, 30_000);
 
   it("enters no secret for a sender that left and rejoined a mirrored pane another client kept open, while the screen was read", async () => {
-    const bare = createServer({ port: 0, stateDir: join(root, "push-rejoin-secret"), terminalAttach: false });
+    const bare = createServer({ port: 0, stateDir: join(root, "push-rejoin-secret"), terminalAttach: false, terminalControl: false });
     const sender = await Socket.connect(bare.port);
     const keeper = await Socket.connect(bare.port);
     const gate = deferred();
@@ -1606,7 +1606,7 @@ describe("typing without terminal attach, at the edges", () => {
     it(`refuses a mirrored non-ASCII ${label} secret without typing anything (#1065)`, async () => {
       // Given a real recorder showing a password prompt on a mirrored pane.
       const target = await recorder(`secret-${label}`, process.execPath, "Password:");
-      const bare = createServer({ port: 0, stateDir: join(root, `secret-${label}`), terminalAttach: false });
+      const bare = createServer({ port: 0, stateDir: join(root, `secret-${label}`), terminalAttach: false, terminalControl: false });
       const sender = await Socket.connect(bare.port);
       const send = spyOn(herdr, "paneSendText");
       const keys = spyOn(herdr, "paneSendKeys");
@@ -1644,7 +1644,7 @@ describe("typing without terminal attach, at the edges", () => {
       );
       workspaces.push(created.workspace.workspace_id);
       const pane = created.root_pane.pane_id;
-      const bare = createServer({ port: 0, stateDir: join(root, label), terminalAttach: false });
+      const bare = createServer({ port: 0, stateDir: join(root, label), terminalAttach: false, terminalControl: false });
       const sender = await Socket.connect(bare.port);
       const keeper = await Socket.connect(bare.port);
       const entered = deferred();
@@ -1726,7 +1726,7 @@ describe("typing without terminal attach, at the edges", () => {
   }
 
   it("presses no chord for a sender that switched to observe and back while herdr was being reached (#545)", async () => {
-    const bare = createServer({ port: 0, stateDir: join(root, "push-role-keys"), terminalAttach: false });
+    const bare = createServer({ port: 0, stateDir: join(root, "push-role-keys"), terminalAttach: false, terminalControl: false });
     const sender = await Socket.connect(bare.port);
     const keeper = await Socket.connect(bare.port);
     const gate = deferred();
@@ -1762,7 +1762,7 @@ describe("typing without terminal attach, at the edges", () => {
   }, 30_000);
 
   it("enters no secret for a sender that switched to observe and back while the screen was read (#589)", async () => {
-    const bare = createServer({ port: 0, stateDir: join(root, "push-role-secret"), terminalAttach: false });
+    const bare = createServer({ port: 0, stateDir: join(root, "push-role-secret"), terminalAttach: false, terminalControl: false });
     const sender = await Socket.connect(bare.port);
     const keeper = await Socket.connect(bare.port);
     const gate = deferred();
