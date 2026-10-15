@@ -95,6 +95,9 @@ const startedAt = Date.now();
 async function work(session: string): Promise<void> {
   for (let file = queue.shift(); file; file = queue.shift()) {
     const fileStartedAt = Date.now();
+    // Emit a start marker BEFORE launching each file. On an unresponsive test
+    // process, buffered stdout otherwise hides which file prevented progress.
+    console.log(`integration: START ${file} (${session})`);
     // Live process/pane probes can poll for 10s; Bun's 5s default would cut them off early.
     // One stream, so a file's output reads in the order it was written.
     // bun colours its counts when anything in the environment asks for colour (FORCE_COLOR
@@ -105,7 +108,27 @@ async function work(session: string): Promise<void> {
       env: { ...process.env, HERDR_TEST_MODE: suite!, HERDR_TEST_SESSION: session },
       stdin: "ignore", stdout: "pipe", stderr: "inherit",
     });
-    const result = await collectTestOutput(child.stdout, child.exited);
+    let timedOut = false;
+    const limit = setTimeout(() => {
+      timedOut = true;
+      console.error(`integration: TIMEOUT ${file} (${session}) after 180s; terminating this isolated test child`);
+      child.kill();
+    }, 180_000);
+    let partial = "";
+    const showOutput = (chunk: string): void => {
+      partial += chunk;
+      for (let newline = partial.indexOf("\n"); newline >= 0; newline = partial.indexOf("\n")) {
+        console.log(`integration [${session}:${file}] ${partial.slice(0, newline).replace(/\r$/, "")}`);
+        partial = partial.slice(newline + 1);
+      }
+    };
+    let result: Awaited<ReturnType<typeof collectTestOutput>>;
+    try {
+      result = await collectTestOutput(child.stdout, child.exited, 2_000, showOutput);
+    } finally {
+      clearTimeout(limit);
+    }
+    if (partial) console.log(`integration [${session}:${file}] ${partial}`);
     const { output, exitCode: code } = result;
     if (result.inheritedPipe) console.warn(`integration: ${file} left stdout inherited after process exit; checking exit code and complete test summary`);
     const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
@@ -113,8 +136,8 @@ async function work(session: string): Promise<void> {
     for (const word of ["pass", "fail", "skip"] as const) totals[word] += count(word);
     // a run that never printed its counts cannot be told from one that ran nothing
     if (!/^\s*\d+ pass$/m.test(plain) && !/^\s*\d+ fail$/m.test(plain)) unread.push(file);
-    if (code !== 0 || count("fail") !== 0) failed.push(file);
-    console.log(`\n--- ${file} (${session}, ${((Date.now() - fileStartedAt) / 1000).toFixed(1)}s, exit ${code})\n${output.trimEnd()}`);
+    if (timedOut || code !== 0 || count("fail") !== 0) failed.push(file);
+    console.log(`integration: END ${file} (${session}, ${((Date.now() - fileStartedAt) / 1000).toFixed(1)}s, exit ${code}, timeout=${timedOut})`);
   }
 }
 

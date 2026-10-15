@@ -18,6 +18,21 @@ test("collects the complete test summary and preserves exit code", async () => {
   });
 });
 
+test("forwards decoded chunks for live diagnostics without changing the verified result", async () => {
+  const live: string[] = [];
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes("START submit.contract.test.ts\n"));
+      controller.enqueue(bytes(" 2 pass\n 0 fail\n"));
+      controller.close();
+    },
+  });
+  const result = await collectTestOutput(stream, Promise.resolve(0), 40, (chunk) => live.push(chunk));
+  expect(live.join("")).toBe(result.output);
+  expect(result.exitCode).toBe(0);
+  expect(result.inheritedPipe).toBe(false);
+});
+
 test("after test process exit, an inherited stdout pipe cannot hold integration CI forever", async () => {
   let canceled = false;
   const stream = new ReadableStream<Uint8Array>({

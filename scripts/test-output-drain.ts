@@ -15,6 +15,7 @@ export async function collectTestOutput(
   stream: ReadableStream<Uint8Array>,
   exited: Promise<number>,
   drainGraceMs = 2_000,
+  onChunk?: (text: string) => void,
 ): Promise<TestOutputResult> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -25,7 +26,9 @@ export async function collectTestOutput(
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        output += decoder.decode(value, { stream: true });
+        const text = decoder.decode(value, { stream: true });
+        output += text;
+        onChunk?.(text);
       }
       output += decoder.decode();
     } catch (error) {
