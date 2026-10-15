@@ -44,7 +44,7 @@ import { PendingMessages } from "./PendingMessages.tsx";
 import type { AgentStatus, ClientRole, ConversationMetadata, InteractivePrompt, PlanSummary, ServerMessage } from "../../shared/protocol.ts";
 import type { PaneControls, PaneView } from "../lib/actions.ts";
 import { usePaneLane } from "../lib/chatLane.ts";
-import { useSettings, terminalTheme, type Palette, type ResolvedTheme } from "../lib/settings.ts";
+import { useSettings, terminalTheme, type Palette, type ResolvedTheme, type TerminalCursorStyle } from "../lib/settings.ts";
 import { loadFontStack, TERMINAL_FONT_STACK, terminalFontStack } from "../lib/fontFamily.ts";
 import { useT } from "../lib/i18n.ts";
 import { isAppShortcut } from "../lib/shortcuts.ts";
@@ -168,6 +168,8 @@ export function PaneTerminal({
   autoSelected = false,
   terminalFontSize,
   split = false,
+  terminalCursorStyle,
+  terminalCursorBlink,
   terminalWheelSpeed,
   terminalFontFamily,
   theme,
@@ -197,7 +199,6 @@ export function PaneTerminal({
   const shown = useContext(PaneShownContext);
   const shownRef = useRef(shown); shownRef.current = shown;
   const sizesPty = (): boolean => presentedRef.current && shownRef.current && !localGridRef.current;
-  const awayReleased = useContext(PaneAwayContext);
   const { answerPanePrompt, uploadPaneImage } = useMachineApi();
   const uploadFileRef = useRef(uploadPaneImage);
   uploadFileRef.current = uploadPaneImage;
@@ -570,8 +571,8 @@ export function PaneTerminal({
     const term = new Terminal({
       convertEol: false,
       // a program's own DECSCUSR still changes the cursor
-      cursorStyle: "block",
-      cursorBlink: true,
+      cursorStyle: terminalCursorStyle,
+      cursorBlink: terminalCursorBlink,
       // xterm keeps no scrollback: the attach stream lives in the alternate screen and herdr
       // owns scrollback (wheel and touch go to it). With scrollback on, the fit addon reserves
       // a scrollbar column - 15px by fallback wherever scrollbars are overlays - and the last
@@ -989,7 +990,6 @@ export function PaneTerminal({
     // the grid while the row fits there, else the bottom rows, where a prompt sits. A mirror
     // has no cursor; xterm's own rests on the last row with text, which serves the same.
     const adopted = (): boolean => observeRef.current || fixedGridRef.current || localGridRef.current;
-    const adopted = (): boolean => observeRef.current || fixedGridRef.current;
     // The soft keyboard takes the bottom of the screen, not the pane: a fit to what is left above
     // it would size the shared pty to that strip, and every other viewer of the pane, herdr's own
     // window included, would reflow twice per keyboard (#1045). While the keyboard is up, a host
@@ -2379,6 +2379,14 @@ export function PaneTerminal({
     else void loadFontStack(fontFamily, terminalFontSize).then(apply);
     return () => { superseded = true; };
   }, [terminalFontSize, fontFamily]);
+
+  // Cursor settings change xterm drawing but must not resize the shared PTY.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.cursorStyle = terminalCursorStyle;
+    term.options.cursorBlink = terminalCursorBlink;
+  }, [terminalCursorStyle, terminalCursorBlink]);
 
   // the setting, a zoom or the last sibling closing need not resize the host: the observer may stay silent
   useEffect(() => {

@@ -167,7 +167,7 @@ for (const sensitive of ["", "portal.ts", "index.ts", "workflow"]) {
         case "$1 $2" in
           'workflow run'|'pr create') return 0;;
           'run list') printf '[{"databaseId":123,"headSha":"%s","createdAt":"%s"}]\\n' "$(git rev-parse HEAD)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)";;
-          'run view') printf '{"status":"completed","conclusion":"success","headSha":"%s","jobs":[{"name":"Native Windows install","conclusion":"success"},{"name":"Native macOS session identity","conclusion":"success"},{"name":"Fast checks","conclusion":"success"},{"name":"Integration and browser","conclusion":"success"}]}\\n' "$(git rev-parse HEAD)";;
+          'run view') printf '{"status":"completed","conclusion":"success","headSha":"%s","jobs":[{"name":"Detect changes","conclusion":"success"},{"name":"Native Windows install","conclusion":"success"},{"name":"Native macOS session identity","conclusion":"success"},{"name":"Fast checks","conclusion":"success"},{"name":"Integration tests","conclusion":"success"},{"name":"Browser regression (ui-regression)","conclusion":"success"},{"name":"Browser regression (other scripts)","conclusion":"success"}]}\\n' "$(git rev-parse HEAD)";;
           'pr list') return 0;;
           *) return 99;;
         esac

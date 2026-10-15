@@ -171,8 +171,15 @@ done
 if ! jq -e --arg sha "$candidate" '
   .conclusion == "success" and .headSha == $sha and
   ([.jobs[] | select(.conclusion == "success") | .name] as $passed |
-    (["Native Windows install","Native macOS session identity",
-      "Fast checks","Integration and browser"] - $passed | length) == 0)
+    ([.jobs[] | .name] as $jobs |
+      (["Detect changes","Native Windows install","Native macOS session identity","Fast checks"] - $passed | length) == 0
+      and
+      (if ($jobs | index("Integration and browser")) != null then
+        ($passed | index("Integration and browser")) != null
+       else
+        (["Integration tests","Browser regression (ui-regression)",
+          "Browser regression (other scripts)"] - $passed | length) == 0
+       end)))
 ' "$tmp/ci.json" >/dev/null; then
   echo "CI failed; candidate preserved on $branch, no main update" >&2
   exit 1
