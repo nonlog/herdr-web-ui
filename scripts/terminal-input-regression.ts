@@ -30,7 +30,6 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
   let toServer: ((raw: string) => void) | undefined;
   // the snapshot names what the bridge answers, pings among it; it can follow input-ready by a few ms
   let snapshotSent = false;
-  const readinessFrames: string[] = [];
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
     if (refuseConnections) { void socket.close(); return; }
     currentSocket = socket;
@@ -39,11 +38,6 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     toServer = (raw) => server.send(raw);
     server.onMessage((raw) => {
       const frame = JSON.parse(String(raw));
-      if (frame.type === "input-ready" || frame.type === "attach-resumed" || frame.type === "role-ack"
-        || frame.type === "pty-exit" || (frame.type === "error" && frame.pane_id === pane)) {
-        readinessFrames.push(`${frame.type}:${frame.pane_id ?? ""}:${frame.ready ?? frame.code ?? ""}`);
-        if (readinessFrames.length > 36) readinessFrames.shift();
-      }
       if (delayReady && frame.type === "input-ready") ready = () => socket.send(raw);
       else socket.send(raw);
       if (frame.type === "snapshot") snapshotSent = true;
@@ -510,24 +504,12 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     // a draft that takes pastes holds more than "a b" by now: Send types what it holds
     const heldText = await page.locator(".draft-text").textContent();
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    try {
-      await until(() => sent.length > before + 1);
-    } catch (error) {
-      const ui = await page.evaluate(() => ({
-        banners: [...document.querySelectorAll(".terminal-banner")].map((node) => node.textContent?.trim()),
-        connection: document.querySelector(".conn-live")?.textContent?.trim() ?? null,
-        draft: document.querySelector(".draft-text")?.textContent ?? null,
-        buttons: [...document.querySelectorAll<HTMLButtonElement>("button")]
-          .filter((node) => node.textContent?.trim() === "Send")
-          .map((node) => ({ disabled: node.disabled, visible: node.getBoundingClientRect().height > 0 })),
-      }));
-      throw new Error(`held draft Send not transmitted: ${JSON.stringify({
-        sent: sent.length, expectedMoreThan: before + 1, heldText, delayReady,
-        readyHeld: ready !== undefined, readinessFrames, ui,
-      })}`, { cause: error });
-    }
+    // Physical Escape now uses a separate `keys` frame rather than an `input`
+    // frame. Sending the held draft therefore adds exactly *one* input frame,
+    // not the two counted by the pre-semantic-Escape regression.
+    await until(() => sent.length > afterEscape);
     assert.equal(sent.at(-1).text, heldText);
-    assert.equal(sent.length, before + 2, "Send types the held text once, with no Enter");
+    assert.equal(sent.length, afterEscape + 1, "Send types the held text once, with no Enter");
     // Real xterm handling: an IME's provisional syllable stays local until commit.
     const imeBefore = sent.length;
     const input = page.locator(".xterm-helper-textarea");
