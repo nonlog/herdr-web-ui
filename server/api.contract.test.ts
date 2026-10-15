@@ -32,7 +32,7 @@ import type { RepoDiffFileList, RepoDiffFilePatch } from "../shared/protocol.ts"
  * Every server here keeps its push state (VAPID key, subscriptions) in a temp dir: the
  * user's ~/.config/herdr-web-ui holds their real devices, which a test must never page.
  */
-let server: { port: number; stop: () => void };
+let server: ReturnType<typeof createServer>;
 const stateDir = mkdtempSync(join(tmpdir(), "herdr-web-ui-contract-"));
 
 beforeAll(() => {
@@ -40,7 +40,11 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  server?.stop();
+  // Some API contract cases leave a long-lived WS subscription on the fixture.
+  // Bun.Server.stop() without closeActiveConnections leaves the test process
+  // alive after all assertions pass, eventually killing the whole CI lane.
+  // Force-close only this isolated test fixture, never the user's Herdr server.
+  server?.stop(true);
   rmSync(stateDir, { recursive: true, force: true });
 });
 

@@ -1687,10 +1687,13 @@ export function PaneTerminal({
       if (draftHeldForRef.current === current) {
         // A chord or a modified Enter is never held, and never sent beside held text either
         // (Ctrl+J, or Ctrl+Enter under modifyOtherKeys, would run the line).
+        // Plain Escape is the exception: it interrupts the running agent and
+        // must reach Herdr's semantic key encoder even while a draft is held.
         // A paste the draft cannot take (an unbracketed tab or control character) is refused too, never sent
         // ahead of the held start.
         const pasted = pasting || input.startsWith("\x1b[200~");
-        if (chord !== null || modifiedEnter || (pasted && applyToDraft(EMPTY_DRAFT, input) === EMPTY_DRAFT)) {
+        const interrupt = !pasted && key === "Escape" && chord === "esc";
+        if ((chord !== null && !interrupt) || modifiedEnter || (pasted && applyToDraft(EMPTY_DRAFT, input) === EMPTY_DRAFT)) {
           const t = tRef.current;
           setInputError(t("Not sent: send or discard the held input first."));
           return;
@@ -3063,8 +3066,18 @@ export function PaneTerminal({
           {!applicationScroll && (historyStatus !== "live" || manualGridPan) && <button type="button" className="btn btn-ghost" onClick={() => { hideLocalHistoryRef.current(); resumeGridFollowRef.current(); if (!coarseRef.current) termRef.current?.focus(); }}>{t("Back to live")}</button>}
         </div>
       )}
+      {presented && findOpen && !chatView && paneId !== null && (
+        <FindBar key={paneId} paneId={paneId} viewportIntent={viewportIntent} onResult={setSearchState} activePane={active} focusRequest={findRequest} disabled={!connected || held || ended || released || !outputReady}
+          onClose={() => {
+            // Clear the viewport's highlighted cells synchronously with the
+            // close request, not only in FindBar's deferred unmount cleanup.
+            setSearchState(null);
+            setFindOpen(false);
+            if (activeRef.current && !coarse) termRef.current?.focus();
+          }} />
+      )}
       <div className="terminal-surface">
-      <div className="terminal-banners">
+        <div className="terminal-banners">
         {paneId !== null && held && !noticesDocked && (
           <div className="terminal-banner terminal-banner-warning" role="status">
             <span>{t("Another app has this pane open. It connects here as soon as that app lets go.")}</span>
@@ -3144,10 +3157,6 @@ export function PaneTerminal({
           </div>
         )}
       </div>
-      {presented && findOpen && !chatView && paneId !== null && (
-        <FindBar key={paneId} paneId={paneId} viewportIntent={viewportIntent} onResult={setSearchState} activePane={active} focusRequest={findRequest} disabled={!connected || held || ended || released || !outputReady}
-          onClose={() => { setFindOpen(false); if (activeRef.current && !coarse) termRef.current?.focus(); }} />
-      )}
         {/* xterm hides its rendered rows from assistive technology, so the region around the
             visible grid carries the pane's name: a screen reader announces which pane
             this is. No tabIndex: xterm's helper textarea takes the keyboard here on attach, so a

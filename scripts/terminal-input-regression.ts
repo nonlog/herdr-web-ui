@@ -14,6 +14,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     if (!localStorage.getItem("herdr-web-ui:settings")) localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
   });
   const sent: any[] = [];
+  const sentKeys: any[] = [];
   const resizes: any[] = [];
   let acknowledge: (() => void) | undefined;
   let refuse: (() => void) | undefined;
@@ -48,6 +49,7 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
         acknowledge = () => socket.send(JSON.stringify({ type: "submit-result", id: frame.id, pane_id: frame.pane_id, ok: true }));
         refuse = () => socket.send(JSON.stringify({ type: "submit-result", id: frame.id, pane_id: frame.pane_id, ok: false, code: "agent_blocked", message: "" }));
       } else if (frame.type === "input") sent.push(frame);
+      else if (frame.type === "keys") { sentKeys.push(frame); server.send(raw); }
       else if (frame.type === "ping" && holdPings) heldPings.push(String(raw));
       else {
         if (frame.type === "resize") resizes.push(frame);
@@ -439,10 +441,12 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     await page.locator(".xterm-helper-textarea").press("b");
     await until(async () => (await page.locator(".draft-text").textContent()) === "a b");
     assert.equal(sent.length, before, "typing beside a held draft reaches nothing");
-    // an interrupt is not typing: it still reaches the program while the draft waits
+    // A physical Escape is a semantic Herdr key (Kitty-aware), not an input byte.
+    // It still reaches the program while the held draft blocks ordinary typing.
+    const beforeEsc = sentKeys.length;
     await page.locator(".xterm-helper-textarea").press("Escape");
-    await until(() => sent.length > before);
-    assert.equal(sent.at(-1).text, "\x1b");
+    await until(() => sentKeys.length > beforeEsc);
+    assert.deepEqual(sentKeys.at(-1).keys, ["esc"]);
     assert.equal(await page.locator(".draft-text").textContent(), "a b");
     const heldNote = "Not sent: send or discard the held input first.";
     const banner = page.locator(".terminal-banner", { hasText: heldNote });
