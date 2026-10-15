@@ -892,6 +892,8 @@ export const KO: Record<string, string> = {
   "Not sent. Send it again.": "보내지 못했습니다. 다시 보내세요.",
   "Not sent: the terminal is disconnected.": "보내지 못했습니다: 터미널 연결이 끊겼습니다.",
   "Not sent: the terminal is not ready for keys.": "보내지 못했습니다: 터미널이 아직 키를 받을 준비가 되지 않았습니다.",
+  "Not stopped: Hermes does not show a turn to interrupt. Check the terminal.": "멈추지 않았습니다: Hermes 화면에 중단할 작업이 보이지 않습니다. 터미널을 확인하세요.",
+  "Not stopped: Hermes got Ctrl+C under 2 seconds ago, and a second one would quit it. Try again in a moment.": "멈추지 않았습니다: Hermes가 2초 안에 Ctrl+C를 받았고, 한 번 더 보내면 종료됩니다. 잠시 후 다시 시도하세요.",
   "Not sent: the terminal is not ready, and a password is never held for later.": "보내지 못했습니다: 터미널이 아직 준비되지 않았고, 비밀번호는 나중을 위해 보관하지 않습니다.",
   "Not sent: send or discard the held input first.": "보내지 못했습니다: 보관한 입력을 먼저 보내거나 버리세요.",
   "Type straight into the terminal": "터미널에 직접 입력",

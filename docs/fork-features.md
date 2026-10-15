@@ -54,7 +54,7 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 | Codex Windows 路径前缀 | **上游 #582**：保留其 `withoutVerbatimPrefix`、`storedCwds` 与目录内路径校验 | Fork 仅增加无会话 ID 时的跨目录候选和唯一性判定 |
 | 手机拖动滚轮算法 | **上游 #963**：继续使用 `wheelSteps` / `finalStep`，手指总位移决定滚轮次数 | Fork 独立历史模式下的本地缓存读取、水平平移和不共享历史滚动 |
 | 手机键盘 / 窗格显示 / PTY 归属 | **上游 #1068/#1072/#1085/#1087/#1095/#1130**：通用 `keepSize`、`releaseSize`、失焦与 viewport 逻辑 | Fork Windows `TerminalControlSession` 的原生尺寸追踪、锁定与窗口控制协议 |
-| Chat Stop | **上游 #1112**：使用有顺序保障的 `input.stop`，不另发送键盘按键 | Fork 仅保留普通物理/按键栏 Esc 的 Kitty 语义编码 |
+| Chat Stop | **上游 #1112**：普通 Agent 使用有顺序保障的 `input.stop`；**上游 #1148**：Hermes 正在工作时经屏幕提示与单次/两秒保护发送 Ctrl+C | Fork 仅保留普通物理/按键栏 Esc 的 Kitty 语义编码，不修改上游 Hermes 防误退出条件 |
 | 跳回终端底部 | **上游 #1036**：原生终端的 jump-to-bottom 操作 | Fork 独立历史层的 Back to live 是不同的只读缓存行为 |
 
 **原则：**同一问题上游已完整修复时，用上游实现与测试，不添加独立覆盖层；上游尚无 Windows 原生控制、私有 ANSI 历史、WAN 滚轮事件合并和跨目录 Codex 恢复，则继续维护小范围 Fork 扩展。禁止用整文件 `-X ours` / `-X theirs` 掩盖混合冲突。
@@ -77,7 +77,7 @@ Fork 已包含上游 #582（对应 #518 的前两个 Windows Codex 路径前缀�
 
 ## Chat Stop 与终端 Esc 中止链路
 
-**Chat Stop 采用上游 #1112 的 `input.stop: true` 有序中止协议**，不再由 Fork 额外注入普通语义 Esc，避免与等待发送的聊天消息重排。物理 Esc 和手机按键栏 Esc 则仍通过 Herdr 的 `keys: ["esc"]` 编码，兼容 Pi、Codex、Claude Code 等 TUI 的 Kitty 键盘协议。中止不自动回退 Ctrl+C，避免误杀 Shell 或 Agent。
+**Chat Stop 对 Pi、Codex、Claude Code 等 Agent 采用上游 #1112 的 `input.stop: true` 有序中止协议**，不再由 Fork 额外注入普通语义 Esc，避免与等待发送的聊天消息重排。**Hermes 是上游 #1148 的明确例外**：仅识别其运行中输入行的中止提示后发出一次 Ctrl+C，并保护短时间重复按键，避免退出正在使用的 Hermes；没有提示时不发送。其他 Agent 不回退到 Ctrl+C。物理 Esc 和手机按键栏 Esc 继续通过 Herdr 的 `keys: ["esc"]` 编码，兼容 Kitty 键盘协议。
 
 `scripts/key-bar-customization-demo-regression.ts` 分别断言物理/按键栏 Esc 语义按键与 Chat Stop 的 `input.stop`；`scripts/windows-lens-browser-qa.ts` 在隔离窗格启动 Kitty 测试程序，核对真实按键编码。绝不对正在运行的用户会话执行中止测试。
 
