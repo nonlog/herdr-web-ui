@@ -432,6 +432,10 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     assert.equal(await heldNotice.count(), 1);
     await until(() => !!ready);
     ready!();
+    // The simulated readiness delay applies only to this first, intentional
+    // attach. Later line/direct mode changes must receive fresh input-ready
+    // frames as a real bridge would; otherwise Send incorrectly stays gated.
+    delayReady = false;
     await page.waitForTimeout(150);
     assert.equal(sent.length, before, "ready does not replay the draft");
     // Held input keeps later typing until Send or Discard, on a ready terminal too: a key sent beside
