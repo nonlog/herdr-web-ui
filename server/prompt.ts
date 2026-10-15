@@ -626,16 +626,24 @@ function claudeQuestionText(lines: string[], tabsIndex: number, firstRow: number
   return text.length > 0 ? normalizeText(text.join(" ")) : null;
 }
 
-/** After several questions Claude shows the answers and asks before sending them. */
+/**
+ * After several questions Claude shows the answers and asks before sending them. The review is one
+ * panel from its tabs down to its question, with no rule inside it. A review taller than the pane
+ * (long answers, a phone-width pane) is cut off at the top, tabs and heading out of view: then the
+ * screen's first line starts it, and only Claude's own answers (`→ …`) and rows make it the review.
+ */
 function parseClaudeSubmit(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const questionIndex = findLastIndex(lines, (line) => /^Ready to submit your answers\?$/i.test(cleanLine(line)));
   if (questionIndex < 0) return null;
   const tabsIndex = findLastIndex(lines.slice(0, questionIndex), (line) => CLAUDE_TABS_RE.test(cleanLine(line)));
-  if (tabsIndex < 0 || questionIndex - tabsIndex > 40) return null;
+  const panel = lines.slice(tabsIndex + 1, questionIndex);
+  if (panel.some((line) => isDivider(line))) return null;
   const rows = parseNumberedRows(lines, questionIndex + 1, lines.length);
   if (!sequentialRows(rows) || rows.length < 2 || rows.filter((row) => row.selected).length !== 1) return null;
-  const body = lines.slice(tabsIndex + 1, questionIndex).map(cleanLine)
+  if (tabsIndex < 0 && (!panel.some((line) => /^→\s/.test(cleanLine(line)))
+    || rows.map((row) => row.label).join("\n") !== "Submit answers\nCancel")) return null;
+  const body = panel.map(cleanLine)
     .filter((line) => line && !isDivider(line) && !/^Review your answers$/i.test(line)).join("\n");
   return finishPrompt("claude", {
     // a menu, not a question: a typed pick submits every answer at once, so it waits for Confirm
@@ -1852,6 +1860,8 @@ const CLAUDE_TASK_ROW_RE = /^[◻◼✔]\s/;
 const CLAUDE_TASKS_MORE_RE = /^…\s\+\d+ pending$/;
 const LABELED_RULE_RE = /^─{3,}\s.*─$/;
 const CLAUDE_HINT_TAIL_RE = /\besc to (?:cancel|exit|go back)\b/i;
+/** the last row of Claude's review of several answers, which ends it in place of a hint */
+const CLAUDE_SUBMIT_TAIL_RE = /^(?:[›>❯]\s*)?\d+\.\s+Cancel$/i;
 /** `hintEnds`: whether the panel's hint ends at line `end`; a hint a narrow pane wrapped needs its own reading */
 function withoutClaudeTasks(shown: string[], hintEnds: (lines: string[], end: number) => boolean = (lines, end) => CLAUDE_HINT_TAIL_RE.test(lines[end - 1] ?? "")): string[] {
   let end = shown.length;
@@ -1901,7 +1911,9 @@ function omoFooterIsActive(lines: string[]): boolean {
 function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   const cleanLines = screen.replace(ANSI_RE, "").split(/\r?\n/).map(cleanLine);
   const visible = cleanLines.filter((line) => line && !isDivider(line));
-  const shown = prompt.responder.startsWith("claude-") ? withoutClaudeTasks(visible) : visible;
+  // Claude's review has no hint of its own: its last row ends the panel, the session's rule and task list come after it
+  const shown = prompt.responder === "claude-submit" ? withoutClaudeTasks(visible, (lines, end) => CLAUDE_SUBMIT_TAIL_RE.test(lines[end - 1] ?? ""))
+    : prompt.responder.startsWith("claude-") ? withoutClaudeTasks(visible) : visible;
   const last = shown.at(-1) ?? "";
   // The menu is still at the bottom. A narrow pane wraps its hint, so the last line alone can
   // be the hint's tail (`cancel`): the lines before it count only when the match runs into
@@ -1916,7 +1928,7 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   if (prompt.responder === "codex-question") return ends(CODEX_ASK_HINT_RE);
   if (prompt.responder === "codex-async-question") return cleanLines.slice(-4).some((line) => CODEX_ASYNC_ASK_HINT_RE.test(line)) || ends(CODEX_ASYNC_ASK_HINT_RE);
   if (prompt.responder === "claude-question") return ends(CLAUDE_ASK_HINT_RE);
-  if (prompt.responder === "claude-submit") return /^(?:[›>❯]\s*)?\d+\.\s+Cancel$/i.test(last);
+  if (prompt.responder === "claude-submit") return CLAUDE_SUBMIT_TAIL_RE.test(last);
   // the last row carries the cursor once a move has put it there
   if (prompt.responder === "codex-approval") return ends(/press enter to confirm|esc to cancel|enter continue.*esc back|^(?:[›>❯]\s*)?\d+\.\s+(?:No|Reject|Cancel|Deny)\b/i);
   if (prompt.responder === "omp-approval") return ends(/^(?:[›>❯•]\s*)?(?:Approve|Deny)$|esc.*cancel/i);

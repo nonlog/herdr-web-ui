@@ -1020,6 +1020,81 @@ ${rows}
   });
 });
 
+describe("Claude's review of several answers in a named session", () => {
+  // live-captured from Claude Code 2.1.299 (CLAUDE_CODE_NO_FLICKER=1, `--name`, 120x40): the review
+  // has no key hint of its own, its last row is Cancel, and the session's rule follows it
+  const rule = `${"─".repeat(107)} session-name ─`;
+  const review = `❯ ASKREPRO 7
+
+${"─".repeat(120)}
+←  ☒ Route  ☒ Author  ☒ Notes  ✔ Submit  →
+
+Review your answers
+
+ ● Which way should the PR go?
+   → my own words typed in the chat my own words t
+ ● Who should author the commits?
+   → Repo owner
+ ● What should the release notes say?
+   → my own words typed in the chat my own words typed in the chat my own w
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+`;
+  const withRule = (rows = "") => `${review}${rule}\n${rows ? `\n${rows}\n` : ""}`;
+  // a review taller than the pane, same capture: the tabs and the heading are cut off at the top
+  const tall = `
+ │ ● The PC splits traffic between the main server and the reserve almost evenly, because both servers sit in the same
+ │   city and answer equally fast. Which way should we go?
+   → my own words typed in the chat my own words typed in the chat my own words typed in the chat my own words typed in
+   the chat my own words typed in the chat
+ │ ● After every subscription update the client restarts the tunnel. How often should the subscription be updated?
+   → Once a day
+ │ ● The client has no leak protection. What should we do?
+   → my own words typed in the chat my own words typed in the chat my own words typed in the chat my own words typed in
+   my own words typed in the chat my o
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+${rule}
+`;
+
+  test("reads the review under the session's rule, with or without the task list", () => {
+    for (const rows of ["", "  3 tasks (0 done, 1 in progress, 2 open)\n  ◼ 구현\n    Running tests…\n  ◻ 검증\n  ◻ 정리"]) {
+      const card = parseInteractivePrompt("claude", withRule(rows));
+      expect(card).toMatchObject({ kind: "menu", title: "Review your answers", question: "Ready to submit your answers?", custom_option_index: null });
+      expect(labels(card)).toEqual(["Submit answers", "Cancel"]);
+      expect(card?.body).toContain("→ Repo owner");
+      expect(answerKeys(card!, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+    }
+  });
+
+  test("reads a review cut off at the top of the pane, its tabs and heading out of view", () => {
+    const card = parseInteractivePrompt("claude", tall);
+    expect(card).toMatchObject({ kind: "menu", title: "Review your answers", question: "Ready to submit your answers?" });
+    expect(labels(card)).toEqual(["Submit answers", "Cancel"]);
+    expect(card?.body).toContain("→ Once a day");
+  });
+
+  test("does not take an answered review above later output and the session's rule for an open one", () => {
+    expect(parseInteractivePrompt("claude", `${review}\n⏺ Done.\n\n${rule}\n`)).toBeNull();
+    expect(parseInteractivePrompt("claude", `${review}\n⏺ Done.\n──── user@host:~/project ─\n`)).toBeNull();
+  });
+
+  test("takes no screen without the review's own tabs, answers and rows for one", () => {
+    // no tabs and no answer of the review's above the question: some other text that says the same
+    expect(parseInteractivePrompt("claude", `Notes for the release\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel\n${rule}\n`)).toBeNull();
+    // cut off at the top, but the rows are not the review's
+    expect(parseInteractivePrompt("claude", tall.replace("1. Submit answers", "1. Ship it"))).toBeNull();
+    // tabs far above, with another panel's rule between them and the question: not this review's
+    expect(parseInteractivePrompt("claude", `←  ☒ Route  ✔ Submit  →\n ● Which way?\n   → Fork\n${"─".repeat(120)}\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel\n`)).toBeNull();
+  });
+});
+
 describe("Claude's held message", () => {
   // Claude Code 2.1.294, live: a pasted message with a zero-width space, after its Enter
   const rule = "─".repeat(80);
