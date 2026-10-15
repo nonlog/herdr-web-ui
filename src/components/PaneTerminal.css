@@ -208,9 +208,10 @@
   font-size: var(--fs-sm);
 }
 
-/* the banners stack in one top-right column: any state combination (warning XOR
-   review, observe alongside either) renders without collisions, and the column lets
-   clicks pass through to the pty except where the review banner re-enables them */
+/* the banners stack inside .terminal-surface, AFTER the fork's optional history
+   toolbar. Positioning against .terminal-stack would put them behind a growing
+   touch input line in very short viewports. The column lets clicks pass through
+   except where the banner re-enables them. */
 .terminal-banners {
   position: absolute;
   /* below a phone's glass header when it lies over the chat (styles.css) */

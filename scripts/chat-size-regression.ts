@@ -1061,11 +1061,11 @@ export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, o
     await sizeBecomes(desktopSize, "a key in the desktop terminal");
     console.log("PASS a window that kept its focus takes the pane back on a click or a key in its terminal");
 
-    // The phone's own input sits outside its grid: the input line, its Send and Enter and the key
-    // bar. Each takes the pane back to the phone's grid, and the resize goes out before what it sends.
-    const [phoneRows, phoneCols] = phoneSize.split(" ").map(Number);
+    // Upstream's input-ownership handoff is correct for a direct-attach phone,
+    // but this fork's passive phone lens must keep the desktop's shared grid.
+    // Text, Enter and key-bar controls must still reach the application.
     const outFrom = async (page: Page, from: number) => (await framesOf(page)).slice(from).filter((f) => f.dir === "out");
-    const resizedBefore = async (what: string, from: number, sends: readonly string[]) => {
+    const inputWithoutResize = async (what: string, from: number, sends: readonly string[]) => {
       const deadline = Date.now() + 10_000;
       let out: Frame[] = [];
       while (Date.now() < deadline) {
@@ -1075,41 +1075,42 @@ export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, o
       }
       const sent = out.findIndex((f) => sends.includes(f.type));
       assert.ok(sent >= 0, `${what}: the phone sent none of ${sends.join("/")}: ${JSON.stringify(out)}`);
-      const resized = out.findIndex((f) => f.type === "resize" && f.cols === phoneCols && f.rows === phoneRows);
-      assert.ok(resized >= 0 && resized < sent, `${what}: the phone's own grid goes out before its input: ${JSON.stringify(out)}`);
-      await sizeBecomes(phoneSize, what);
+      // fixed wait: a delayed native resize is forbidden after this input.
+      await Bun.sleep(NO_RESIZE_WAIT_MS);
+      out = await outFrom(phone, from);
+      assert.equal(out.filter((f) => f.type === "resize").length, 0,
+        `${what}: phone controls never take over the desktop's grid: ${JSON.stringify(out)}`);
+      await sizeBecomes(desktopSize, what);
     };
-    // focus into the line: a tap there is the user on the phone, before a key is typed
+    // Tapping the line does not resize the shared grid before any input is sent.
     let mark = (await framesOf(phone)).length;
     await phone.locator(".terminal-input-text").tap();
-    const focusDeadline = Date.now() + 10_000;
-    while (Date.now() < focusDeadline) {
-      if ((await outFrom(phone, mark)).some((f) => f.type === "resize")) break;
-      await Bun.sleep(50);
-    }
-    assert.ok((await outFrom(phone, mark)).some((f) => f.type === "resize" && f.cols === phoneCols && f.rows === phoneRows), "a tap into the input line takes the pane back to the phone's grid");
-    await sizeBecomes(phoneSize, "a tap into the input line");
+    // fixed wait: focus-triggered native resize uses a delayed layout observer.
+    await Bun.sleep(NO_RESIZE_WAIT_MS);
+    assert.equal((await outFrom(phone, mark)).filter((f) => f.type === "resize").length, 0,
+      "tapping the phone input line cannot resize the desktop's grid");
+    await sizeBecomes(desktopSize, "a tap into the phone input line");
     // the line keeps its focus from here on: no focus event helps the steps below
     await desktop.keyboard.press("Shift");
     await sizeBecomes(desktopSize, "a key in the desktop terminal, the phone's line focused");
     await phone.keyboard.type("true");
     mark = (await framesOf(phone)).length;
     await phone.keyboard.press("Enter");
-    // the line's Enter follows its text after the server's gap: the size is asked once the line is in
+    // the line's Enter follows its text after the server's gap, without resizing.
     await phone.waitForFunction(() => (document.querySelector(".terminal-input-text") as HTMLTextAreaElement | null)?.value === "", undefined, { timeout: 10_000 });
-    await resizedBefore("a line sent from the phone's input line", mark, ["submit", "input"]);
+    await inputWithoutResize("a line sent from the phone's input line", mark, ["submit", "input"]);
     await desktop.keyboard.press("Shift");
     await sizeBecomes(desktopSize, "a key in the desktop terminal, before the key bar");
     mark = (await framesOf(phone)).length;
     // Ctrl+C, not Esc: the shell would read Esc and the size command's first letter as one Meta key
     await phone.locator(".key-bar").getByRole("button", { name: "Control C" }).tap();
-    await resizedBefore("a key-bar tap on the phone", mark, ["input", "keys"]);
+    await inputWithoutResize("a key-bar tap on the phone", mark, ["input", "keys"]);
     await desktop.keyboard.press("Shift");
     await sizeBecomes(desktopSize, "a key in the desktop terminal, before the empty line's Enter");
     mark = (await framesOf(phone)).length;
     await phone.locator(".terminal-input-send").tap();
-    await resizedBefore("Enter from the phone's empty input line", mark, ["input", "keys"]);
-    console.log("PASS the phone's input line, its Enter and the key bar take the pane back before they send");
+    await inputWithoutResize("Enter from the phone's empty input line", mark, ["input", "keys"]);
+    console.log("PASS phone input line, Enter and key bar send without taking the desktop's PTY grid");
   } finally {
     for (const context of contexts) await context.close().catch(() => undefined);
     if (workspace) await workspaceClose(workspace).catch(() => undefined);

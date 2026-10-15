@@ -38,6 +38,9 @@ git diff --name-only "$previous" "$latest" > "$tmp/source-files"
 # A conflict report belongs to this run, not a mergeable document-only PR.
 review() {
   local reason="$1"
+  # Reports must outlive this runner's temporary merge worktree. The Actions
+  # failure step uploads the same diagnostic as a short-lived artifact.
+  mkdir -p .ci
   {
     echo '# Upstream commit update requires review'
     echo
@@ -60,7 +63,7 @@ review() {
     echo 'Resolve using a fresh branch, keep docs/fork-features.md capabilities,'
     echo 'and submit the exact result to GitHub Actions CI before merging.'
     echo 'Keep the upstream merge parent; do not squash the synchronization commit.'
-  } | tee -a "$GITHUB_STEP_SUMMARY"
+  } | tee -a "$GITHUB_STEP_SUMMARY" .ci/upstream-sync-report.md
   echo "::error::Upstream commit sync requires review: $reason"
 }
 

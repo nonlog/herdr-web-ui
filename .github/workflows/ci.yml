@@ -172,6 +172,14 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*' '+refs/tags/remote-v*:refs/tags/remote-v*'
+          # A manually dispatched validation of a source-sync candidate has no
+          # pull_request.base or push.before. Compare its version to fork/main
+          # instead of treating every such CI run as a new release.
+          # An actual release still invokes --release and checks the Worker.
+          if [ -z "$BASE_SHA" ] && [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            git fetch --no-tags --depth=1 origin main
+            BASE_SHA="$(git rev-parse FETCH_HEAD)"
+          fi
           if [ -n "$BASE_SHA" ]; then git fetch --no-tags --depth=1 origin "$BASE_SHA" || true; fi
           bun scripts/release-guards.ts --base "$BASE_SHA"
       - name: Preserve check report and verification logs

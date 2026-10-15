@@ -17,17 +17,23 @@
 - 无冲突候选发布到 `automation/upstream-sync-<Fork SHA>-<上游 SHA>`，显式触发只读权限的完整 CI。Windows、macOS、Fast、集成和浏览器验证全部通过，且 Fork / 上游 / 候选 SHA 未变化，才快进 main 到经测试的同一提交。
 - 已存在的候选仅在父提交、源码树和生成标记全部一致时原样重用。任何不同都拒绝覆盖；不用 force-push，不改动人工解决过的分支。
 - 认证、入口、Portal、同步脚本和 GitHub 本地 Actions 等敏感改动，即使 CI 全绿也保留 Draft PR 审核。
-- Git 冲突会让工作流失败，路径写入 Actions Summary。不创建仅含报告的 PR；不改 main。
+- Git 冲突会让工作流失败，路径写入 Actions Summary，并提供保留 7 天的 `upstream-sync-conflicts` artifact。不创建仅含报告的 PR；不改 main。
 - 自动 token 推进 main 后显式启动 Website，因为 `GITHUB_TOKEN` 推送不会触发 push 工作流。
 - 合并和后续提交的 author / committer 均为 `Codex <codex@openai.com>`。
 
 ## 工作流权限边界
 
-GitHub 内置 `GITHUB_TOKEN` 没有工作流写入权限。若新上游提交历史包含 `.github/workflows/` 变更且尚未配置 `UPSTREAM_WORKFLOWS_TOKEN`，自动同步会明确失败并列出路径，而不会谎称已成功。机器人不能绕过这一 GitHub 权限限制。
+GitHub 内置 `GITHUB_TOKEN` 没有工作流写入权限。若新上游提交历史包含 `.github/workflows/` 变更且尚未提供具有 Workflows 写权限的令牌，自动同步会明确失败并列出路径，而不会谎称已成功。机器人不能绕过这一 GitHub 权限限制。
 
-**可以一次性配置无人值守的真合并：** 为仓库设置可写入 Workflows 的受限 GitHub App 安装令牌来源（或具有同等权限的细粒度凭据），由 Actions Secret `UPSTREAM_WORKFLOWS_TOKEN` 注入 `actions/checkout`。脚本会创建**包含上游提交作为第二父节点**的真实 merge commit，但在最终源码树中保留 Fork 原有 `.github/workflows/`，不执行或自动采用上游未经验证的 CI 工作流内容。上游对工作流功能本身的调整仍应另行审阅。启用这项能力需要仓库所有者明确配置，**当前未配置，也不会复制本机 GitHub OAuth token 到 Actions。**
+**推荐一次性配置无人值守的真合并（短期安装令牌）：**
 
-普通的非工作流提交无需此凭据即可自动进行 Git 三方合并与 CI 验证；修改大型 `server/index.ts` 文件的普通功能不会仅凭文件名被误判为安全敏感，只有其认证、入口、配对和令牌相关改动才触发人工门禁。
+1. 在 GitHub 新建一个仅安装到 `nonlog/herdr-web-ui` 的 GitHub App，授予仓库 **Contents: Read and write** 与 **Workflows: Read and write**，安装到此仓库。
+2. 在该仓库的 Actions Secrets 中设置 `UPSTREAM_SYNC_APP_ID`（App ID）及 `UPSTREAM_SYNC_APP_PRIVATE_KEY`（仅此 App 的私钥内容）。不要将私钥提交进 Git。
+3. 每次计划任务自动通过 `actions/create-github-app-token@v2` 获取短期安装令牌；结束后过期，不依赖个人账号永久 PAT。支持已有 `UPSTREAM_WORKFLOWS_TOKEN` 作为备选，但优先使用 App。
+
+脚本会创建**包含上游提交作为第二父节点**的真实 merge commit，在最终源码树中保留 Fork 原有 `.github/workflows/`，不执行或自动采用上游未经验证的 CI 工作流内容。上游对工作流功能本身的调整仍应另行审阅。以上首次 App 授权需要仓库所有者明确配置；**当前若未配置则不能实现涉及工作流历史的完全无人值守同步，不会复制本机 GitHub OAuth token 到 Actions。**
+
+普通的非工作流提交无需此凭据即可自动进行 Git 三方合并与 CI 验证；修改大型 `server/index.ts` 文件的普通功能不会仅凭文件名被误判为安全敏感，只有其认证、入口、配对和令牌相关改动才触发人工门禁。**人工处理完成后应尽量把重复的 Fork 功能收敛到上游实现**，避免下一次在相同位置再次冲突。
 
 这里不会退回到跳过工作流、复制源码、推进 JSON 基线的方案，也不会保存本机的高权限 OAuth token。没有相应授权时，上游涉及工作流历史的提交只能由维护者凭已有权限进行真实合并。
 

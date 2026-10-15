@@ -46,6 +46,19 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 
 ## 本次吸收的上游功能
 
+### 重叠功能的维护归属（减少下一轮冲突）
+
+| 功能 | 维护归属 | 必须保留的额外部分 |
+| --- | --- | --- |
+| Pi 超 64 MiB Chat | **上游 #869**：`server/pi-tree.ts`、`server/pi-tree.test.ts` 不再作 Fork 修改；直接使用上游索引和读页预算 | 无；上游完整大文件测试应继续通过 |
+| Codex Windows 路径前缀 | **上游 #582**：保留其 `withoutVerbatimPrefix`、`storedCwds` 与目录内路径校验 | Fork 仅增加无会话 ID 时的跨目录候选和唯一性判定 |
+| 手机拖动滚轮算法 | **上游 #963**：继续使用 `wheelSteps` / `finalStep`，手指总位移决定滚轮次数 | Fork 独立历史模式下的本地缓存读取、水平平移和不共享历史滚动 |
+| 手机键盘 / 窗格显示 / PTY 归属 | **上游 #1068/#1072/#1085/#1087/#1095/#1130**：通用 `keepSize`、`releaseSize`、失焦与 viewport 逻辑 | Fork Windows `TerminalControlSession` 的原生尺寸追踪、锁定与窗口控制协议 |
+| Chat Stop | **上游 #1112**：使用有顺序保障的 `input.stop`，不另发送键盘按键 | Fork 仅保留普通物理/按键栏 Esc 的 Kitty 语义编码 |
+| 跳回终端底部 | **上游 #1036**：原生终端的 jump-to-bottom 操作 | Fork 独立历史层的 Back to live 是不同的只读缓存行为 |
+
+**原则：**同一问题上游已完整修复时，用上游实现与测试，不添加独立覆盖层；上游尚无 Windows 原生控制、私有 ANSI 历史、WAN 滚轮事件合并和跨目录 Codex 恢复，则继续维护小范围 Fork 扩展。禁止用整文件 `-X ours` / `-X theirs` 掩盖混合冲突。
+
 同步保留上游提交历史，不重写为一个无法追踪的源码拷贝。主要变化包括：v0.4.1 / remote bundle 21、分页设置、可定制手机按键栏、组合键和 IME 修复、桥接端待发送消息生命周期、Claude `/effort` 选择卡和命令回复、Agent 活动排序及已查看完成提示、更新前后版本说明，以及 CSP、剪贴板授权、焦点约束、Push HTTPS 校验、Token 失败退避等修复。
 
 继续合并 v0.4.5 后，还包含上游终端搜索、Pane 拆分/移动/缩放与管理、自定义 Agent 名称、插件操作入口、后台失焦时释放和只读观察模式、快捷键/鼠标点击处理、通知与会话管理优化。Fork 的独立历史滚动仍为浏览器本地行为；上游的终端搜索和后台观察模式不得使用会调整 Windows 原生控制 PTY 的 resize 覆盖它。

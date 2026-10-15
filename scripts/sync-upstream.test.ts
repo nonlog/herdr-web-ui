@@ -121,6 +121,12 @@ test.skipIf(process.platform === "win32")(`the sync script holds ${reason} for r
   if (reason === "conflict" || reason === "workflow") expect(readFileSync(summary, "utf8")).toContain(reason === "workflow" ? ".github/workflows/ci.yml" : "src/terminal.ts");
   if (reason === "manual") expect(result.stderr).toContain("refusing to overwrite");
   else if (reason !== "merged") expect(result.stdout).toContain("::error::Upstream commit sync requires review");
+  if (reason === "conflict" || reason === "workflow" || reason === "legacy") {
+    const report = readFileSync(join(root, ".ci", "upstream-sync-report.md"), "utf8");
+    expect(report).toContain("No upstream code was promoted to main");
+    expect(report).toContain(reason === "conflict" ? "src/terminal.ts"
+      : reason === "workflow" ? ".github/workflows/ci.yml" : "baseline is not in main history");
+  }
   expect(git(origin, "rev-parse", "main")).toBe(base);
   expect(git(origin, "for-each-ref", "--format=%(refname)", "refs/heads/automation/")).toBe(reason === "manual" ? `refs/heads/${branch}` : "");
   expect(() => readFileSync(calls)).toThrow();

@@ -21,7 +21,23 @@ jobs:
     name: Check upstream and prepare safe merge
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      HAS_SYNC_APP: ${{ secrets.UPSTREAM_SYNC_APP_ID != '' && secrets.UPSTREAM_SYNC_APP_PRIVATE_KEY != '' }}
     steps:
+      # A dedicated installation with Contents:write and Workflows:write avoids
+      # maintaining an expiring personal token. Both secrets are optional: if
+      # absent, the workflow still checks ordinary changes and reports blockers.
+      - name: Create scoped upstream-sync App token
+        id: sync-app
+        if: ${{ env.HAS_SYNC_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.UPSTREAM_SYNC_APP_ID }}
+          private-key: ${{ secrets.UPSTREAM_SYNC_APP_PRIVATE_KEY }}
+          owner: nonlog
+          repositories: herdr-web-ui
+          permission-contents: write
+          permission-workflows: write
       - uses: actions/checkout@v7
         with:
           ref: main
@@ -29,10 +45,19 @@ jobs:
           # The builtin GITHUB_TOKEN cannot push upstream commits containing
           # workflow history. Optional narrowly scoped credential unlocks true
           # ancestral merges without replacing our protected CI workflows.
-          token: ${{ secrets.UPSTREAM_WORKFLOWS_TOKEN || github.token }}
+          token: ${{ steps.sync-app.outputs.token || secrets.UPSTREAM_WORKFLOWS_TOKEN || github.token }}
       - name: Check upstream, report conflicts, and validate eligible updates
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          SYNC_WORKFLOWS_AUTHORIZED: ${{ secrets.UPSTREAM_WORKFLOWS_TOKEN != '' }}
+          SYNC_WORKFLOWS_AUTHORIZED: ${{ steps.sync-app.outputs.token != '' || secrets.UPSTREAM_WORKFLOWS_TOKEN != '' }}
         run: bash scripts/sync-upstream.sh
+      - name: Preserve actionable conflict report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-conflicts
+          path: .ci/upstream-sync-report.md
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
