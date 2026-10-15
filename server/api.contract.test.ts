@@ -42,6 +42,17 @@ beforeAll(() => {
 afterAll(() => {
   server?.stop();
   rmSync(stateDir, { recursive: true, force: true });
+  // If the runner hangs after all assertions have passed, report the classes
+  // of outstanding handles without exposing socket addresses or test data.
+  const resources = () => (process as typeof process & { getActiveResourcesInfo?: () => string[] })
+    .getActiveResourcesInfo?.() ?? [];
+  const summarize = (): string => JSON.stringify(resources().reduce<Record<string, number>>((out, name) => {
+    out[name] = (out[name] ?? 0) + 1;
+    return out;
+  }, {}));
+  console.log(`[api-contract cleanup] resources after stop: ${summarize()}`);
+  const followup = setTimeout(() => console.log(`[api-contract cleanup] resources after settle: ${summarize()}`), 1000);
+  followup.unref();
 });
 
 const base = () => `http://localhost:${server.port}`;
