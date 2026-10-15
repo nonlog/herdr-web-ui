@@ -12,7 +12,8 @@
 export function hermesInterruptible(rows: readonly string[]): boolean {
   for (let index = rows.length - 1; index >= 0; index--) {
     const row = rows[index]!;
-    const at = row.lastIndexOf("❯");
+    // the row's first `❯` is the prompt: one after it is text typed into the input
+    const at = row.indexOf("❯");
     if (at < 0) continue;
     const input = row.slice(at + 1).trim();
     return /^msg=\w+ · .*Ctrl\+C cancel$/.test(input) || /^Ctrl\+C to interrupt(?:…|\.\.\.)$/.test(input);

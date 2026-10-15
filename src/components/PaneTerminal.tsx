@@ -10,7 +10,7 @@ import { HerdrSocket, type SubmitDelivery, type SubmitResult } from "../lib/ws.t
 import { MachineSession } from "../lib/machineSession.ts";
 import { useMachineSessions } from "../lib/machineSessionContext.tsx";
 import { ViewportIntentGate } from "../lib/viewportIntent.ts";
-import { PaneCachedContext, PanePresentedContext, PaneShownContext, PaneSubmitContext } from "../lib/paneSubmitContext.ts";
+import { PaneCachedContext, PanePresentedContext, PaneFollowContext, PaneShownContext, PaneSubmitContext } from "../lib/paneSubmitContext.ts";
 import { disposeAfterPendingFrame } from "../lib/terminalDispose.ts";
 import { clipboardKey, hasModifiers, physicalKey, terminalChord, navigationSequence, keyFromData, ctrlEnterSequence, mirroredCtrlEnterKey, modifyOtherKeysLevel, NO_STICKY_MODIFIERS, type StickyModifiers } from "../lib/keys.ts";
 import { keyBarInputSequence, type KeyBarKeyItem } from "../lib/keyBar.ts";
@@ -138,13 +138,6 @@ export interface PaneTerminalProps {
 }
 
 
-/** Whether this device types in the terminal's input line or straight into the grid: remembered per device. */
-const DIRECT_TYPING_KEY = "herdr-web-ui:direct-typing";
-
-function storedDirectTyping(): boolean {
-  try { return window.localStorage.getItem(DIRECT_TYPING_KEY) === "1"; } catch { return false; }
-}
-
 /** The last refused Send now note per pane, kept across that pane's mounts (see queueError). */
 const heldRowNotes = new Map<string, { owner: string; id: string; text: string }>();
 
@@ -199,7 +192,12 @@ export function PaneTerminal({
   // every device, and a PC drawing the split would see it at the phone's size (#819)
   const shown = useContext(PaneShownContext);
   const shownRef = useRef(shown); shownRef.current = shown;
-  const sizesPty = (): boolean => presentedRef.current && shownRef.current && !localGridRef.current;
+  // the split half following the other half's grid of the same tab sizes nothing either
+  const follow = useContext(PaneFollowContext);
+  const followRef = useRef(follow); followRef.current = follow;
+  // Both the Windows native-controller grid and the inactive split half only observe
+  // the shared PTY geometry. Neither may resize it on behalf of this browser.
+  const sizesPty = (): boolean => presentedRef.current && shownRef.current && !localGridRef.current && !followRef.current;
   const { answerPanePrompt, uploadPaneImage } = useMachineApi();
   const uploadFileRef = useRef(uploadPaneImage);
   uploadFileRef.current = uploadPaneImage;
@@ -304,6 +302,8 @@ export function PaneTerminal({
   const sharedGridRef = useRef<{ cols: number; rows: number } | null>(null);
   // takes the pty back to this grid when another device left it at its own (the effect below sets it)
   const reassertIfStaleRef = useRef<() => void>(() => undefined);
+  // draws the grid again as adopted or not (data-adopted-grid), keeping the cursor's row in sight
+  const followCursorRef = useRef<() => void>(() => undefined);
   // out of use, the tab let go of its pane (no attach) so herdr's own TUI has it back; it attaches
   // again when the user is back. The ref is what the socket handlers and the pane switch read
   const releasedRef = useRef(false);
@@ -390,7 +390,8 @@ export function PaneTerminal({
   const narrowFontFitted = useRef(narrowFont);
   // Settings → Chat width, Default: the lane follows this pane, on the stack its columns share
   usePaneLane(stackRef);
-  const directTyping = settings.terminalInputMode === "direct" || (settings.terminalInputMode === "auto" && (!coarse || storedDirectTyping()));
+  // every device starts typing straight into the grid; the input line is a choice (key bar or Settings)
+  const directTyping = settings.terminalInputMode !== "line";
   const inputLine = !directTyping && !chatView;
   const inputLineRef = useRef(inputLine);
   inputLineRef.current = inputLine;
@@ -601,6 +602,9 @@ export function PaneTerminal({
     // them (btop refuses a narrower screen), and returns to the user's size once it is wide enough.
     const fitGrid = fit.fit.bind(fit);
     fit.fit = (): void => {
+      // Every local fit (lens, font, resume or initial attach) shares this entry point.
+      // A following half keeps the adopted PTY grid, even when its viewport changes.
+      if (followRef.current) return;
       const base = baseFontRef.current;
       const colsAt = (size: number): number | null => {
         term.options.fontSize = size;
@@ -990,7 +994,8 @@ export function PaneTerminal({
     // drag pans it. Until the user pans, the view keeps the cursor's row in sight: the top of
     // the grid while the row fits there, else the bottom rows, where a prompt sits. A mirror
     // has no cursor; xterm's own rests on the last row with text, which serves the same.
-    const adopted = (): boolean => observeRef.current || fixedGridRef.current || localGridRef.current;
+    // the split's other half drawing the active half's tab follows the grid that half gives the pty
+    const adopted = (): boolean => observeRef.current || fixedGridRef.current || localGridRef.current || followRef.current;
     // The soft keyboard takes the bottom of the screen, not the pane: a fit to what is left above
     // it would size the shared pty to that strip, and every other viewer of the pane, herdr's own
     // window included, would reflow twice per keyboard (#1045). While the keyboard is up, a host
@@ -1028,6 +1033,7 @@ export function PaneTerminal({
       setManualGridPan(false);
       followCursor();
     };
+    followCursorRef.current = () => { panned = false; autoScrollTop = null; setManualGridPan(false); followCursor(); };
     /** before a fit: true when the keyboard holds the grid, and the fit waits (`force`: it was to re-assert the grid) */
     const keyboardHolds = (force: boolean): boolean => {
       if (!keyboardHoldsGrid(keyboardUp(), host.clientWidth, fittedWidth)) return false;
@@ -1521,7 +1527,7 @@ export function PaneTerminal({
         // chat lens entered later must draw its hidden screen for that grid, not this device's
         sharedGridRef.current = { cols: message.cols, rows: message.rows };
         // the chat lens adopts the shared grid too: the screen it reads (a masked prompt) is drawn for it
-        if (!observeRef.current && !fixedGridRef.current && !localGridRef.current && !chatViewRef.current) {
+        if (!observeRef.current && !fixedGridRef.current && !localGridRef.current && !followRef.current && !chatViewRef.current) {
           if (!keyboardHeld) return;
           heldForce = true;
         }
@@ -1653,6 +1659,10 @@ export function PaneTerminal({
     };
     host.addEventListener("keydown", onCommandArrow);
     const onData = term.onData((data) => {
+      // the split half following the other half's grid of the same tab draws it only: the active
+      // half's terminal answers the program's queries (a second answer would reach it as typing),
+      // and a press or key here makes this half the active one before anything is typed
+      if (followRef.current) return;
       const barKey = barKeyRef.current;
       barKeyRef.current = null;
       const stopKey = stopKeyRef.current;
@@ -2158,7 +2168,8 @@ export function PaneTerminal({
         }
       }
       const away = !inUse();
-      socket.attach(current, term.cols, term.rows, chatViewRef.current || localGridRef.current || away || !shownRef.current || keyboardHeld);
+      // under the keyboard the attach adopts the pane's size (keep_size) and the catch-up fit takes it
+      socket.attach(current, term.cols, term.rows, chatViewRef.current || localGridRef.current || away || !shownRef.current || followRef.current || keyboardHeld);
       if (away) leave();
     };
     // Existing attaches keep their grid while away. New connections watch instead, except
@@ -2453,6 +2464,33 @@ export function PaneTerminal({
     if (term && sizesPty() && inUse()) socketRef.current?.resize(pane, term.cols, term.rows, true);
   }, [shown]);
 
+  // the split's other half took this tab's grid: this half lets the pty go and draws it at that grid;
+  // made the active half, it fits its own screen and takes the pty, as a pane shown again does
+  const wasFollowing = useRef(follow);
+  useEffect(() => {
+    if (wasFollowing.current === follow) return;
+    wasFollowing.current = follow;
+    const pane = paneRef.current;
+    const term = termRef.current;
+    if (!pane || !term || observeRef.current || fixedGridRef.current) return;
+    if (follow) {
+      socketRef.current?.keepSize(pane);
+      const shared = sharedGridRef.current;
+      if (shared && (term.cols !== shared.cols || term.rows !== shared.rows)) term.resize(shared.cols, shared.rows);
+      followCursorRef.current();
+      return;
+    }
+    followCursorRef.current();
+    if (chatViewRef.current || keyboardHoldsRef.current(true)) return;
+    try {
+      fitRef.current?.fit();
+      fittedRef.current();
+    } catch {
+      return;
+    }
+    if (sizesPty() && inUse()) socketRef.current?.resize(pane, term.cols, term.rows, true);
+  }, [follow]);
+
   // Reset synchronously on pane changes: old composition timers must never see the new pane.
   useLayoutEffect(() => {
     const socket = socketRef.current;
@@ -2517,7 +2555,7 @@ export function PaneTerminal({
     }
     // A pane exempt from watching still asks to keep an existing attachment's size while away.
     const away = !inUse();
-    socket.attach(paneId, term.cols, term.rows, chatViewRef.current || localGridRef.current || away || !shownRef.current || held);
+    socket.attach(paneId, term.cols, term.rows, chatViewRef.current || localGridRef.current || away || !shownRef.current || followRef.current || held);
     // no blur or hidden comes for a tab already out of use: it lets go of this pane after a moment too
     if (away) leaveRef.current();
     // the chat lens covers the grid and its composer takes the keyboard: focusing the hidden
@@ -2658,8 +2696,8 @@ export function PaneTerminal({
 
   const sendComposerText = useCallback((text: string, delivery: "queue" | "immediate" = "immediate"): false | Promise<true | string> => {
     const result = submitComposerMessage(text, delivery);
-    return result === null ? false : result.then((answer) => answer.ok ? true : submitNote(answer.code, answer.message));
-  }, [submitComposerMessage]);
+    return result === null ? false : result.then((answer) => answer.ok ? true : submitNote(answer.code, answer.message, agent));
+  }, [submitComposerMessage, agent]);
 
   // the terminal's input line: the text typed like the keyboard would, into an agent's open
   // menu too, then Enter after the server's gap; several lines go as one paste
@@ -2917,7 +2955,7 @@ export function PaneTerminal({
       // Send anyway answered a box seen at once: an agent that started working since would queue it unchecked
       if (sendAnyway && delivery !== "immediate") return t("Not sent: the agent started working since. Check the terminal, then send again.");
       const result = submitComposerMessage(text, delivery, delivery === "immediate" ? clearDraft : undefined, sendAnyway);
-      return result === null ? false : result.then((answer) => answer.ok ? true : submitRefusal(answer.code, answer.message, answer.draft, answer.box));
+      return result === null ? false : result.then((answer) => answer.ok ? true : submitRefusal(answer.code, answer.message, answer.draft, answer.box, agent));
     },
     [agent, agentStatus, answerPanePrompt, answering, heldByOpenQueue, submitComposerMessage, queueStore, machineId, settings.autoSendQueued],
   );
@@ -3311,6 +3349,7 @@ export function PaneTerminal({
         messages={pending.map((message) => !message.serverOwned || pendingMessages.isOwned(queueOwner, message.id, pendingScopeRef.current)
           ? message : { ...message, serverOwned: false, state: "uncertain" as const })}
         connected={connected}
+        agent={agent}
         blocked={held || secretActive || ended || heldByOpenQueue || answering !== null}
         unsaved={pendingMessages.isUnsaved(queueOwner)}
         isBusy={(id) => pendingMessages.isBusy(queueOwner, id)}

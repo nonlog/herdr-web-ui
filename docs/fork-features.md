@@ -56,6 +56,8 @@ Herdr 0.9.3 的 `src/client/terminal_sessions.rs::write_terminal_session_output`
 | 手机键盘 / 窗格显示 / PTY 归属 | **上游 #1068/#1072/#1085/#1087/#1095/#1130**：通用 `keepSize`、`releaseSize`、失焦与 viewport 逻辑 | Fork Windows `TerminalControlSession` 的原生尺寸追踪、锁定与窗口控制协议 |
 | Chat Stop | **上游 #1112**：普通 Agent 使用有顺序保障的 `input.stop`；**上游 #1148**：Hermes 正在工作时经屏幕提示与单次/两秒保护发送 Ctrl+C | Fork 仅保留普通物理/按键栏 Esc 的 Kitty 语义编码，不修改上游 Hermes 防误退出条件 |
 | 跳回终端底部 | **上游 #1036**：原生终端的 jump-to-bottom 操作 | Fork 独立历史层的 Back to live 是不同的只读缓存行为 |
+| 同一 Tab 的独立分屏 | **上游 #1176**：保留 `PaneFollowContext` 的跟随端与活动端尺寸/输入归属 | Fork 的 Windows 原生网格 `localGridRef` 仍优先保留：跟随端和原生控制端都不能调整共享 PTY 尺寸；手动浏览历史后仍能正确恢复实时光标跟随 |
+| 手机默认直接输入 | **上游 #1163**：尊重默认 Direct typing 和用户现有输入模式设置 | Fork 的浏览器输入行回归须显式写入 `terminalInputMode: "line"`，不得依赖过去手机默认 Line input 的行为 |
 
 **原则：**同一问题上游已完整修复时，用上游实现与测试，不添加独立覆盖层；上游尚无 Windows 原生控制、私有 ANSI 历史、WAN 滚轮事件合并和跨目录 Codex 恢复，则继续维护小范围 Fork 扩展。禁止用整文件 `-X ours` / `-X theirs` 掩盖混合冲突。
 

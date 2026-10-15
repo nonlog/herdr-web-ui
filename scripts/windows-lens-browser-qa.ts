@@ -154,6 +154,9 @@ try {
   console.log("PASS adopted native grid: down-wheel and scrollbar reach the footer, streaming keeps the manual viewport, Back to live resumes follow");
 
   const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" });
+  // Upstream now defaults phones to direct typing; this test explicitly exercises
+  // the input-line workflow and must not depend on a persisted user setting.
+  await phoneContext.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ terminalInputMode: "line" })));
   const phone = await phoneContext.newPage(); const phoneWire = record(phone);
   let delayed = false; let reads = 0;
   await phone.route("**/api/pane/read?**", async (route) => {
@@ -267,6 +270,7 @@ try {
   const directServer = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "direct") }); servers.push(directServer);
   const directOrigin = `http://127.0.0.1:${directServer.port}`;
   const own = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" });
+  await own.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ terminalInputMode: "line" })));
   const mine = await own.newPage(); const mineWire = record(mine);
   await mine.goto(`${directOrigin}/?pane=${encodeURIComponent(attached)}`); await mineWire.ready(attached);
   const mineLine = mine.getByRole("textbox", { name: "Terminal input line", exact: true });

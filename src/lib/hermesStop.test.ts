@@ -46,6 +46,11 @@ describe("hermesInterruptible", () => {
     expect(hermesInterruptible(["☤ ❯ msg=interrupt · /queue · Ctrl+C cancel", "────", "❯ "])).toBe(false);
   });
 
+  it("reads the row's first `❯` as the prompt: a draft that quotes the hint is still a draft", () => {
+    expect(hermesInterruptible(["☤ ❯ note ❯ Ctrl+C to interrupt…"])).toBe(false);
+    expect(hermesInterruptible([" ❯ see ☤ ❯ msg=interrupt · /queue · Ctrl+C cancel"])).toBe(false);
+  });
+
   it("says no when a draft typed into a busy Hermes hides its hint", () => {
     expect(hermesInterruptible([...CLASSIC_BUSY.slice(0, 3), "☤ ❯ half a thought", CLASSIC_BUSY[4]!])).toBe(false);
   });

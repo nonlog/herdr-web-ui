@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InteractivePrompt } from "../shared/protocol.ts";
 
-import { answerKeys, claudeClearableDraft, claudeInputBoxText, claudeInputDraft, claudeInputEmpty, viewportShowsLive, removedInvisible, noteSubmitted, codexQuestionsCollapsed, codexQueuedPrompt, handlePromptRequest, modelListWaits, openOmoAsks, parseClaudeSuggestion, parseFallbackPrompt, parseInteractivePrompt, pendingOmoAsk, promptWaitEnded, claudeRestoredDraft, lastChatSubmitted } from "./prompt.ts";
+import { answerKeys, hermesInputDraft, claudeClearableDraft, claudeInputBoxText, claudeInputDraft, claudeInputEmpty, viewportShowsLive, removedInvisible, noteSubmitted, codexQuestionsCollapsed, codexQueuedPrompt, handlePromptRequest, modelListWaits, openOmoAsks, parseClaudeSuggestion, parseFallbackPrompt, parseInteractivePrompt, pendingOmoAsk, promptWaitEnded, claudeRestoredDraft, lastChatSubmitted } from "./prompt.ts";
 
 const labels = (prompt: InteractivePrompt | null) => prompt?.options.map((option) => option.label);
 // Real omo-ai 5.1.30 pane.read captures at 120 and 45 columns, with the recorded open calls.
@@ -4993,5 +4993,46 @@ describe("Claude Code's model list under a hint wrapped anywhere", () => {
     const quoted = `${CLAUDE_MODEL_CLOSED}⏺ Example: Enter to set as default · s to use this session only · Esc to\n  cancel\n──────────── Summary ─\n`;
     expect(modelListWaits("claude", quoted)).toBe(false);
     expect(modelListWaits("claude", `⏺ Enter to set as default · s to use this session only · Esc to cancel\n`)).toBe(false);
+  });
+});
+
+describe("hermesInputDraft", () => {
+  // input rows of real Hermes 0.21.5 screens (herdr pane read --source visible --format ansi)
+  const CLASSIC_HINT = "\u001b[0m\u001b[38;5;230m❯ \u001b[0m\u001b[3m\u001b[38;5;136mType / to browse commands, or Ctrl+P for the palette\u001b[0m";
+  const CLASSIC_TYPED = "\u001b[0m\u001b[38;5;230m❯ \u001b[0mReply with only the word";
+  const TUI_HINT = " \u001b[0m\u001b[1m\u001b[38;2;255;248;220m❯ \u001b[0m\u001b[38;2;255;255;255m\u001b[48;2;184;134;11mT\u001b[0m\u001b[38;2;184;134;11mry \"how does the config loader work?\"\u001b[0m";
+  const TUI_TYPED = " \u001b[0m\u001b[1m\u001b[38;2;255;248;220m❯ \u001b[0m\u001b[38;2;255;248;220mReply with only the word\u001b[0m              ";
+  const screen = (input: string) => `● ❯ an earlier message, echoed\n────────\n${input}\n────────`;
+  const plain = (ansi: string) => ansi.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+  const draft = (input: string, colors: string | null = screen(input)) => hermesInputDraft(plain(screen(input)), colors);
+
+  test("knows text typed into the classic CLI or the TUI for a draft", () => {
+    expect(draft(CLASSIC_TYPED)).toBe(true);
+    expect(draft(TUI_TYPED)).toBe(true);
+    // a `❯` the user typed is text, not the prompt
+    expect(draft("\u001b[0m\u001b[38;5;230m❯ \u001b[0mreview ❯ ")).toBe(true);
+  });
+
+  test("takes neither interface's own hint for a draft: the classic italic placeholder, the TUI's cursor chip", () => {
+    expect(draft(CLASSIC_HINT)).toBe(false);
+    expect(draft(TUI_HINT)).toBe(false);
+  });
+
+  test("reads an input with nothing after the prompt as empty, without colors", () => {
+    expect(draft(" \u001b[1m❯ \u001b[0m", null)).toBe(false);
+  });
+
+  test("knows a draft that holds a `❯` without colors too, and reads an empty prompt row with colors as empty", () => {
+    expect(draft("\u001b[0m\u001b[38;5;230m❯ \u001b[0mreview ❯ ", null)).toBe(true);
+    expect(draft("\u001b[0m\u001b[38;5;230m❯ \u001b[0m")).toBe(false);
+  });
+
+  test("counts any text as a draft without colors verified to show that screen", () => {
+    expect(draft(CLASSIC_HINT, null)).toBe(true);
+    expect(draft(TUI_HINT, screen(CLASSIC_TYPED))).toBe(true);
+  });
+
+  test("does not know a screen without an input row to be empty", () => {
+    expect(hermesInputDraft("Approve this command?\n  [1] Approve once\n", null)).toBe(true);
   });
 });

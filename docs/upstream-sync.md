@@ -31,6 +31,8 @@ GitHub 内置 `GITHUB_TOKEN` 没有工作流写入权限。若新上游提交历
 2. 在该仓库的 Actions Secrets 中设置 `UPSTREAM_SYNC_APP_ID`（App ID）及 `UPSTREAM_SYNC_APP_PRIVATE_KEY`（仅此 App 的私钥内容）。不要将私钥提交进 Git。
 3. 每次计划任务自动通过 `actions/create-github-app-token@v2` 获取短期安装令牌；结束后过期，不依赖个人账号永久 PAT。支持已有 `UPSTREAM_WORKFLOWS_TOKEN` 作为备选，但优先使用 App。
 
+当前 Fork 已将细粒度 PAT 保存为 Actions Secret `UPSTREAM_WORKFLOWS_TOKEN`，因此不必额外创建 GitHub App。定期轮换/续期该 PAT，并将仓库权限限制为 Contents 与 Workflows 的读写。一个同步任务显示 `SYNC_WORKFLOWS_AUTHORIZED=true` 只证明凭据路径已启用；没有实际推送 `.github/workflows/` 相关历史时，不能由此断言令牌本身已完成端到端写入验收。
+
 脚本会创建**包含上游提交作为第二父节点**的真实 merge commit，在最终源码树中保留 Fork 原有 `.github/workflows/`，不执行或自动采用上游未经验证的 CI 工作流内容。上游对工作流功能本身的调整仍应另行审阅。以上首次 App 授权需要仓库所有者明确配置；**当前若未配置则不能实现涉及工作流历史的完全无人值守同步，不会复制本机 GitHub OAuth token 到 Actions。**
 
 普通的非工作流提交无需此凭据即可自动进行 Git 三方合并与 CI 验证；修改大型 `server/index.ts` 文件的普通功能不会仅凭文件名被误判为安全敏感，只有其认证、入口、配对和令牌相关改动才触发人工门禁。**人工处理完成后应尽量把重复的 Fork 功能收敛到上游实现**，避免下一次在相同位置再次冲突。
