@@ -225,7 +225,7 @@ const RESTORED_CLEAR_GAP_MS = 200;
 const RESTORED_CLEAR_SETTLE_MS = 300;
 /** what a send must still have of its deadline before the copy is cleared: the clear, the box read again, then the send */
 const RESTORED_CLEAR_RESERVE_MS = 2_000;
-const SERVER_FEATURES: ServerFeature[] = ["submit", "pending-input", "pending-hold", "secret-input", "input-ready", "take-over", "watch", "conversation-watch", "ping"];
+const SERVER_FEATURES: ServerFeature[] = ["submit", "pending-input", "pending-hold", "secret-input", "input-ready", "take-over", "terminal-scroll", "watch", "conversation-watch", "ping"];
 
 /** the sides herdr's pane.swap and pane.resize take; anything else is refused before the RPC, which would answer invalid_request */
 const isPaneDirection = (value: unknown): value is PaneDirection => value === "left" || value === "right" || value === "up" || value === "down";

@@ -16,8 +16,6 @@ export const KO: Record<string, string> = {
   "Back to live": "실시간 화면으로",
   "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "로컬 기록은 다른 기기의 화면을 변경하지 않고 캐시된 출력을 즉시 스크롤합니다. 앱 내부 스크롤은 공유 프로그램에 휠 입력을 보냅니다。",
 
-  "PageUp / PageDown scroll chat": "PageUp / PageDown으로 채팅 스크롤",
-  "Scroll the conversation even while typing. In the terminal, plain page keys stay with the running program.": "입력 중에도 대화를 스크롤합니다. 터미널에서는 일반 페이지 키가 실행 중인 프로그램에 전달됩니다.",
   "Antigravity chat is unavailable. Open Terminal to see activity and tool calls.": "Antigravity 채팅을 사용할 수 없습니다. 터미널을 열어 작업 상태와 도구 호출을 확인하세요.",
   "Chat read timed out.": "대화 읽기 시간이 초과되었습니다.",
   "Thinking…": "생각 중…",

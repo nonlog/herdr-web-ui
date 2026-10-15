@@ -102,6 +102,7 @@ try {
   await desktop.setViewportSize({ width: 1500, height: 1000 });
   await desktop.locator(".pane-terminal[data-adopted-grid]").waitFor();
   await desktop.evaluate(() => window.dispatchEvent(new Event("focus")));
+  // fixed wait: confirm the native PTY dimensions never change after focus/resize debounce.
   await Bun.sleep(300);
   assert.equal((await paneScrollInfo(paneId))?.viewport_rows, beforeBrowser.height, "browser resize/focus keeps native geometry");
   native.resize(100, 28);
@@ -142,6 +143,7 @@ try {
   const manual = await scrollOf(desktop);
   await paneSendText(paneId, "printf '\\033[2;1Hlive-update-above-footer'"); await paneSendKeys(paneId, ["Enter"]);
   await until(async () => (await screen(desktop)).includes("live-update-above-footer"), "fresh ANSI arrives while reading the lower rows");
+  // fixed wait: late cursor-follow logic must not undo manual scrolling.
   await Bun.sleep(150);
   assert.ok(Math.abs((await scrollOf(desktop)).top - manual.top) < 3, "incoming output preserves the user's scrollbar position instead of following a higher cursor");
   assert.equal(desktopWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length, beforeSharedScrollCommands, "local panning adds no shared Herdr scroll or resize commands");
@@ -157,7 +159,9 @@ try {
   await phone.route("**/api/pane/read?**", async (route) => {
     const url = new URL(route.request().url());
     if (url.searchParams.get("source") === "recent" && url.searchParams.get("format") === "ansi") {
-      reads++; if (delayed) await Bun.sleep(800);
+      reads++;
+      // fixed wait: simulate a deliberately delayed history HTTP response to test request ordering.
+      if (delayed) await Bun.sleep(800);
     }
     await route.continue();
   });
@@ -217,6 +221,7 @@ try {
   await until(async () => (await screen(desktop)).includes("phone-input-72"), "input from history reaches live program");
   assert.equal(await historyVisible(phone), 0);
   await phone.setViewportSize({ width: 390, height: 520 });
+  // fixed wait: keyboard-sized viewport must not resize the shared native grid after debounce.
   await Bun.sleep(300);
   assert.equal(phoneWire.sent.filter((m) => m.type === "resize").length, 0, "keyboard-sized viewport changes send no PTY resize");
   assert.equal(await size(paneId), desktopGrid, "native PTY geometry is unchanged");
@@ -268,6 +273,7 @@ try {
   await mineLine.fill("for i in $(seq 1 200); do echo direct-$i; done"); await mineLine.press("Enter");
   await until(async () => (await screen(mine)).includes("direct-200"), "direct attach receives input/output");
   // Initial prefetch can precede fixture output; returning to live refreshes it on the bounded timer.
+  // fixed wait: exercise the prefetch refresh interval when the initial snapshot predates fixture output.
   await Bun.sleep(1800); await mine.locator('.pane-terminal[data-history-cache="ready"]').waitFor();
   await drag(mine, 0, 160);
   await until(async () => (await historyVisible(mine)) === 1 && (await historyScreen(mine)).includes("direct-"), "direct transport also uses private history");

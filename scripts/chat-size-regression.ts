@@ -168,6 +168,7 @@ export async function checkChatKeepsTerminalSize(browser: Browser, origin: strin
     await phone.locator('button[title^="Live terminal"]').tap();
     await phone.locator(".terminal-stack:not(.is-chat)").waitFor({ state: "attached" });
     await phone.locator(".pane-terminal[data-adopted-grid]").waitFor({ state: "attached" });
+    // fixed wait: reject a delayed native resize after the phone observer settles.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     assert.deepEqual(await sent(phone), [{ dir: "out", type: "attach", keep_size: true }], "the phone's terminal lens does not send resize");
     assert.equal(await size(), desktopSize, "the phone's terminal lens preserves the desktop grid");
@@ -242,6 +243,7 @@ export async function checkPaneSwitchKeepsTerminalSize(browser: Browser, origin:
     await other.locator(".terminal-stack.is-chat").waitFor({ state: "attached" });
     await attached(other, 2);
     // a resize that should not happen gets this long to show up: the grid's ResizeObserver waits 120 ms
+    // fixed wait: assert that no delayed reattachment changes the shared grid.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     const sent = (await framesOf(other)).slice(before).filter((f) => f.dir === "out" && (f.type === "attach" || f.type === "resize"));
     assert.deepEqual(sent, [{ dir: "out", type: "attach", keep_size: true }],
@@ -360,6 +362,7 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
       Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
       document.dispatchEvent(new Event("visibilitychange"));
     });
+    // fixed wait: absence of resize must survive the native 120 ms observer debounce.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     assert.deepEqual((await sizing(desktop)).slice(shown), [], "a window shown without the focus sends no resize");
     assert.equal(await size(), phoneSize, "a window shown without the focus leaves the phone's grid");
@@ -377,6 +380,7 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
     const snapshots = (await framesOf(desktop)).filter((f) => f.dir === "in" && f.type === "snapshot").length;
     await desktop.evaluate(() => (window as unknown as { socket_: WebSocket }).socket_.close());
     await desktop.waitForFunction((count) => (window as unknown as { frames_: { dir: string; type: string }[] }).frames_.filter((f) => f.dir === "in" && f.type === "snapshot").length > count, snapshots, { timeout: 15_000 });
+    // fixed wait: a background reconnect must remain non-sizing through its settle window.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     assert.deepEqual((await sizing(desktop)).slice(reconnecting), [], "a background reconnect attaches nothing");
     assert.equal(await size(), phoneSize, "a background reconnect leaves the phone's grid");
@@ -420,6 +424,7 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
     const watchesBeforeSwitch = (await framesOf(desktop)).filter((frame) => frame.dir === "out" && frame.type === "watch").length;
     await workspaceClose(created.workspace.workspace_id);
     await desktop.locator(`.terminal-stack[data-pane-owner="${nextPane}"]`).waitFor({ state: "attached", timeout: 15_000 });
+    // fixed wait: watch for a forbidden resize after the pane switch debounce.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     assert.deepEqual((await sizing(desktop)).slice(switching), [], "a background move to the next pane attaches nothing");
     assert.equal(await nextSize(), nextBefore, "a background move to the next pane leaves its grid");
@@ -1047,6 +1052,7 @@ export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, o
     await sizeBecomes(otherSize, "another desktop took the pane at its own size");
     // A right-click opens the menu without taking the pane back from that desktop.
     await desktop.locator(".xterm").click({ button: "right" });
+    // fixed wait: the context menu must not cause a late PTY resize.
     await Bun.sleep(500);
     assert.equal(await size(), otherSize, "a right-click leaves the pane at the other desktop's size");
     // Escape closes the menu where one opened; in the terminal it is a key like any other

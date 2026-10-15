@@ -18,8 +18,6 @@ export const JA: Record<string, string> = {
   "Back to live": "ライブ表示に戻る",
   "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "ローカル履歴は他の端末の表示を変えず、保存済みの出力を即時スクロールします。アプリ内スクロールは共有プログラムへ操作を送ります。",
 
-  "PageUp / PageDown scroll chat": "PageUp / PageDownでチャットをスクロール",
-  "Scroll the conversation even while typing. In the terminal, plain page keys stay with the running program.": "入力中も会話をスクロールします。ターミナルでは通常のページキーは実行中のプログラムに渡されます。",
   "Antigravity chat is unavailable. Open Terminal to see activity and tool calls.": "Antigravityのチャットを利用できません。ターミナルを開いて動作状況とツール呼び出しを確認してください。",
   "Chat read timed out.": "会話の読み込みがタイムアウトしました。",
   "Thinking…": "思考中…",

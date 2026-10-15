@@ -85,6 +85,7 @@ describe("terminal session control transport", () => {
       await until(() => a.state.ready > 0, "first controller ready");
       expect((await paneScrollInfo(paneId))?.viewport_rows).toBe(nativeRows);
       a.send({ type: "resize", pane_id: paneId, cols: 180, rows: 70 });
+      // fixed wait: a forbidden resize must stay absent after native control processes the frame.
       await Bun.sleep(200);
       expect((await paneScrollInfo(paneId))?.viewport_rows).toBe(nativeRows);
 
@@ -100,6 +101,7 @@ describe("terminal session control transport", () => {
       await b.open;
       b.send({ type: "attach", pane_id: paneId, cols: 100, rows: 30 });
       await until(() => b.state.errors.includes("attach_held"), "second bridge waits for controller");
+      // fixed wait: controller ownership may not be stolen after the attach-held error.
       await Bun.sleep(300);
       expect(b.state.exits).toBe(0);
       expect(b.state.ready).toBe(0);

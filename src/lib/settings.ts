@@ -168,6 +168,7 @@ export type DiffStyle = (typeof DIFF_STYLES)[number];
  * Settings field in the projection makes a new field require an explicit collection decision. */
 type TelemetrySourceSettings = Omit<Settings,
   "keyBarExtras" | "keyBarItems" | "shortcutOverrides" | "terminalFontFamily" | "chatFontFamily"
+  | "terminalCursorStyle" | "terminalCursorBlink"
   | "quickReplies" | "usageOrder" | "usageHidden">;
 
 /** Compare structured custom settings by content against this app's built-in defaults. */
@@ -189,8 +190,6 @@ export function telemetrySettingsSnapshot(settings: Settings): TelemetrySettings
     paletteLight: settings.paletteLight,
     paletteDark: settings.paletteDark,
     terminalFontSize: settings.terminalFontSize,
-    terminalCursorStyle: settings.terminalCursorStyle,
-    terminalCursorBlink: settings.terminalCursorBlink,
     terminalWheelSpeed: settings.terminalWheelSpeed,
     paneClipboard: settings.paneClipboard,
     releasePaneAway: settings.releasePaneAway,

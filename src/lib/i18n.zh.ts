@@ -20,8 +20,6 @@ export const ZH: Record<string, string> = {
   "Back to live": "返回实时终端",
   "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "本地历史直接滚动缓存内容，不改变其他设备的视图。应用内滚动会向共享程序发送滚轮操作。",
 
-  "PageUp / PageDown scroll chat": "PageUp / PageDown 滚动聊天",
-  "Scroll the conversation even while typing. In the terminal, plain page keys stay with the running program.": "输入时也可滚动对话。在终端中，普通翻页键仍由正在运行的程序处理。",
   "Antigravity chat is unavailable. Open Terminal to see activity and tool calls.": "Antigravity 聊天暂不可用。请打开终端查看运行状态和工具调用。",
   "Chat read timed out.": "读取对话超时。",
   "Thinking…": "思考中…",

@@ -1676,7 +1676,9 @@ export function PaneTerminal({
       const secret = secretRef.current !== null;
       const input = data;
       const key = keyFromData(data);
-      const chord = enterChord ?? (!pasting && !composingRef.current && !compositionCommitPendingRef.current
+      // The composer labels Stop explicitly. Preserve its stop:true input frame;
+      // only ordinary terminal Esc needs a semantic Herdr key chord.
+      const chord = stopKey && input === "\u001b" ? null : enterChord ?? (!pasting && !composingRef.current && !compositionCommitPendingRef.current
         ? (barKey?.chord ?? physicalChord
           ?? (hasModifiers(modifiersRef.current) && key !== null ? terminalChord(key, modifiersRef.current) : null)
           // An unmodified legacy ESC byte may not cancel a Kitty-aware TUI.
@@ -1972,16 +1974,9 @@ export function PaneTerminal({
         host.scrollBy(across, 0);
         return;
       }
-      if (localHistoryEnabled()) {
-        const target = term.element ?? host;
-        const cell = cellHeight();
-        target.dispatchEvent(new WheelEvent("wheel", {
-          bubbles: true, cancelable: true,
-          deltaY: delta / cell, deltaMode: WheelEvent.DOM_DELTA_LINE,
-          clientX: first.clientX, clientY: first.clientY,
-        }));
-        return;
-      }
+      // Both private history and application scroll consume the same bounded
+      // pixel-to-row accumulation: a quick swipe must travel the same distance
+      // as a slow swipe rather than emit one wheel event per touchmove.
       // xterm sends herdr one report per wheel event however far it went, and herdr scrolls a
       // few lines per report: one line-mode wheel per that many rows of finger travel keeps a
       // swipe as far as a slow drag, and the text under the finger
