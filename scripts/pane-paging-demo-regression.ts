@@ -13,7 +13,7 @@ const app = mkdtempSync(join(tmpdir(), "herdr-pane-paging-demo-"));
 // Capture only fictional paging fixtures for PR evidence.
 const evidence = process.env.UI_EVIDENCE_DIR;
 const settled = (page: Page) => page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
-const returnControl = (page: Page) => page.locator(".pane-frame.is-current .chat-view .chat-new-messages");
+const returnControl = (page: Page) => page.locator(".pane-frame.is-current .chat-new-messages");
 const inputs = (page: Page): Promise<unknown[]> => page.evaluate(() => (window as unknown as { pagingInputs: unknown[] }).pagingInputs);
 const scrollGeometry = (page: Page) => page.evaluate(() => {
   const node = document.querySelector<HTMLElement>(".pane-frame.is-current .chat-view");
@@ -23,9 +23,20 @@ const scrollGeometry = (page: Page) => page.evaluate(() => {
     gap: node.scrollHeight - node.clientHeight - node.scrollTop, rectHeight: node.getBoundingClientRect().height,
     inlineStyle: node.getAttribute("style"), computedHeight: getComputedStyle(node).height,
     content: content && { height: content.getBoundingClientRect().height, inlineStyle: content.getAttribute("style"), source: content.dataset.conversationSource },
-    returnControls: [...node.querySelectorAll<HTMLElement>(".chat-new-messages")].map((button) => ({ label: button.getAttribute("aria-label"), text: button.textContent, className: button.className, height: button.getBoundingClientRect().height })),
+    returnControls: [...document.querySelectorAll<HTMLElement>(".pane-frame.is-current .chat-new-messages")].map((button) => ({ label: button.getAttribute("aria-label"), text: button.textContent, className: button.className, height: button.getBoundingClientRect().height })),
     loading: node.querySelector(".chat-inline-state")?.textContent ?? null };
 });
+// The demo's api pane opens mid-turn and ends that turn 4.5 s later (site/demo/transport.ts): the
+// answer lands and the work block folds, so the transcript's height changes under the reader. Paging
+// asserts exact scroll positions, so it starts only once that turn has ended and its fold has settled.
+async function demoTurnEnded(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    const transcript = document.querySelector(".pane-frame.is-current .chat-view");
+    const last = transcript ? [...transcript.querySelectorAll(".chat-turn-agent")].at(-1) : undefined;
+    return last !== undefined && last.querySelector(".chat-agent-meta") !== null && transcript!.querySelector(".work-block.is-live, .animated-height.is-moving") === null;
+  }, undefined, { timeout: 20000 });
+  await settled(page);
+}
 async function followedBottom(page: Page, phase: string): Promise<void> {
   try {
     await page.waitForFunction(() => {
@@ -82,7 +93,7 @@ try {
       try {
         await fractional.addInitScript(() => {
           Object.defineProperty(navigator, "platform", { configurable: true, value: "iPad" });
-          localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", defaultView: "chat", alertsOn: false, pageOverlapRows: 100 }));
+          localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", defaultView: "chat", alertsOn: false }));
         });
         const page = await fractional.newPage();
         page.setDefaultTimeout(10000);
@@ -93,7 +104,7 @@ try {
         await appFaces(page);
         const transcript = page.locator(".pane-frame.is-current .chat-view");
         await transcript.locator(".chat-turn-agent").first().waitFor();
-        await settled(page);
+        await demoTurnEnded(page);
         await page.locator(".pane-frame.is-current .composer-text").focus();
         await transcript.evaluate((node: HTMLElement) => {
           node.dataset.fractionalPaging = "";
@@ -101,7 +112,8 @@ try {
           const content = node.firstElementChild as HTMLElement;
           content.style.minHeight = "0"; content.style.height = "200.75px"; content.style.overflow = "hidden";
           const style = document.createElement("style");
-          style.textContent = "[data-fractional-paging]::before { display: none; }";
+          // a line taller than the view leaves each page one pixel
+          style.textContent = "[data-fractional-paging]::before { display: none; } [data-fractional-paging] :is(.chat-turn-agent > .markdown, .chat-bubble) { line-height: 1000px; }";
           document.head.append(style);
           node.scrollTop = node.scrollHeight;
           node.dispatchEvent(new Event("scroll", { bubbles: true }));
@@ -174,31 +186,18 @@ try {
           const composer = page.locator(".pane-frame.is-current .composer-text");
           await composer.waitFor();
           await page.waitForFunction(() => { const node = document.querySelector(".pane-frame.is-current .chat-view")!; return node.scrollHeight > node.clientHeight + 100; });
+          await demoTurnEnded(page);
           await composer.fill("Keep this draft\nand its selection");
           await composer.evaluate((node: HTMLTextAreaElement) => { node.focus(); node.setSelectionRange(5, 15); });
           const beforeInput = await inputs(page);
           const beforeSelection = await composer.evaluate((node: HTMLTextAreaElement) => [node.selectionStart, node.selectionEnd]);
           await transcript.evaluate((node) => { node.scrollTop = node.scrollHeight; });
           await settled(page);
-          const plainDisabledBottom = await transcript.evaluate((node) => node.scrollTop);
-          await page.keyboard.press("PageUp");
-          assert.equal(await transcript.evaluate((node) => node.scrollTop), plainDisabledBottom, "plain chat paging starts off");
+          const modalBottom = await transcript.evaluate((node) => node.scrollTop);
           await page.keyboard.press("Meta+Shift+Comma");
           await openSettingsPage(page, "Chat");
-          const plainToggle = page.getByRole("switch", { name: "PageUp / PageDown scroll chat", exact: true });
-          assert.equal(await plainToggle.getAttribute("aria-checked"), "false", "the ordinary build preserves native editing by default");
-          await plainToggle.click();
           await page.keyboard.press("PageUp");
-          assert.equal(await transcript.evaluate((node) => node.scrollTop), plainDisabledBottom, "a modal owns its plain page keys");
-          if (evidence) {
-            mkdirSync(evidence, { recursive: true });
-            if (touch) await page.setViewportSize({ width: 320, height: 760 });
-            await plainToggle.scrollIntoViewIfNeeded();
-            await settled(page);
-            await page.screenshot({ path: join(evidence, touch ? "plain-chat-paging-phone.png" : "plain-chat-paging-desktop.png") });
-            assert.ok(await page.locator(".settings-body:not([hidden])").evaluate((node) => node.scrollWidth <= node.clientWidth), "plain paging settings fit this screen");
-            if (touch) { await page.setViewportSize({ width: 1024, height: 600 }); await settled(page); }
-          }
+          assert.equal(await transcript.evaluate((node) => node.scrollTop), modalBottom, "a modal owns its plain page keys");
           await page.keyboard.press("Escape");
           await page.getByRole("dialog", { name: "Settings", exact: true }).waitFor({ state: "hidden" });
           await composer.evaluate((node: HTMLTextAreaElement) => { node.focus(); node.setSelectionRange(5, 15); });
@@ -208,7 +207,7 @@ try {
           const plainStep = await transcript.evaluate((node) => Math.max(1, node.clientHeight - parseFloat(getComputedStyle(node.querySelector(".chat-turn-agent > .markdown, .chat-bubble") ?? node).lineHeight)));
           await page.keyboard.press("PageUp");
           await settled(page);
-          assert.ok(Math.abs(plainBottom - await transcript.evaluate((node) => node.scrollTop) - plainStep) <= 1, "plain chat PageUp uses the configured overlap");
+          assert.ok(Math.abs(plainBottom - await transcript.evaluate((node) => node.scrollTop) - plainStep) <= 1, "plain chat PageUp keeps one line between pages");
           assert.deepEqual(await composer.evaluate((node: HTMLTextAreaElement) => [node.value, node.selectionStart, node.selectionEnd, document.activeElement === node]), ["Keep this draft\nand its selection", 5, 15, true]);
           await page.keyboard.press("PageDown");
           await transcript.evaluate((node) => { node.scrollTop = node.scrollHeight; });
@@ -229,72 +228,33 @@ try {
           assert.equal(await transcript.evaluate((node) => node.scrollTop), editableBottom, `other editable controls retain their plain page keys: ${JSON.stringify(await scrollGeometry(page))}`);
           await page.evaluate(() => document.querySelector("#owned-paging-editable")!.remove());
           await settled(page);
-          await page.keyboard.press("Meta+Shift+Comma");
-          await openSettingsPage(page, "Chat");
-          await plainToggle.click();
-          await page.keyboard.press("Escape");
-          await page.getByRole("dialog", { name: "Settings", exact: true }).waitFor({ state: "hidden" });
           await composer.evaluate((node: HTMLTextAreaElement) => { node.focus(); node.setSelectionRange(5, 15); });
           assert.deepEqual(await inputs(page), beforeInput, "plain chat paging never sends pane input");
 
-          for (const rows of [1, 3, 100, 0]) {
-            if (rows !== 1) {
-              await page.keyboard.press("Meta+Shift+Comma");
-              await openSettingsPage(page, "Shortcuts");
-              const overlap = page.getByRole("group", { name: "Page overlap", exact: true }).locator("output");
-              for (let clicks = 0; Number(await overlap.textContent()) !== rows; clicks++) {
-                assert.ok(clicks <= 100, `page overlap reaches ${rows}, showing ${await overlap.textContent()}`);
-                await page.getByRole("button", { name: Number(await overlap.textContent()) < rows ? "Increase page overlap" : "Decrease page overlap", exact: true }).click();
-              }
-              await page.keyboard.press("Escape");
-              await composer.evaluate((node: HTMLTextAreaElement) => { node.focus(); node.setSelectionRange(5, 15); });
-            }
+          {
             await transcript.evaluate((node) => { node.scrollTop = node.scrollHeight; });
             await settled(page);
             const bottom = await transcript.evaluate((node) => node.scrollTop);
-            const step = await transcript.evaluate((node, rows) => Math.max(1, node.clientHeight - rows * parseFloat(getComputedStyle(node.querySelector(".chat-turn-agent > .markdown, .chat-bubble") ?? node).lineHeight)), rows);
+            const step = await transcript.evaluate((node) => Math.max(1, node.clientHeight - parseFloat(getComputedStyle(node.querySelector(".chat-turn-agent > .markdown, .chat-bubble") ?? node).lineHeight)));
             await page.keyboard.press("Meta+Shift+PageUp");
             // The first frame already has the new position and has stopped following output.
-            assert.ok(Math.abs(bottom - await transcript.evaluate((node) => node.scrollTop) - step) <= 1, `chat instantly pages with ${rows} overlap rows`);
+            assert.ok(Math.abs(bottom - await transcript.evaluate((node) => node.scrollTop) - step) <= 1, "chat instantly pages, keeping one line");
             await settled(page);
             assert.ok(Math.abs(bottom - await transcript.evaluate((node) => node.scrollTop) - step) <= 1, "the bottom-pinning effect leaves paged history in place");
-            if (rows === 100) {
-              await returnControl(page).waitFor();
-              const paged = await transcript.evaluate((node) => node.scrollTop);
-              // A height change exercises the chat’s ResizeObserver following path.
-              await page.setViewportSize({ width: 1024, height: 580 });
-              await settled(page);
-              assert.ok(Math.abs(await transcript.evaluate((node) => node.scrollTop) - paged) < 0.5, "one-pixel paging remains away through deferred scroll and viewport updates");
-              await page.setViewportSize({ width: 1024, height: 600 });
-              await settled(page);
-            }
             assert.equal(await composer.inputValue(), "Keep this draft\nand its selection");
             assert.deepEqual(await composer.evaluate((node: HTMLTextAreaElement) => [node.selectionStart, node.selectionEnd]), beforeSelection);
             assert.ok(await composer.evaluate((node) => document.activeElement === node), "paging leaves the composer focused");
-            if (touch && rows === 1 && evidence) {
+            if (touch && evidence) {
               mkdirSync(evidence, { recursive: true });
               await page.screenshot({ path: join(evidence, "ipad-chat-paging.png") });
             }
             await page.keyboard.press("Meta+Shift+PageDown");
             assert.ok(Math.abs(await transcript.evaluate((node) => node.scrollTop) - bottom) <= 1, "opposite page returns to the same bottom");
-            if (rows === 100) {
-              // Both Jump to latest and New messages are the same return-to-end control.
-              // The live demo can replace its label while paging; reach the actual end.
-              for (let pages = 0; await returnControl(page).count() > 0; pages++) {
-                assert.ok(pages < 128, "one-pixel PageDown reaches the actual bottom within a bounded number of pages");
-                await page.keyboard.press("Meta+Shift+PageDown");
-                await settled(page);
-              }
-              await returnControl(page).waitFor({ state: "hidden" });
-              await page.setViewportSize({ width: 1024, height: 580 });
-              await settled(page);
-              await followedBottom(page, touch ? "ipad-repeat-down" : "desktop-repeat-down");
-              await page.setViewportSize({ width: 1024, height: 600 });
-              await settled(page);
-              await transcript.evaluate((node) => { node.scrollTop -= 1; node.dispatchEvent(new Event("scroll", { bubbles: true })); });
-              await settled(page);
-              assert.equal(await returnControl(page).count(), 0, "ordinary manual near-bottom scrolling retains its existing follow tolerance");
-            }
+            await settled(page);
+            await returnControl(page).waitFor({ state: "hidden" });
+            await transcript.evaluate((node) => { node.scrollTop -= 1; node.dispatchEvent(new Event("scroll", { bubbles: true })); });
+            await settled(page);
+            assert.equal(await returnControl(page).count(), 0, "ordinary manual near-bottom scrolling retains its existing follow tolerance");
           }
           assert.deepEqual(await inputs(page), beforeInput, "paging never sends pane input");
           await page.keyboard.press("Meta+Shift+Comma");
@@ -306,14 +266,6 @@ try {
           await settled(page);
           assert.equal(await transcript.evaluate((node) => node.scrollTop), bottom, "a modal blocks pane paging");
           assert.ok(await page.getByRole("dialog", { name: "Settings", exact: true }).evaluate((node) => node.contains(document.activeElement)), "paging cannot move focus out of Settings");
-          if (touch && evidence) {
-            await page.setViewportSize({ width: 320, height: 760 });
-            await page.getByRole("group", { name: "Page overlap", exact: true }).scrollIntoViewIfNeeded();
-            await page.screenshot({ path: join(evidence, "page-overlap-phone.png") });
-            assert.ok(await page.locator(".settings-body:not([hidden])").evaluate((node) => node.scrollWidth <= node.clientWidth), "paging settings fit a narrow phone");
-            await page.setViewportSize({ width: 1024, height: 600 });
-            await settled(page);
-          }
           await page.keyboard.press("Escape");
           await page.getByRole("dialog", { name: "Settings", exact: true }).waitFor({ state: "hidden" });
           await composer.focus();
@@ -326,10 +278,11 @@ try {
           await page.reload();
           await page.locator(".conn-live").waitFor();
           await composer.waitFor();
+          // the reload starts the demo's turn over
+          await demoTurnEnded(page);
           await page.keyboard.press("Meta+Shift+Comma");
           await openSettingsPage(page, "Shortcuts");
           assert.equal(await page.getByRole("combobox", { name: "Scroll pane up", exact: true }).inputValue(), "u", "paging overrides survive reload");
-          assert.equal(await page.getByRole("group", { name: "Page overlap", exact: true }).locator("output").textContent(), "0", "overlap survives reload");
           await page.getByRole("combobox", { name: "Scroll pane up", exact: true }).selectOption("off");
           await page.keyboard.press("Escape");
           await composer.focus();

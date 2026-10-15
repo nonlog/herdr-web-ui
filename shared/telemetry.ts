@@ -33,35 +33,33 @@ export interface TelemetrySettings {
   density: "compact" | "comfortable";
   sidebarRows: "one" | "two";
   agentOrder: "workspace" | "activity";
-  agentCards: boolean;
-  agentPins: boolean;
-  quietOpenedDone: boolean;
   agentMarks: "color" | "mono";
-  palette: "amber" | "report" | "charcoal" | "catppuccin" | "lilac" | "forest";
+  statusIndicators: "classic" | "dots" | "symbols";
+  palette: "amber" | "charcoal" | "catppuccin";
+  /** the pair System mode switches between */
+  paletteLight: "amber" | "charcoal" | "catppuccin";
+  paletteDark: "amber" | "charcoal" | "catppuccin";
   terminalFontSize: number;
-  terminalCursorStyle: "block" | "bar" | "underline";
-  terminalCursorBlink: boolean;
   terminalWheelSpeed: number;
   paneClipboard: boolean;
   releasePaneAway: boolean;
-  narrowPaneFont: boolean;
   chatFontSize: number | null;
+  /** null: the size the screen chose */
+  uiFontSize: number | null;
   chatWidth: "narrow" | "default" | "wide" | "full";
   enterSends: boolean;
   autoSendQueued: boolean;
   showThinking: boolean;
   keepScreenOn: boolean;
-  language: "system" | "en" | "zh" | "ja" | "ko" | "tr";
+  language: "system" | "en" | "zh" | "ja" | "ko";
   alertsOn: boolean;
   alertInput: boolean;
   alertDone: "off" | "long" | "always";
   alertInApp: boolean;
   alertSound: boolean;
   showQuickReplies: boolean;
-  showSuggestionChip: boolean;
   showUsage: boolean;
   usageCount: "used" | "left";
-  usagePace: boolean;
   usageGlance: "week" | "session";
   defaultView: "auto" | "chat" | "terminal";
   voiceInput: "auto" | "on" | "off";
@@ -69,8 +67,8 @@ export interface TelemetrySettings {
   voicePolishChat: boolean;
   voicePolishTerminal: boolean;
   wrapCode: boolean;
-  highlightCode: boolean;
   markdownWidth: "readable" | "full";
+  diffStyle: "unified" | "split";
   terminalFontCustom: boolean;
   chatFontCustom: boolean;
   shortcutsCustom: boolean;
@@ -78,11 +76,8 @@ export interface TelemetrySettings {
   quickRepliesCustom: boolean;
   quickReplyCount: number;
   usageHiddenCount: number;
-  /** paging shortcuts (#811): lines kept between pages, and plain PageUp/PageDown while composing */
-  pageOverlapRows: number;
-  chatPageKeys: boolean;
-  /** files one paste, pick or drop may attach (#863) */
-  attachLimit: number;
+  /** the usage meters' accounts were put in an order of the user's own */
+  usageOrderCustom: boolean;
 }
 
 /** The browser's full, non-sensitive snapshot. */
@@ -102,41 +97,38 @@ const nullableIntegerBetween = (min: number, max: number) => (value: unknown): b
   value === null || integerBetween(min, max)(value);
 
 // This explicit shared schema must track the producer without importing frontend code at runtime.
+const PALETTES = ["amber", "charcoal", "catppuccin"] as const;
 const TELEMETRY_SETTINGS_VALIDATORS = {
   terminalInputMode: oneOf(["auto", "line", "direct"]),
   theme: oneOf(["dark", "light", "system"]),
   density: oneOf(["compact", "comfortable"]),
   sidebarRows: oneOf(["one", "two"]),
   agentOrder: oneOf(["workspace", "activity"]),
-  agentCards: booleanValue,
-  agentPins: booleanValue,
-  quietOpenedDone: booleanValue,
   agentMarks: oneOf(["color", "mono"]),
-  palette: oneOf(["amber", "report", "charcoal", "catppuccin", "lilac", "forest"]),
+  statusIndicators: oneOf(["classic", "dots", "symbols"]),
+  palette: oneOf(PALETTES),
+  paletteLight: oneOf(PALETTES),
+  paletteDark: oneOf(PALETTES),
   terminalFontSize: integerBetween(10, 22),
-  terminalCursorStyle: oneOf(["block", "bar", "underline"]),
-  terminalCursorBlink: booleanValue,
   terminalWheelSpeed: integerBetween(1, 10),
   paneClipboard: booleanValue,
   releasePaneAway: booleanValue,
-  narrowPaneFont: booleanValue,
   chatFontSize: nullableIntegerBetween(11, 24),
+  uiFontSize: nullableIntegerBetween(11, 20),
   chatWidth: oneOf(["narrow", "default", "wide", "full"]),
   enterSends: booleanValue,
   autoSendQueued: booleanValue,
   showThinking: booleanValue,
   keepScreenOn: booleanValue,
-  language: oneOf(["system", "en", "zh", "ja", "ko", "tr"]),
+  language: oneOf(["system", "en", "zh", "ja", "ko"]),
   alertsOn: booleanValue,
   alertInput: booleanValue,
   alertDone: oneOf(["off", "long", "always"]),
   alertInApp: booleanValue,
   alertSound: booleanValue,
   showQuickReplies: booleanValue,
-  showSuggestionChip: booleanValue,
   showUsage: booleanValue,
   usageCount: oneOf(["used", "left"]),
-  usagePace: booleanValue,
   usageGlance: oneOf(["week", "session"]),
   defaultView: oneOf(["auto", "chat", "terminal"]),
   voiceInput: oneOf(["auto", "on", "off"]),
@@ -144,8 +136,8 @@ const TELEMETRY_SETTINGS_VALIDATORS = {
   voicePolishChat: booleanValue,
   voicePolishTerminal: booleanValue,
   wrapCode: booleanValue,
-  highlightCode: booleanValue,
   markdownWidth: oneOf(["readable", "full"]),
+  diffStyle: oneOf(["unified", "split"]),
   terminalFontCustom: booleanValue,
   chatFontCustom: booleanValue,
   shortcutsCustom: booleanValue,
@@ -153,12 +145,11 @@ const TELEMETRY_SETTINGS_VALIDATORS = {
   quickRepliesCustom: booleanValue,
   quickReplyCount: integerBetween(0, 12),
   usageHiddenCount: integerBetween(0, 64),
-  pageOverlapRows: integerBetween(0, 100),
-  chatPageKeys: booleanValue,
-  attachLimit: integerBetween(1, 50),
+  usageOrderCustom: booleanValue,
 } satisfies Record<keyof TelemetrySettings, (value: unknown) => boolean>;
 
-const TELEMETRY_SETTINGS_KEYS = Object.keys(TELEMETRY_SETTINGS_VALIDATORS) as (keyof TelemetrySettings)[];
+/** Every key the Worker (telemetry/worker.ts) accepts in a snapshot, and requires. */
+export const TELEMETRY_SETTINGS_KEYS = Object.keys(TELEMETRY_SETTINGS_VALIDATORS) as (keyof TelemetrySettings)[];
 
 /** Validate the complete snapshot and return a fresh object containing only schema keys. */
 export function telemetrySettings(value: unknown): TelemetrySettings | null {

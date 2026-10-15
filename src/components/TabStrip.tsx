@@ -1,7 +1,7 @@
 /**
  * Herdr's tab row, visible for a single tab too. Left-click selects; right-click opens
  * New tab / Rename / Close at the pointer. Pane actions belong to PaneCanvas.
- * A phone keeps an ellipsis on the selected tab as a touch entry to the same menu. Where the
+ * A phone keeps an ellipsis on the selected tab as a touch entry to its trimmed menu. Where the
  * canvas shows a split tab's panes one at a time (SOLO_PANE_QUERY), that menu lists them first.
  * That menu also carries the open pane's actions, so a lone pane shows no ellipsis of its own.
  */
@@ -11,6 +11,7 @@ import { ArrowLeft, ArrowRight, Ellipsis, Pencil, Plus, Terminal, X } from "luci
 import "./TabStrip.css";
 
 import type { HerdrPane, HerdrTab, PaneInfo, SessionSnapshot, WorkspaceInfo } from "../../shared/protocol.ts";
+import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
 import { ApiError } from "../lib/api.ts";
 import { useFacesArrived } from "../lib/fontFaces.ts";
 import { focusWorkspaceListToggle } from "../lib/focus.ts";
@@ -23,7 +24,8 @@ import { rosterPanes } from "../lib/dagPane.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { useTabReorder } from "../lib/useTabReorder.ts";
-import { paneStatus, rollupStatus } from "../lib/status.ts";
+import { indicatorGlyph, paneStatus, rollupStatus } from "../lib/status.ts";
+import { useSettings } from "../lib/settings.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { displayPaneTitle } from "./Sidebar.tsx";
@@ -51,6 +53,7 @@ export interface TabStripProps {
 
 export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNewTab, paneActions, panelId = PANE_TABPANEL_ID, splitDrag = false }: TabStripProps) {
   const t = useT();
+  const { settings } = useSettings();
   const machineId = useMachineId();
   const { closeTab, renameTab, moveTab } = useMachineApi();
   const touchMenu = useMediaQuery("(pointer: coarse), (max-width: 768px)");
@@ -218,9 +221,10 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   // an empty name is not sent: herdr would keep it, and its own tab row would show nothing
   const saveRename = (tab: HerdrTab): void => {
     const label = editing?.value.trim() ?? "";
+    if (label === "") { setError(t("A tab needs a name.")); return; }
     refocus.current = tab.tab_id;
     setEditing(null);
-    if (label === "" || label === nameOf(tab)) return;
+    if (label === nameOf(tab)) return;
     setSent({ tabId: tab.tab_id, label });
     void renameTab(tab.tab_id, label).catch((reason: unknown) => {
       if (latest.current.machineId !== machineId || latest.current.workspaceId !== workspace.workspace_id) return;
@@ -314,10 +318,14 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
 
   // Native tab menu: pane actions live on the pane itself. A split tab drawn one pane at a time
   // has no other way to its panes, so they lead its menu, the open one marked.
-  // The touch menu also holds the open pane's actions, between its panes and the tab's own.
+  // The touch menu also holds the open pane's actions, between its panes and the tab's own,
+  // A one-pane-at-a-time canvas omits split and zoom, but must keep unzoom to free the other panes.
   const pickerItems = (tab: HerdrTab, touch: boolean): RowMenuItem[] => {
     const own = soloPanes ? panesOf(tab) : [];
-    const paneItems = touch && tab.tab_id === selectedPane.tab_id ? paneActions?.(selectedPane.pane_id) ?? [] : [];
+    const layout = snapshot.layouts?.find((entry) => entry.tab_id === tab.tab_id);
+    const paneItems = touch && tab.tab_id === selectedPane.tab_id
+      ? (paneActions?.(selectedPane.pane_id) ?? []).filter((item) => !soloPanes
+        || (item.id === "zoom" ? layout?.zoomed : item.id !== "split-right" && item.id !== "split-down")) : [];
     const groups: RowMenuItem[][] = [
       own.length < 2 ? [] : own.map((pane): RowMenuItem => ({
         id: `pane:${pane.pane_id}`, label: displayPaneTitle(pane), icon: Terminal,
@@ -325,16 +333,17 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
         current: pane.pane_id === selectedPane.pane_id, run: () => onSelectPane(pane.pane_id),
       })),
       paneItems,
-      tabActions(tab),
+      tabActions(tab, touch),
     ].filter((group) => group.length > 0);
     return groups.flatMap((group, at) => at === 0 ? group : group.map((item, index) => index === 0 ? { ...item, divider: true } : item));
   };
-  const tabActions = (tab: HerdrTab): RowMenuItem[] => [
+  // the strip's + sits beside the ⋯, so its menu does not repeat New tab
+  const tabActions = (tab: HerdrTab, touch = false): RowMenuItem[] => [
     ...(!reorder.moving && tabs.findIndex((entry) => entry.tab_id === tab.tab_id) > 0
       ? [{ id: "move-left", label: t("Move tab left"), icon: ArrowLeft, run: () => reorder.moveAdjacent(tab.tab_id, -1) }] : []),
     ...(!reorder.moving && tabs.findIndex((entry) => entry.tab_id === tab.tab_id) < tabs.length - 1
       ? [{ id: "move-right", label: t("Move tab right"), icon: ArrowRight, run: () => reorder.moveAdjacent(tab.tab_id, 1) }] : []),
-    { id: "new-tab", label: t("New tab"), icon: Plus, run: onNewTab },
+    ...(touch ? [] : [{ id: "new-tab", label: t("New tab"), icon: Plus, run: onNewTab }]),
     { id: "rename-tab", label: t("Rename tab"), icon: Pencil, run: () => beginRename(tab) },
     { id: "close-tab", label: t("Close tab"), icon: X, danger: true, run: () => requestClose(tab) },
   ];
@@ -363,7 +372,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
                   aria-label={t("Tab name")}
                   autoFocus
                   size={Math.max(8, editing.value.length + 1)}
-                  maxLength={80}
+                  maxLength={MAX_LABEL_CHARS}
                   placeholder={name}
                   value={editing.value}
                   onFocus={(event) => event.currentTarget.select()}
@@ -407,7 +416,9 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
                   // the middle button closes a tab, as it does a browser's
                   onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); requestClose(tab); } }}
                 >
-                  {(status === "working" || status === "blocked" || status === "waiting" || status === "done") && <span className="tab-strip-dot" data-status={status} aria-hidden="true" />}
+                  {(status === "working" || status === "blocked" || status === "waiting" || status === "done") && (settings.statusIndicators === "classic"
+                    ? <span className="tab-strip-dot" data-status={status} aria-hidden="true" />
+                    : <span className="tab-strip-dot tab-strip-glyph" data-status={status} aria-hidden="true">{indicatorGlyph(status, settings.statusIndicators)}</span>)}
                   <span className="tab-strip-label">{name}</span>
                 </button>
               )}

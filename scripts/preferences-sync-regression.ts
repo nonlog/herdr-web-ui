@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { chromePath } from "./chrome-path.ts";
 
 await import("./test-herdr.ts");
 const { createServer } = await import("../server/index.ts");
@@ -53,7 +54,7 @@ const held = async () => await (await fetch(`${origin}/api/preferences`)).json()
 const write = (page: Page, body: object) => page.evaluate(async (body) => (await fetch("/api/preferences", { method: "PUT", headers: { "content-type": "application/json" }, body })).status, JSON.stringify(body));
 
 try {
-  const browser = await chromium.launch({ executablePath: process.env["CHROME_PATH"] ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   try {
     // A has pinned an agent before this release; B has not. The pane need not exist here: a pin of a
     // pane this page cannot see stays in the list (a PC still loading would look the same)
@@ -93,9 +94,9 @@ try {
     await a.page.getByRole("group", { name: "Theme", exact: true }).getByRole("button", { name: "Dark", exact: true }).click();
     await Bun.sleep(900);
     assert.equal(a.puts.length, 2, "A's theme is on its way");
-    assert.equal(await write(b.page, { settings: { palette: "forest" } }), 200);
-    await until(async () => (await stored(a.page))["palette"] === "forest", "A takes B's palette while its own change is in flight");
-    await until(async () => { const now = await held(); return now.settings["theme"] === "dark" && now.settings["palette"] === "forest"; }, "the server holds both changes");
+    assert.equal(await write(b.page, { settings: { palette: "catppuccin" } }), 200);
+    await until(async () => (await stored(a.page))["palette"] === "catppuccin", "A takes B's palette while its own change is in flight");
+    await until(async () => { const now = await held(); return now.settings["theme"] === "dark" && now.settings["palette"] === "catppuccin"; }, "the server holds both changes");
     assert.equal((await stored(a.page))["theme"], "dark", "A keeps its own change");
     await until(async () => await theme(b.page) === "dark", "B takes A's theme");
     await Bun.sleep(1_500);
@@ -104,7 +105,7 @@ try {
 
     // a page opened later starts from what the server holds, and keeps a shared setting nobody changed
     const c = await browserAt(browser, { showThinking: false });
-    await until(async () => await theme(c.page) === "dark" && (await stored(c.page))["palette"] === "forest", "a new page takes the shared theme and palette");
+    await until(async () => await theme(c.page) === "dark" && (await stored(c.page))["palette"] === "catppuccin", "a new page takes the shared theme and palette");
     assert.equal((await stored(c.page))["terminalFontSize"], 13, "and keeps its own terminal font");
     assert.equal((await stored(c.page))["showThinking"], false, "and a shared setting nobody changed stays its own");
     assert.deepEqual(await storedPins(c.page), ["local:w9:p1"], "and takes the shared pins");
@@ -116,7 +117,7 @@ try {
         else await route.continue();
       });
     });
-    await until(async () => (await stored(d.page))["palette"] === "forest", "a page without the GET takes the document from the event stream");
+    await until(async () => (await stored(d.page))["palette"] === "catppuccin", "a page without the GET takes the document from the event stream");
     await Bun.sleep(1_500);
     assert.deepEqual([...c.puts, ...d.puts], [], "pages opened later send nothing");
     for (const opened of [a, b, c, d]) await opened.context.close();

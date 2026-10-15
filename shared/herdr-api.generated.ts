@@ -64,6 +64,10 @@ export interface AgentStartParams {
 
 export type AgentStatus = "blocked" | "done" | "idle" | "unknown" | "working" | (string & {});
 
+export interface AgentTarget {
+  target: string;
+}
+
 export interface EventsSubscribeParams {
   subscriptions: Subscription[];
 }
@@ -126,44 +130,25 @@ export interface PaneLayoutSplit {
   rect: PaneLayoutRect;
 }
 
-export type PaneMoveDestination = {
-  ratio?: number | null;
-  split: SplitDirection;
-  tab_id: string;
-  target_pane_id?: string | null;
-  type: string;
-} | {
-  label?: string | null;
-  type: string;
-  workspace_id?: string | null;
-} | {
-  label?: string | null;
-  tab_label?: string | null;
-  type: string;
-};
-
-export interface PaneMoveParams {
-  destination: PaneMoveDestination;
-  focus?: boolean;
+export interface PaneProcessInfo {
+  foreground_process_group_id?: number | null;
+  foreground_processes?: PaneProcessInfoProcess[];
   pane_id: string;
+  shell_pid?: number | null;
+  tty?: string | null;
 }
 
-export type PaneMoveReason = "same_tab" | "zoomed_tab" | (string & {});
+export interface PaneProcessInfoParams {
+  pane_id?: string | null;
+}
 
-export interface PaneMoveResult {
-  changed: boolean;
-  closed_tab_id?: string | null;
-  closed_workspace_id?: string | null;
-  created_tab?: TabInfo | null;
-  created_workspace?: WorkspaceInfo | null;
-  focused_pane_id: string;
-  pane: PaneInfo;
-  previous_pane_id: string;
-  previous_tab_id: string;
-  previous_workspace_id: string;
-  reason?: PaneMoveReason | null;
-  source_layout?: PaneLayoutSnapshot | null;
-  target_layout: PaneLayoutSnapshot;
+export interface PaneProcessInfoProcess {
+  argv?: string[] | null;
+  argv0?: string | null;
+  cmdline?: string | null;
+  cwd?: string | null;
+  name: string;
+  pid: number;
 }
 
 export interface PaneReadParams {

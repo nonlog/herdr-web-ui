@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { FONT_FAMILY_MAX_CHARS } from "./fontFamily.ts";
 import { DEFAULT_KEY_BAR_ITEMS, migrateKeyBarItems } from "./keyBar.ts";
 import { SHARED_SETTING_KEYS } from "../../shared/preferences.ts";
-import { NOTICE_VERSION, telemetrySettings } from "../../shared/telemetry.ts";
+import { NOTICE_VERSION, TELEMETRY_SETTINGS_KEYS, telemetrySettings } from "../../shared/telemetry.ts";
 import { SETTING_SCOPE, telemetrySettingsSnapshot, alertPrefs, CHAT_FONT_MAX, CHAT_FONT_MIN, CHAT_LANE_MAX_REM, CHAT_LANE_MIN, CHAT_WIDTHS, chatFontSize, chatLaneLength, chatLaneWidth, DEFAULT_SETTINGS, MARKDOWN_WIDTHS, QUICK_REPLIES_MAX, QUICK_REPLY_MAX_CHARS, quickReplyButtons, sanitizeSettings, terminalTheme, forgetPaneViews, DICTATION_LANGUAGES, VOICE_BUTTONS, wantsVoiceInput } from "./settings.ts";
 
 it("keeps a tab's pane while out of use until this device turns the pause on", () => {
@@ -13,13 +13,6 @@ it("keeps a tab's pane while out of use until this device turns the pause on", (
   expect(sanitizeSettings({}).releasePaneAway).toBe(false);
   expect(sanitizeSettings({ releasePaneAway: true }).releasePaneAway).toBe(true);
   expect(sanitizeSettings({ releasePaneAway: "true" }).releasePaneAway).toBe(false);
-});
-
-it("shrinks a narrow split pane's font until this device turns it off", () => {
-  expect(DEFAULT_SETTINGS.narrowPaneFont).toBe(true);
-  expect(sanitizeSettings({}).narrowPaneFont).toBe(true);
-  expect(sanitizeSettings({ narrowPaneFont: false }).narrowPaneFont).toBe(false);
-  expect(sanitizeSettings({ narrowPaneFont: "false" }).narrowPaneFont).toBe(true);
 });
 
 it("keeps the screen wake lock off until this device explicitly enables it", () => {
@@ -36,52 +29,11 @@ it("keeps the screen wake lock off until this device explicitly enables it", () 
   expect(sanitizeSettings({ terminalWheelSpeed: "3" }).terminalWheelSpeed).toBe(1);
 });
 
-it("takes twenty files from one paste, pick or drop unless this device chose another whole number from 1 to 50", () => {
-  expect(sanitizeSettings({}).attachLimit).toBe(20);
-  expect(sanitizeSettings({ attachLimit: 4 }).attachLimit).toBe(4);
-  expect(sanitizeSettings({ attachLimit: 7.4 }).attachLimit).toBe(7);
-  expect(sanitizeSettings({ attachLimit: 500 }).attachLimit).toBe(50);
-  expect(sanitizeSettings({ attachLimit: 0 }).attachLimit).toBe(1);
-  expect(sanitizeSettings({ attachLimit: "8" }).attachLimit).toBe(20);
-  expect(SETTING_SCOPE.attachLimit).toBe("device");
-});
-
-it("keeps the terminal cursor at a block that blinks unless a saved shape or blink says otherwise", () => {
-  expect(DEFAULT_SETTINGS.terminalCursorStyle).toBe("block");
-  expect(DEFAULT_SETTINGS.terminalCursorBlink).toBe(true);
-  expect(sanitizeSettings({}).terminalCursorStyle).toBe("block");
-  expect(sanitizeSettings({}).terminalCursorBlink).toBe(true);
-  expect(sanitizeSettings({ terminalCursorStyle: "bar" }).terminalCursorStyle).toBe("bar");
-  expect(sanitizeSettings({ terminalCursorStyle: "underline" }).terminalCursorStyle).toBe("underline");
-  // a value no shape answers for falls back, never breaking the UI on a stale or hand-edited record
-  expect(sanitizeSettings({ terminalCursorStyle: "pipe" }).terminalCursorStyle).toBe("block");
-  expect(sanitizeSettings({ terminalCursorBlink: false }).terminalCursorBlink).toBe(false);
-  expect(sanitizeSettings({ terminalCursorBlink: "false" }).terminalCursorBlink).toBe(true);
-});
-
 it("keeps sidebar rows on two lines unless one line was chosen", () => {
   expect(sanitizeSettings({}).sidebarRows).toBe("two");
   expect(sanitizeSettings({ sidebarRows: "one" }).sidebarRows).toBe("one");
   for (const sidebarRows of [null, true, "three", 2]) {
     expect(sanitizeSettings({ sidebarRows }).sidebarRows).toBe("two");
-  }
-});
-
-it("draws workspace cards in the Agents list only when they were turned on", () => {
-  expect(DEFAULT_SETTINGS.agentCards).toBe(false);
-  expect(sanitizeSettings({}).agentCards).toBe(false);
-  expect(sanitizeSettings({ agentCards: true }).agentCards).toBe(true);
-  for (const agentCards of [null, "true", 1]) {
-    expect(sanitizeSettings({ agentCards }).agentCards).toBe(false);
-  }
-});
-
-it("shows the Agents list's pin stars only when they were turned on", () => {
-  expect(DEFAULT_SETTINGS.agentPins).toBe(false);
-  expect(sanitizeSettings({}).agentPins).toBe(false);
-  expect(sanitizeSettings({ agentPins: true }).agentPins).toBe(true);
-  for (const agentPins of [null, "true", 1]) {
-    expect(sanitizeSettings({ agentPins }).agentPins).toBe(false);
   }
 });
 
@@ -103,10 +55,9 @@ describe("telemetry settings snapshot", () => {
       sidebarRows: "one",
       agentOrder: "activity",
       agentMarks: "mono",
-      palette: "forest",
+      statusIndicators: "symbols",
+      palette: "catppuccin",
       terminalFontSize: 22,
-      terminalCursorStyle: "underline",
-      terminalCursorBlink: false,
       terminalWheelSpeed: 10,
       chatFontSize: 11,
       chatWidth: "wide",
@@ -120,6 +71,10 @@ describe("telemetry settings snapshot", () => {
       voiceLanguage: "ko-KR",
       wrapCode: true,
       markdownWidth: "full",
+      paletteLight: "charcoal",
+      paletteDark: "amber",
+      uiFontSize: 18,
+      diffStyle: "split",
     });
     const snapshot = telemetrySettingsSnapshot(settings);
 
@@ -131,10 +86,9 @@ describe("telemetry settings snapshot", () => {
       sidebarRows: "one",
       agentOrder: "activity",
       agentMarks: "mono",
-      palette: "forest",
+      statusIndicators: "symbols",
+      palette: "catppuccin",
       terminalFontSize: 22,
-      terminalCursorStyle: "underline",
-      terminalCursorBlink: false,
       terminalWheelSpeed: 10,
       chatFontSize: 11,
       chatWidth: "wide",
@@ -148,9 +102,14 @@ describe("telemetry settings snapshot", () => {
       voiceLanguage: "ko-KR",
       wrapCode: true,
       markdownWidth: "full",
+      paletteLight: "charcoal",
+      paletteDark: "amber",
+      uiFontSize: 18,
+      diffStyle: "split",
     });
     expect(telemetrySettings(snapshot)).toEqual(snapshot);
     expect(telemetrySettingsSnapshot(DEFAULT_SETTINGS)).toMatchObject({
+      statusIndicators: "classic",
       terminalFontCustom: false,
       chatFontCustom: false,
       shortcutsCustom: false,
@@ -158,6 +117,7 @@ describe("telemetry settings snapshot", () => {
       quickRepliesCustom: false,
       quickReplyCount: DEFAULT_SETTINGS.quickReplies.length,
       usageHiddenCount: 0,
+      usageOrderCustom: false,
     });
   });
 
@@ -183,6 +143,7 @@ describe("telemetry settings snapshot", () => {
       quickRepliesCustom: true,
       quickReplyCount: 1,
       usageHiddenCount: 1,
+      usageOrderCustom: true,
     });
     for (const key of ["keyBarExtras", "keyBarItems", "shortcutOverrides", "terminalFontFamily", "chatFontFamily", "quickReplies", "usageOrder", "usageHidden"]) {
       expect(snapshot).not.toHaveProperty(key);
@@ -190,6 +151,28 @@ describe("telemetry settings snapshot", () => {
     for (const raw of ["private-terminal-font", "private-chat-font", "private quick reply", "private-order-account-id", "private-hidden-account-id"]) {
       expect(serialized).not.toContain(raw);
     }
+  });
+
+  it("reports every status indicator choice in a valid snapshot", () => {
+    for (const statusIndicators of ["classic", "dots", "symbols"] as const) {
+      const settings = sanitizeSettings({ statusIndicators });
+      const snapshot = telemetrySettingsSnapshot(settings);
+
+      expect(snapshot.statusIndicators).toBe(statusIndicators);
+      expect(telemetrySettings(snapshot)).toEqual(snapshot);
+    }
+  });
+
+  // The Worker refuses a whole snapshot over one key it does not know, and an older deployed
+  // Worker refuses a key added since: a new setting is sent only once the Worker takes it.
+  it("sends exactly the keys the Worker accepts", () => {
+    const sent = Object.keys(telemetrySettingsSnapshot(DEFAULT_SETTINGS));
+    expect([
+      ...sent.filter((key) => !(TELEMETRY_SETTINGS_KEYS as string[]).includes(key)).map((key) =>
+        `${key}: the app sends it and the Worker refuses the whole snapshot. Add it to TelemetrySettings and TELEMETRY_SETTINGS_VALIDATORS in shared/telemetry.ts and to the full snapshot in telemetry/worker.test.ts, then deploy the Worker before releasing (telemetry/README.md).`),
+      ...TELEMETRY_SETTINGS_KEYS.filter((key) => !sent.includes(key)).map((key) =>
+        `${key}: the Worker requires it and telemetrySettingsSnapshot in src/lib/settings.ts does not send it. Send it, or remove it from shared/telemetry.ts and deploy the Worker before releasing.`),
+    ]).toEqual([]);
   });
 
   it("requires a complete, valid schema and reconstructs a clean own-key snapshot", () => {
@@ -523,15 +506,6 @@ describe("microphone button", () => {
   });
 });
 
-describe("suggestion chip", () => {
-  it("stays on until turned off in settings", () => {
-    expect(DEFAULT_SETTINGS.showSuggestionChip).toBe(true);
-    expect(sanitizeSettings({}).showSuggestionChip).toBe(true);
-    expect(sanitizeSettings({ showSuggestionChip: false }).showSuggestionChip).toBe(false);
-    expect(sanitizeSettings({ showSuggestionChip: "no" }).showSuggestionChip).toBe(true);
-  });
-});
-
 describe("quick replies row", () => {
   it("stays hidden until chosen in settings", () => {
     expect(DEFAULT_SETTINGS.showQuickReplies).toBe(false);
@@ -541,10 +515,6 @@ describe("quick replies row", () => {
     expect(sanitizeSettings({ showUsage: true }).showUsage).toBe(true);
     expect(sanitizeSettings({ showUsage: 1 }).showUsage).toBe(false);
     expect(DEFAULT_SETTINGS.usageCount).toBe("used");
-    // the pace is shown only once chosen
-    expect(DEFAULT_SETTINGS.usagePace).toBe(false);
-    expect(sanitizeSettings({ usagePace: true }).usagePace).toBe(true);
-    expect(sanitizeSettings({ usagePace: "yes" }).usagePace).toBe(false);
     expect(sanitizeSettings({ usageCount: "left" }).usageCount).toBe("left");
     expect(sanitizeSettings({ usageCount: "half" }).usageCount).toBe("used");
     expect(DEFAULT_SETTINGS.usageGlance).toBe("week");
@@ -556,24 +526,32 @@ describe("quick replies row", () => {
   });
 });
 
+describe("language", () => {
+  it("keeps a listed language and loads a removed one (Turkish) as System", () => {
+    expect(sanitizeSettings({ language: "ko" }).language).toBe("ko");
+    expect(sanitizeSettings({ language: "tr" }).language).toBe("system");
+  });
+});
+
 describe("palette", () => {
   it("defaults to amber, the look before this setting, and keeps only a known palette", () => {
     expect(DEFAULT_SETTINGS.palette).toBe("amber");
     // settings stored before palettes existed carry no palette key
     expect(sanitizeSettings({ theme: "light" }).palette).toBe("amber");
-    expect(sanitizeSettings({ palette: "report" }).palette).toBe("report");
     expect(sanitizeSettings({ palette: "charcoal" }).palette).toBe("charcoal");
     expect(sanitizeSettings({ palette: "catppuccin" }).palette).toBe("catppuccin");
-    expect(sanitizeSettings({ palette: "lilac" }).palette).toBe("lilac");
-    expect(sanitizeSettings({ palette: "forest" }).palette).toBe("forest");
     expect(sanitizeSettings({ palette: "pink" }).palette).toBe("amber");
   });
 
-  it("preserves Forest through a saved settings round-trip and unrelated edits", () => {
-    const saved = sanitizeSettings({ palette: "forest", theme: "dark" });
+  it("loads a removed palette (report, lilac, forest) as amber", () => {
+    for (const removed of ["report", "lilac", "forest"]) expect(sanitizeSettings({ palette: removed }).palette).toBe("amber");
+  });
+
+  it("preserves Catppuccin through a saved settings round-trip and unrelated edits", () => {
+    const saved = sanitizeSettings({ palette: "catppuccin", theme: "dark" });
     const reloaded = sanitizeSettings(JSON.parse(JSON.stringify(saved)));
-    expect(reloaded.palette).toBe("forest");
-    expect(sanitizeSettings({ ...reloaded, theme: "light" }).palette).toBe("forest");
+    expect(reloaded.palette).toBe("catppuccin");
+    expect(sanitizeSettings({ ...reloaded, theme: "light" }).palette).toBe("catppuccin");
   });
 
   const css = readFileSync(join(import.meta.dir, "..", "styles.css"), "utf8");
@@ -582,21 +560,14 @@ describe("palette", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     return css.slice(start, css.indexOf("}", start));
   };
-  const paper = '[data-theme="light"]:is([data-palette="report"], [data-palette="charcoal"])';
   // each case lists its blocks from the most specific to the base; the first one naming a token wins
   const cases = [
     { theme: "dark", palette: "amber", layers: [":root"] },
     { theme: "light", palette: "amber", layers: ['[data-theme="light"]', ":root"] },
-    { theme: "dark", palette: "report", layers: ['[data-theme="dark"][data-palette="report"]', ":root"] },
-    { theme: "light", palette: "report", layers: [paper, '[data-theme="light"]', ":root"] },
     { theme: "dark", palette: "charcoal", layers: ['[data-theme="dark"][data-palette="charcoal"]', ":root"] },
-    { theme: "light", palette: "charcoal", layers: ['[data-theme="light"][data-palette="charcoal"]', paper, '[data-theme="light"]', ":root"] },
+    { theme: "light", palette: "charcoal", layers: ['[data-theme="light"][data-palette="charcoal"]', '[data-theme="light"]', ":root"] },
     { theme: "dark", palette: "catppuccin", layers: ['[data-theme="dark"][data-palette="catppuccin"]', ":root"] },
     { theme: "light", palette: "catppuccin", layers: ['[data-theme="light"][data-palette="catppuccin"]', '[data-theme="light"]', ":root"] },
-    { theme: "dark", palette: "lilac", layers: ['[data-theme="dark"][data-palette="lilac"]', ":root"] },
-    { theme: "light", palette: "lilac", layers: ['[data-theme="light"][data-palette="lilac"]', '[data-theme="light"]', ":root"] },
-    { theme: "dark", palette: "forest", layers: ['[data-theme="dark"][data-palette="forest"]', ":root"] },
-    { theme: "light", palette: "forest", layers: ['[data-theme="light"][data-palette="forest"]', '[data-theme="light"]', ":root"] },
   ] as const;
   const tokens = (layers: readonly string[]) => (name: string): string =>
     layers.map((selector) => block(selector).match(new RegExp(`--${name}: ([^;]+);`))?.[1]).find((value) => value !== undefined)!;
@@ -707,13 +678,6 @@ describe("default lens", () => {
   });
 });
 
-it("highlights code unless turned off, and keeps a stored choice only when it is a boolean", () => {
-  expect(DEFAULT_SETTINGS.highlightCode).toBe(true);
-  expect(sanitizeSettings({ highlightCode: false }).highlightCode).toBe(false);
-  expect(sanitizeSettings({ highlightCode: "no" }).highlightCode).toBe(true);
-  expect(sanitizeSettings({}).highlightCode).toBe(true);
-});
-
 it("keeps the file viewer's wrap setting only when it is a boolean", () => {
   expect(DEFAULT_SETTINGS.wrapCode).toBe(false);
   expect(sanitizeSettings({ wrapCode: true }).wrapCode).toBe(true);
@@ -726,32 +690,10 @@ it("keeps the Markdown preview's width to readable or full, readable by default"
   for (const bad of ["narrow", "medium", "wide", "", null, 80]) expect(sanitizeSettings({ markdownWidth: bad }).markdownWidth).toBe("readable");
 });
 
-it("keeps page overlap whole, bounded and persistent, including full-viewport paging", () => {
-  expect(DEFAULT_SETTINGS.pageOverlapRows).toBe(1);
-  expect(sanitizeSettings({}).pageOverlapRows).toBe(1);
-  expect(sanitizeSettings({ pageOverlapRows: 0 }).pageOverlapRows).toBe(0);
-  expect(sanitizeSettings({ pageOverlapRows: 3.6 }).pageOverlapRows).toBe(4);
-  expect(sanitizeSettings({ pageOverlapRows: -8 }).pageOverlapRows).toBe(0);
-  expect(sanitizeSettings({ pageOverlapRows: 101 }).pageOverlapRows).toBe(100);
-  for (const value of ["3", null, true, NaN, Infinity]) expect(sanitizeSettings({ pageOverlapRows: value }).pageOverlapRows).toBe(1);
-  const saved = sanitizeSettings({ ...DEFAULT_SETTINGS, pageOverlapRows: 3 });
-  expect(sanitizeSettings(JSON.parse(JSON.stringify(saved))).pageOverlapRows).toBe(3);
-});
-
 describe("shared settings", () => {
   it("shares exactly the settings SETTING_SCOPE marks shared", () => {
     const shared = Object.entries(SETTING_SCOPE).filter(([, scope]) => scope === "shared").map(([key]) => key).sort();
     expect([...SHARED_SETTING_KEYS].sort() as string[]).toEqual(shared);
     expect(Object.keys(SETTING_SCOPE).sort()).toEqual(Object.keys(DEFAULT_SETTINGS).sort());
   });
-});
-
-it("keeps plain chat paging opt-in and saves the keyboard choice on this device", () => {
-  expect(DEFAULT_SETTINGS.chatPageKeys).toBe(false);
-  expect(SETTING_SCOPE.chatPageKeys).toBe("device");
-  expect(SETTING_SCOPE.pageOverlapRows).toBe("device");
-  for (const chatPageKeys of [true, false]) {
-    expect(sanitizeSettings(JSON.parse(JSON.stringify(sanitizeSettings({ chatPageKeys })))).chatPageKeys).toBe(chatPageKeys);
-  }
-  for (const chatPageKeys of [null, "true", 1]) expect(sanitizeSettings({ chatPageKeys }).chatPageKeys).toBe(false);
 });

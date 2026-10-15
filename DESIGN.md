@@ -12,7 +12,7 @@ chrome color, amber: focus, the chosen lens, the terminal cursor and the user's 
 buttons). Agent states carry the remaining saturated colors and none of them is amber. The user's
 chat turns are neutral raised cards, so a long thread never turns into a wall of color. Dark is the
 default, light follows the same hierarchy, and comfortable or compact density changes scale without
-changing information architecture. A dark report look, a neutral charcoal one, Catppuccin, lilac and forest are
+changing information architecture. A neutral charcoal look and Catppuccin are
 opt-in palettes (Settings → Appearance → Colors); amber stays the default and the look before settings load.
 
 The sidebar is one grid: a leading cell that says who or what a row is (the coding agent's brand
@@ -56,6 +56,11 @@ Only tokens overridden by `[data-theme="light"]` have a light value. Both column
 | Working/tint | `--status-working-tint` | `rgba(108, 184, 214, 0.14)` | `rgba(21, 90, 114, 0.12)` |
 | Blocked/tint | `--status-blocked-tint` | `rgba(255, 123, 112, 0.14)` | `rgba(168, 35, 35, 0.12)` |
 | Done/tint | `--status-done-tint` | `rgba(147, 195, 107, 0.14)` | `rgba(47, 99, 23, 0.12)` |
+| Indicator/working | `--indicator-working` | `#f9e2af` | `#df8e1d` |
+| Indicator/blocked | `--indicator-blocked` | `#f38ba8` | `#d20f39` |
+| Indicator/done | `--indicator-done` | `#94e2d5` | `#179299` |
+| Indicator/idle | `--indicator-idle` | `#a6e3a1` | `#40a02b` |
+| Indicator/unknown | `--indicator-unknown` | `#6c7086` | `#9ca0b0` |
 | Danger/tint | `--danger-tint` | `rgba(255, 123, 112, 0.12)` | `rgba(168, 35, 35, 0.1)` |
 | Danger/text | `--danger-text` | `#ffd9d4` | `#8f1d1d` |
 | Notice | `--notice` | `#e8c55c` | `#7a5a00` |
@@ -74,28 +79,21 @@ paper, not UI, and the viewer (`.file-viewer-pdf`) must not tint it for the them
 
 ### Opt-in palettes
 
-`settings.palette` (`amber` default, `report`, `charcoal`, `catppuccin`, `lilac`, `forest`) is written as `data-palette`. The
-tables above are amber, the base blocks; the five opt-in palettes override them in
+`settings.palette` (`amber` default, `charcoal`, `catppuccin`) is written as `data-palette`. The
+tables above are amber, the base blocks; the two opt-in palettes override them in
 `[data-theme][data-palette]` blocks of `src/styles.css`, which hold the complete values.
 
 `--bubble-border` is the edge of the chat's user bubble. It is `transparent` where `--bg-elevated`
-alone parts the bubble from `--bg`: dark amber, dark report, dark charcoal, dark lilac and dark forest. It is `var(--border)`
+alone parts the bubble from `--bg`: dark amber and dark charcoal. It is `var(--border)`
 where the two surfaces sit close: every light theme (the `[data-theme="light"]` block sets it for
 all palettes) and dark Catppuccin, whose elevated surface is darker than its canvas.
 
-- **Dark report** is a near-black blue-grey canvas with hairlines: `--bg` `#0a0d12`, panel and
-  terminal `#0f1319`, text `#b4bdc9` / `#8792a3` / `#e8ecf2`. Primary (the user's action) is white
-  `#e8ecf2` with `#0a0d12` text; accent is electric blue `#4c9aff`, kept for small marks. Agent
-  states use meaning colors (working `#f5b544`, input `#ff6b7a`, done `#3ddc97`, idle `#8792a3`).
-  Terminal cursor `#4c9aff`, selection `#1f3a66`. It has near-square corners (`--radius-sm/md/lg/xl/2xl`
-  = `2/3/3/4/6px`) and no resting card shadow (`--shadow-card: none`).
 - **Charcoal** is a neutral Ghostty-style dark: `--bg` `#0f0f0f`, panel and terminal `#171717`, text
   `#cbc7c0` / `#918c85` / `#f5f2ec`, accent and primary near-white `#e8e4dc` with `#171717` text,
   muted states (working `#c2a2af`, input `#e0877f`, done `#a7b789`, idle `#9a958e`), terminal cursor
   `#cbc7c0`, selection `#49443d`. It keeps amber's rounded corners and card shadow.
-- In light both use plain paper (`--bg` `#f2f2f0`, panel `#fafaf9`, text `#242424`, primary ink
-  `#242424` with `#fafaf9` text): report with a blue `#1f5fcc` accent and cursor, charcoal with an
-  ink accent and cursor `#242424`.
+  In light it is plain paper (`--bg` `#f2f2f0`, panel `#fafaf9`, text `#242424`, primary ink
+  `#242424` with `#fafaf9` text) with an ink accent and cursor `#242424`, selection `#dedad3`.
 - **Catppuccin** follows [catppuccin.com/palette](https://catppuccin.com/palette/), its style guide
   and its Zed port: Mocha in dark, Latte in light. In both the content (chat canvas `--bg`,
   terminal) is Base, the chrome (`--bg-panel`: sidebar, the header over it and on a phone, tabs) and elevated surfaces Mantle,
@@ -109,31 +107,6 @@ all palettes) and dark Catppuccin, whose elevated surface is darker than its can
   `#d2d4dc`. Latte's accents are under 4.5:1 on these surfaces, so each keeps its hue and is darkened
   until it passes AA: Mauve `#712fc6` (primary hover is plain Latte Mauve `#8839ef`), Blue `#1750bf`,
   Red `#ac0c2f`, Green `#28651b`. It keeps amber's rounded corners.
-- **Lilac** is one quiet lavender, flat on every surface (no gradient, no translucency). Light is
-  the look it was drawn for: a pale lavender canvas `--bg` `#f0eefc` under paler chrome `--bg-panel`
-  `#f6f5fe` (elevated `#fbfaff`, hover `#e8e5f8`, input `#fdfcff`), indigo ink (text `#2b2d4d` /
-  `#545779` / `#17193a`), and an indigo accent and primary `#4a42c2` with white text. States are
-  darkened until their badges pass AA on a hovered row: working `#1f4aa6`, input `#9c2044`, done
-  `#1f5c39`, idle `#545779`. Terminal `#f8f7fe`, cursor `#4a42c2`, selection `#dcd7f8`. Dark is the
-  same hue at night: canvas `#16152b`, chrome `#1c1b34` (elevated `#23223f`, hover `#2c2a4f`), text
-  `#dcdaf4` / `#a5a2cc` / `#f2f1ff`, a pale lilac accent and primary `#b3abff` with `#17163a` text,
-  states working `#85b8ff`, input `#ff94ad`, done `#92d9ab`, terminal `#18172f`, selection
-  `#3a3768`. It keeps amber's rounded corners and card shadow, tinted indigo in light.
-
-- **Forest** is a low-saturation green-grey, flat on every surface, meant to be restful over a long
-  session (a preference, not a medical claim). In dark the canvas `--bg` `#101a16` sits under
-  chrome `--bg-panel` `#16231d` (elevated `#1d2d25`, hover `#263b30`, input `#132019`), borders `#2d4437` / `#3d5b49`, text `#d4e5d8` / `#9ab9a3` / `#edf7ef`, a pale green
-  accent and primary `#8fd3a2` (hover `#a7dfb5`) with `#102016` text. States keep hues of their
-  own: working `#79c7d4`, input `#ffa294`, done `#91d69a`, idle `#9ab9a3`; danger text `#ffd7d0`,
-  scrim `rgba(6, 14, 10, 0.6)`. Terminal `#16231d`, cursor `#8fd3a2`, selection `#31513e`. Light is
-  the same hue by day: canvas `#eaf2ed`, chrome `#f7fbf8` (elevated `#edf5ef`, hover `#e1eee5`,
-  input `#ffffff`), borders `#c9ddd0` / `#a7c3b2`, ink `#20352a` / `#4f6d5a` / `#15291e`, a green
-  accent `#2c7648` (darkened until it is AA on a hovered row) and primary `#397f50` (hover
-  `#2f6e44`) with white text, states working `#166578`, input `#a02b20`, done `#225f32`, idle
-  `#4f6d5a`, danger text `#9d3022`, scrim `rgba(24, 52, 35, 0.35)` and shadows tinted the same
-  green. Terminal `#f7fbf8`, cursor `#2c7648`, selection `#cfe5d5`. Tints are these colors at a
-  low alpha (0.1–0.16). It keeps amber's rounded corners and card shadow, and has syntax colors
-  of its own (below).
 
 ### Terminal theme
 
@@ -152,21 +125,17 @@ CSS tokens verbatim for each resolved theme and palette (`settings.test.ts` chec
 Code in the chat and in the file viewer is colored by `--syntax-*` tokens. Four follow the
 palette: `--syntax-comment` is `--text-dim`, `--syntax-function` is `--accent`,
 `--syntax-inserted` is `--status-done` and `--syntax-deleted` is `--status-blocked`. The other six are literals per block
-(each at least 4.5:1 on `--bg-panel` and `--bg-elevated`); light charcoal uses the light report
-column. Catppuccin follows Catppuccin's own mapping: keywords are mauve, so `--syntax-function` is
+(each at least 4.5:1 on `--bg-panel` and `--bg-elevated`). Catppuccin follows Catppuccin's own mapping: keywords are mauve, so `--syntax-function` is
 blue there instead of `--accent`, and Latte's colors are darkened to stay readable.
 
 | Block | keyword | string | number | type | variable | meta |
 |-------|---------|--------|--------|------|----------|------|
 | Dark amber | `#e8875f` | `#a8c17c` | `#d6a0c9` | `#6cb8d6` | `#e0c08f` | `#b49dd6` |
 | Light amber | `#a33a17` | `#4b6b18` | `#8a3f7a` | `#155a72` | `#7a5418` | `#5d4791` |
-| Dark report | `#f78c6c` | `#3ddc97` | `#f5b544` | `#7fd4ff` | `#c9d1dc` | `#b392f0` |
-| Light report and charcoal | `#b3261e` | `#22743a` | `#8a5300` | `#0b6e8a` | `#3b3b3b` | `#6f42c1` |
+| Light charcoal | `#b3261e` | `#22743a` | `#8a5300` | `#0b6e8a` | `#3b3b3b` | `#6f42c1` |
 | Dark charcoal | `#d7a08a` | `#a7b789` | `#c2a2af` | `#9fb4c2` | `#dcd8d0` | `#b8a5c9` |
 | Catppuccin Mocha | `#cba6f7` | `#a6e3a1` | `#fab387` | `#f9e2af` | `#f5e0dc` | `#f5c2e7` |
 | Catppuccin Latte | `#712fc6` | `#2f7620` | `#b44201` | `#905c13` | `#4c4f69` | `#bc1d91` |
-| Dark forest | `#e6a96d` | `#91d69a` | `#d2b18a` | `#79c7d4` | `#d4e5d8` | `#c2a0d8` |
-| Light forest | `#9c4f15` | `#225f32` | `#865d13` | `#166578` | `#20352a` | `#68489c` |
 
 `--syntax-function` in Catppuccin: Mocha `#89b4fa`, Latte `#0b59f4`.
 
@@ -175,8 +144,8 @@ blue there instead of `--accent`, and Latte's colors are darkened to stay readab
 - `--notice` colors a note that the view is partial (a file cut short, code too long to color): the
   size in the header's meta line becomes `256 KB of 1.3 MB`, always beside a warning icon so the
   color is not the only sign. It is a warning yellow, at least 4.5:1 on
-  `--bg`, `--bg-panel` and `--bg-elevated`: amber `#e8c55c` / `#7a5a00`, dark report `#f5b544`, light
-  report and charcoal `#8a5300`, dark charcoal `#d9b26a`, Catppuccin Mocha `#f9e2af` (yellow), Latte
+  `--bg`, `--bg-panel` and `--bg-elevated`: amber `#e8c55c` / `#7a5a00`, light
+  charcoal `#8a5300`, dark charcoal `#d9b26a`, Catppuccin Mocha `#f9e2af` (yellow), Latte
   `#8a5710`.
 - `--line-number` colors the line numbers beside code: tertiary text, quieter than the code. It is
   `--text-dim`, except in Catppuccin, whose `--text-dim` (subtext1) is nearly `--text`: Mocha
@@ -185,9 +154,7 @@ blue there instead of `--accent`, and Latte's colors are darkened to stay readab
 ### Rules
 - Amber is the one chrome color. Accent (selected, focused, informational) and primary (the user's
   action: Send, primary buttons) are both amber; in light, accent is the darker text-safe ochre and
-  primary the brighter fill carrying ink text. Agent states never use amber. The report palette
-  keeps the same split, accent (blue) marks and primary (white, or ink on paper) acts, and there
-  agent states never use blue.
+  primary the brighter fill carrying ink text. Agent states never use amber.
 - Agent state has a written label as well as color. The sidebar's compact glyphs keep their labels
   in tooltips and screen-reader text; other surfaces draw the words. In the sidebar ready and
   unknown draw no glyph and keep their label for assistive tech; elsewhere unknown uses dim text
@@ -200,21 +167,27 @@ blue there instead of `--accent`, and Latte's colors are darkened to stay readab
 
 ### Scale
 
+The values are the ones in `src/styles.css`. Every token but `--fs-input` is `calc(<size> * var(--ui-scale))`:
+`--ui-scale` is the interface size factor, which Settings → Appearance → Interface font size writes on
+`<html>` (the chosen body size over the density's, `1` until chosen), so the whole scale follows it, while
+`--fs-input` stays the floor under which iOS Safari zooms a focused field.
+
 | Level | Token | Comfortable | Compact | Typical use |
 |-------|-------|-------------|---------|-------------|
-| Micro | `--fs-2xs` | `11px` | `10px` | Badges, hints, kbd |
-| Meta | `--fs-xs` | `12px` | `11px` | Subtitles, field labels |
-| Small | `--fs-sm` | `13px` | `12px` | Controls, row titles |
-| Body | `--fs-md` | `14px` | `13px` | Body and dialog copy |
-| Reading | `--fs-chat` | `15px` | `14px` | Chat prose, the user's bubble, live narration; the message box with a mouse |
-| Large | `--fs-lg` | `16px` | `15px` | Header title, modal title |
-| Title | `--fs-xl` | `18px` | `17px` | Markdown h1 |
-| Display | `--fs-display` | `22px` | `21px` | The empty chat's greeting |
+| Micro | `--fs-2xs` | `calc(11px * var(--ui-scale))` | `calc(10px * var(--ui-scale))` | Badges, hints, kbd |
+| Meta | `--fs-xs` | `calc(12px * var(--ui-scale))` | `calc(11px * var(--ui-scale))` | Subtitles, field labels |
+| Small | `--fs-sm` | `calc(13px * var(--ui-scale))` | `calc(12px * var(--ui-scale))` | Controls, row titles |
+| Body | `--fs-md` | `calc(14px * var(--ui-scale))` | `calc(13px * var(--ui-scale))` | Body and dialog copy |
+| Reading | `--fs-chat` | `calc(15px * var(--ui-scale))` | `calc(14px * var(--ui-scale))` | Chat prose, the user's bubble, live narration; the message box with a mouse |
+| Large | `--fs-lg` | `calc(16px * var(--ui-scale))` | `calc(15px * var(--ui-scale))` | Header title, modal title |
+| Title | `--fs-xl` | `calc(18px * var(--ui-scale))` | `calc(17px * var(--ui-scale))` | Markdown h1 |
+| Display | `--fs-display` | `calc(22px * var(--ui-scale))` | `calc(21px * var(--ui-scale))` | The empty chat's greeting |
 | Input | `--fs-input` | `16px` | `16px` | Mobile-safe text input |
-| Pairing | `--fs-pairing` | `32px` | `26px` | The pairing code in Settings → Devices |
+| Pairing | `--fs-pairing` | `calc(32px * var(--ui-scale))` | `calc(26px * var(--ui-scale))` | The pairing code in Settings → Devices |
 
 | Token | Value | Usage |
 |-------|-------|-------|
+| `--ui-scale` | `1`; Settings → Appearance → Interface font size over the density's body size, written on `<html>` | Multiplies every `--fs-*` token but `--fs-input` |
 | `--font-ui` | `"Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", "Malgun Gothic", sans-serif` | Chrome and chat prose |
 | `--font-mono` | `"Symbols Nerd Font Mono", "JetBrains Mono Web", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "D2Coding", monospace` | Code, paths, keys, terminal-adjacent metadata |
 | `--lh-tight` | `1.2` | Titles |
@@ -253,10 +226,13 @@ blue there instead of `--accent`, and Latte's colors are darkened to stay readab
   h2 `--fs-lg`, h3 to h6 `--fs-chat`. Work heads, tool rows, settled narration, a compaction's summary and
   meta keep their sizes. The chat scales all of them by `--chat-scale` (`--chat-fs-body` is the scaled
   `--fs-chat`), so the Chat font size setting names the body size and the prose is one step above it.
+  `--chat-scale` is the chat's size over the interface's: unchosen, the chat follows the interface size;
+  chosen, it is drawn as itself whatever the interface size.
 
 ### Settings
 - `theme`: `dark`, `light`, or `system`; default `dark`.
-- `palette`: `amber`, `report`, `charcoal`, `catppuccin`, `lilac` or `forest`; default `amber`.
+- `palette`: `amber`, `charcoal` or `catppuccin`; default `amber`. A removed palette (`report`,
+  `lilac`, `forest`) loads as `amber`.
 - `density`: `comfortable` or `compact`; default `comfortable`.
 - `sidebarRows`: `one` or `two`; default `two`.
 - Terminal font size is independent: default `13px`, clamped to `10–22px`.
@@ -264,30 +240,60 @@ blue there instead of `--accent`, and Latte's colors are darkened to stay readab
   size in pixels; the grid refits locally and the shared pty resizes once when a finger lifts.
   Cancellation restores the starting size.
 - A split pane that would have fewer than 80 columns at that size draws in the largest smaller
-  whole-pixel size that gives it 80, never below `10px` (Settings → Terminal → Fit 80 columns in
-  a split pane, on by default). A pane alone in its tab or zoomed, a pane that `10px` cannot bring
+  whole-pixel size that gives it 80, never below `10px`. A pane alone in its tab or zoomed, a pane that `10px` cannot bring
   to 80 columns, and a pane this browser only watches or mirrors keep the user's size. The saved
   size never changes for this; in such a pane a pinch still saves the size it shows, and the pane
   draws it once it has the room.
+- Interface font size (`uiFontSize`): the body size (`--fs-md`) in px, `11–20px`, `null` follows the
+  density (`14px` comfortable, `13px` compact); it reaches CSS as `--ui-scale` (above). The chat follows
+  it until it has a size of its own; the terminal keeps its own size.
 - Terminal and chat font families are comma-separated lists, default empty. They go in front of the
-  terminal's built-in fonts (after the bundled Symbols Nerd Font Mono, which only draws icons) and of
-  `--font-ui` in the chat's prose (as `--font-chat`), never in place of them; code in the chat keeps
-  `--font-mono`. A file viewer's Markdown preview takes the chat font size and family too.
+  built-in fonts, never in place of them: the terminal's (after the bundled Symbols Nerd Font Mono,
+  which only draws icons) and `--font-ui` in the chat's prose (as `--font-chat`). The interface keeps
+  `--font-ui` and code keeps `--font-mono`. A file
+  viewer's Markdown preview takes the chat font size and family too.
   At most 200 characters, with `;`, `{`, `}`, `<`,
   `>`, `\` and control characters stripped and names with spaces quoted.
 - Composer Enter behavior and folded thinking visibility are preferences, not typography tokens.
-- `highlightCode` colors code in the chat and the file viewer by its language (default on; off
-  shows plain text).
-- File viewer: `wrapCode` (wrap long lines instead of scrolling sideways; default off) and
-  `markdownWidth`: `readable` (the chat lane, `--chat-w`, centered; default) or `full`.
-  These layout choices stay on this device, like chat width; code highlighting is shared across browsers.
-  The viewer loads the first 256 KB of a text file through one bounded streaming reader, with abort
-  on close or navigation and a 5 s fetch deadline. Partial text ends at the last whole line when
-  one exists; the response's Content-Range supplies the total, and an empty 416 opens empty.
-  A Markdown file its Preview cannot
-  be parsed for within 2 s, or whose Preview would draw over 60 000 elements, opens as its source
-  with a notice; code a worker cannot highlight within 2 s stays plain with one, and code of over
-  20 000 lines is one text without line numbers, with one too.
+- File viewer: `wrapCode` (wrap long lines instead of scrolling sideways; default off),
+  `markdownWidth`: `readable` (the chat lane, `--chat-w`, centered; default) or `full`, and
+  `diffStyle`: `unified` (default) or `split` for a repository diff (a phone draws one column
+  whatever it says, and the viewer says so).
+  These layout choices stay on this device, like chat width.
+  The viewer loads a Markdown file's first 256 KB through one bounded streaming reader, with abort
+  on close or navigation and a 5 s deadline; any other text that fits 256 KB reads whole under the
+  same budget, and a larger one reads up to 8 MB and 200 000 lines with a 30 s deadline
+  (`readBudget`, src/lib/sourcePreview.ts). Partial text ends at the last whole line when one
+  exists; the response's Content-Range supplies the total, and an empty 416 opens empty. A cut is
+  told in the header: by size (`8 MB of 9 MB`) when the bytes ended it, by lines when the cap did.
+  A cut prefix is shown to its last complete line (the reader's line count): the row after its
+  final newline is not drawn, and a reference to the line just past the cap is explained as unseen,
+  never marked. A complete file keeps the empty row after its final newline, its last line.
+  A Markdown file its Preview cannot be parsed for within 2 s, or whose Preview would draw over
+  60 000 elements, opens as its source with a notice. A source of up to 2 000 lines is an element
+  per line, colored on the page or in the app's worker (code a worker cannot highlight within 2 s
+  stays plain with a notice). A longer source is a window of rows from `@pierre/diffs`
+  (`VirtualSource`): the DOM holds a few hundred rows whatever the length, every row is numbered,
+  and the rows take the viewer's tokens inside the package's shadow root (`--bg`, `--text`,
+  `--line-number`, `--accent-tint` and `--accent` for the marked line, `--font-mono` at `--fs-xs` /
+  `--lh-base`), never the package's own code background. Up to 256 KB and 5 000 lines it is
+  colored in the package's worker by a CSS-variable theme mapped to the same `--syntax-*`
+  tokens as small sources and chat; palette changes reach the tokens inside the shadow root.
+  Past that the rows are plain with the
+  "Too long to highlight" notice, since the whole-file highlight measured 55 s and 192 MB for
+  8 MB of JavaScript. The wrap setting applies to the rows; a wrap toggle or a width change keeps
+  the marked line in place when it is in view, else the top line.
+  File links keep `:line[:column]` and `#Lline[-Lline]` references. A reference opens the source,
+  marks and centers its first line with `--accent-tint` and an `--accent` gutter number; columns
+  and range ends do not move the caret. A line past the loaded part or past the end gets an
+  explicit header notice, never a misleading jump. Markdown reader tabs retain the requested line.
+  Copy file copies the loaded text; when the clipboard is out of reach it selects the source
+  `<pre>`, or shows a virtualized source as one readonly text box, selected.
+- Mod+Shift+E focuses the selected pane's existing composer, terminal input line or xterm input,
+  preferring a mounted secret-input field. The callback is synchronous with the hardware key
+  event, scoped to the active, presented pane and its PC; a modal or observe mode blocks it.
+  It sends no text or keys and never takes an attach. The binding follows the existing shortcut
+  customization and Mod+Shift policy.
 - All settings share one sanitized `localStorage["herdr-web-ui:settings"]` record.
 
 ## 4. Spacing & Layout
@@ -340,6 +346,7 @@ Comfortable values are `:root`; the final column is the complete compact overrid
 | `--content-w` | `820px` | — | Settings and dialog content |
 | `--pending-max-h` | `min(20dvh, 12rem)` | — | Pending-message stack ceiling |
 | `--chat-w` | `--content-w`, then the pane's lane as one length | — | Chat lane: transcript, composer column, held list. Settings → Chat width: Narrow `--content-w`; Default follows the pane (min 820px, max `60rem` = 960px, 71% of the pane between; the px floor wins where 60rem is under it); Wide `72rem` (1152px); Full `100%` |
+| `--chat-fold-lines` | `12` | — | Lines of prose a long user message shows before it folds behind Show full message (Chat turn); `lib/userMessageFold.ts` folds a message past the same count |
 | `--palette-w` | `640px` | — | Command palette |
 | `--palette-top` | `12vh` | — | Palette top offset |
 | `--context-line` | `calc(var(--fs-lg) * var(--lh-base))` = `24px` | `21.75px`, through the scale | The selected pane's crumb row, min and max height. Scoped to `.context`, not `:root`, so it follows `--fs-lg`/`--lh-base` in either density |
@@ -419,7 +426,7 @@ One set for both themes: the card is island black wherever it shows.
 - The terminal stack contains a positioned terminal surface, then composer or key bar. The xterm
   mount stays alive under the chat lens; changing views never creates a second connection.
 - At `<=480px` the brand name, the offline pill and desktop-only control labels go, and the
-  palette's button gives its room to the title: the palette is the More menu's first item there.
+  palette's button gives its room to the title (a hardware keyboard still opens it).
   Icons and selected context remain.
 
 ## 5. Components
@@ -477,8 +484,7 @@ One set for both themes: the card is island black wherever it shows.
   under its `⋯` with right edges aligned, above it when the screen ends first, and over the drawer.
   Both the button and right-click offer the same native workspace actions: Rename workspace,
   Close workspace/group, New/Open worktree for repository roots, Delete worktree checkout for
-  linked worktrees, and Expand/Collapse for a group. Pane renaming stays in the pane menu;
-  Move pane to… is in header More. The
+  linked worktrees, and Expand/Collapse for a group. Pane renaming stays in the pane menu. The
   danger item takes `--status-blocked`. The popover is as tall as its items, up to the room on
   its side of the button (it scrolls only on a screen too short for it). At `<=640px` it is a `.modal` bottom sheet (`.row-sheet`):
   a grip, the row's name and place, 48px rows and a Cancel button; Tab stays among them. The
@@ -491,24 +497,22 @@ One set for both themes: the card is island black wherever it shows.
   worktree actions, and Expand/Collapse for a group. Dismissal restores the prior focus. The
   explicit `⋯` uses those same actions at its button. An edited name keeps the browser's paste menu;
   touch long press still reorders. Agents and PC headers keep the browser's context menu.
-  Agent rows only select their pane; they have no secondary action button or app context menu.
+  An agent row selects its pane. Its `⋯` (drawn as a workspace row's is) opens its menu with one
+  item, Pin agent or Unpin agent; a right-click opens the same menu at the pointer and leaves the
+  focus where it was.
+  A desktop (`pointer: fine` wider than 768px, the tab strip's rule) draws no row `⋯`: a
+  right-click or the context-menu key opens the menu, at the pointer or at the row, and dismissal
+  returns the focus where it was.
 
 - Close follows herdr's `ui.confirm_close`: a workspace close, or a pane close that takes its
   workspace with it, asks in a confirm first. A busy pane also asks before it stops. After a
   confirmed close, focus lands on the header's workspace-list toggle.
 - Tab and pane menus follow herdr's target scopes. A tab's menu contains New tab, Rename tab
   and Close tab, plus Move tab left/right when a neighbouring position exists and no move is pending.
-  The pane's own context menu carries pane actions; it opens at the pointer
+  The `⋯` that touch and narrow layouts draw beside the selected tab leaves New tab out (the
+  strip's `+` sits beside it) and also carries the open pane's actions, less Split and Zoom: a
+  phone shows one pane at a time. The pane's own context menu carries pane actions; it opens at the pointer
   without changing which pane is focused. The pane header's ellipsis opens the same menu on touch.
-- **Move pane to…** (header More) opens a menu under the header button
-  (`MovePaneMenu`): a dim uppercase MOVE TO micro label with the pane's name under it
-  (`.move-pane-head`), then New tab and the workspace's other tabs, every other workspace under
-  a hairline, and New workspace under another. A pick moves the pane at once (`POST
-  /api/pane/move`); the app stays on a moved pane that was open, also under the new id herdr
-  gives a pane that changes workspace, and waits for the move's answer before it would read a
-  roster without the pane as the pane gone. A refusal reads as the row's or the strip's inline
-  error, herdr's own too ("Move failed: the tab is zoomed; unzoom it in herdr, then move the
-  pane"): a `changed: false` answer never closes the menu as if the pane had moved.
 
 ### Badge (`.badge`)
 - Agent states read **READY**, **RUN**, **INPUT**, **DONE**; unknown reads **—**. **BG** is a pane
@@ -527,6 +531,13 @@ One set for both themes: the card is island black wherever it shows.
   draws a warning triangle in `--status-blocked`. The element, its label and its tooltip are there
   for every state, and each drawn state has its own glyph as well as its color. Background tasks
   are a quiet count beside it (`.background-count`), not a badge.
+- Settings → Status indicators can trade that default (Classic) for herdr's TUI marks, as its
+  `[ui] status_indicators` draws them, for every state in mono text. Dots: `●` for working,
+  blocked and done, `○` for ready, `·` for unknown. Symbols: `◐` working, `×` blocked, `✓` done,
+  `○` ready, `·` unknown. Their colors are herdr's default theme's, the `--indicator-*` tokens
+  (Catppuccin Mocha, Latte in light): working yellow, blocked red, done teal, ready green, unknown
+  grey. Working breathes as the dot does; BG, which herdr does not have, holds working's glyph still.
+  A tab's mark follows the same choice, held still.
 
 ### Pill (`.pill`)
 - Mono metadata at `--chip-h`. Offline is the one header pill that stays, and uses danger tokens. A deep link that could not open what it named, and Copy link, say so in a plain `.header-note` pill for a moment (8 s, 1.6 s for Link copied). The note takes the flexible context's place and ellipsizes when narrow, keeping the lens and More controls in view.
@@ -593,21 +604,12 @@ One set for both themes: the card is island black wherever it shows.
   authoritative when the agent roster and pane status differ. The workspace and agent lists
   share the existing combined machine roster and its SSE updates; neither adds a status subscription.
   A disconnected PC's saved workspace and agent rows are dimmed, inert and draw no state until that PC reconnects.
-- Appearance's **Workspace cards** is off by default: the Agents list is flat and every row names
-  its own place. On, in the **Workspaces** order the Agents list puts each workspace's agents on a PC in a card,
-  a workspace with one agent included: a `--hairline` `--border` edge with `--radius-lg`, `--space-1`
-  inside and `--space-2` between cards, and no fill, so a row's hover and selection read as they do
-  outside it. The card opens with a `--space-6` line in `--text-dim` `--fs-xs`: a `--space-4`
-  folder in the leading cell, then the workspace's name, after the PC's when two or more PCs are
-  registered (`machine · workspace`). The line is the card's name, not a control. A row in a card
-  leaves the PC and the workspace out of its dim line (`agentContext` with `grouped`); its tooltip
-  still names them, and the card's list is labelled by its head for screen readers. A row in a card
-  with nothing else to say (no live name, no tab of its own) says its kind there, even the one its
-  mark or title already says, rather than leave the line empty. The head of
-  a disconnected PC's card dims with its rows. **Activity** mixes workspaces, so it draws no cards
-  and every row names its own place. Appearance's **Pin agents** is off by
-  default: rows carry no star and saved pins lead nothing. On, pinned agents, when the list has them, sit in their own
-  section above the cards, and a pinned row is not repeated in its workspace's card.
+- The Agents list is flat and every row names its own place. Pinned agents (pinned from a row's
+  menu) stand first, in the order they were pinned, in a card (a `--hairline` `--border` edge,
+  `--radius-lg`, `--space-1` padding, no fill, so hover and selection read inside it as elsewhere),
+  each with a `--space-3` `--accent` pin after its title; the rest follow `--space-2` below in the
+  chosen order. The Agents head is the only head (the pinned list is labelled **Pinned** for screen
+  readers); without pins there is no card. Pins are shared with the other browsers of the server.
 - Appearance's **Sidebar rows** is **Two lines** by default; on **One line** a workspace row is
   its name. Two lines draws the row as the roster did before it was one line, on an agent row's
   height and type: the title of the pane the row opens, and under it in `--text-dim` `--fs-xs` the place,
@@ -620,19 +622,7 @@ One set for both themes: the card is island black wherever it shows.
   workspace, tab and pane order. **Activity** pins a blocked agent on top and orders the rest by
   their most recent state change (herdr's `state_change_seq`, read from the snapshot's `agents`),
   within each PC, so the agent just worked in stays on top while it runs and after it finishes.
-  It changes only the Agents list, which then draws no workspace cards; herdr's order and the
-  workspace rows stay as they are.
-- Appearance's **Quiet opened finishes** is off by default. herdr reports DONE until one of its
-  own clients shows the pane, so an agent opened here would keep its finished dot. On, a DONE
-  opened here (selected while the page is visible) since it finished draws as ready in the
-  Agents list and in its workspace's roll-up. "Opened" is kept per PC in this browser
-  (`herdr-web-ui:seen:<pc>`) and dropped with the PC. The first time it is turned on in a
-  browser, everything open on the connected PCs counts as opened, so the lists start quiet; a PC
-  first seen later starts with nothing opened, so its finishes keep their dots until opened.
-  Storage holds herdr's own counters only, so a page reloaded within the poll window after
-  leaving a finish it watched shows that finish's dot again rather than guess. herdr's counter
-  only goes up within a session, so a look recorded above it is from before a herdr restart and
-  is dropped.
+  It changes only the Agents list; herdr's order and the workspace rows stay as they are.
 - Each workspace row holds its folder (top-level rows), a leading glyph, the name (on two lines,
   the title over the place) and the compact state at the right. The leading glyph is the brand mark of the agent in the pane the row opens; a row that opens a
   shell shows the terminal glyph, and a linked worktree without an agent the branch glyph. The
@@ -646,9 +636,16 @@ One set for both themes: the card is island black wherever it shows.
   where it lands. Alt+Up/Down moves the focused row one step at a time.
   Dragging is disabled while a name field is open. Each workspace's `⋯` opens its row menu
   (`.row-menu-toggle`: no width at rest; shown on hover, focus, selection and while its menu is
-  open; always on touch). Inline server failures
+  open; always on touch; not drawn on a desktop, where a right-click opens the menu). Inline server failures
   stay beside their workspace. A repository's workspace moves past the
   next or previous group with its worktrees, and a worktree moves among its siblings only.
+- A workspace is pinned from its row menu (**Pin workspace** / **Unpin workspace**, first in the
+  menu), as Paseo pins a chat: pinned workspaces leave their place and stand first in their PC's
+  list, in the order they were pinned, in the Agents list's card (`.sidebar-pinned`) with the same
+  `--accent` pin after the name. A pinned repository's workspace brings its worktrees; a pinned
+  worktree leaves its repository's group, which stays. Pinned rows are not dragged and `Alt+↑/↓`
+  does not move them; the rest reorder among the rows they show. The pins are the Agents list's
+  shared list (a workspace's key is `machine:workspace:id`), so other browsers of the server see them.
 - A title that is a working directory written out (`/home/me/dev/api`, `~/dev/api`, `C:\work\api`)
   shows as its last folder, here, in the header, the palette and every alert; the full path stays
   in the row's tooltip. Parent workspace names stay fixed and linked checkouts are named by branch;
@@ -679,16 +676,12 @@ One set for both themes: the card is island black wherever it shows.
   account in the user's order: provider mark, mono `--fs-2xs` percent of the limit chosen in
   Settings, the plan's week or its session (used, or left when Settings says so), and a 2px bar on a `--border-strong` track
   filled to that percent. From 80% used the percent and bar take `--status-blocked`; amber stays
-  chrome. A limit that runs out before its reset at its pace so far takes `--status-blocked` on
-  the bar alone. A chip whose numbers are stale or missing dims. An account hidden in Settings is
+  chrome. A chip whose numbers are stale or missing dims. An account hidden in Settings is
   left out of the strip and the popover; with every account hidden, neither shows.
 - The button opens a popover above the footer (`--shadow-pop`, `--radius-lg`), as wide as the
   footer and scrolling when it outgrows the sidebar: per account its mark, name and plan pill with
   the email or login right-aligned and ellipsized, then one row per limit (label, reset time, right-aligned percent) over a 4px bar. A problem
-  note is dim, red for an expired sign-in or a failed request. Where the window's start is known, a
-  2px `--text-strong` mark on the bar sits where an even pace would be by now, and a dim `--fs-2xs`
-  line under it gives the rate, with **Runs out in …** in `--status-blocked` when it comes before
-  the reset; once that time has gone by it reads **Runs out before reset** until the reset.
+  note is dim, red for an expired sign-in or a failed request.
 
 ### New workspace dialog
 - Agent select comes from `GET /api/agents`; shell-only is always available. Directory defaults to
@@ -703,7 +696,7 @@ One set for both themes: the card is island black wherever it shows.
 - Submit calls `POST /api/workspace/create`; the server performs `workspace.create` and, when an
   agent was chosen, `agent.start` in its root pane. Pending and partial agent-start failure are
   explicit before the created pane opens.
-- As **New tab** (from a row's `⋯` menu, the header's More menu, the strip's `+` or the palette),
+- As **New tab** (from a row's `⋯` menu, the strip's `+` or the palette),
   the same dialog is titled `New tab · <workspace>`, shows the workspace's folder as a fact in a
   dashed box (`.new-session-folder`: a worktree's checkout, else the folder of the pane in front)
   instead of asking for one, and its name is the tab's (optional; the placeholder is the number
@@ -714,9 +707,11 @@ One set for both themes: the card is island black wherever it shows.
   Tabs retain their names, status dots, active underline, keyboard navigation, rename field and
   close confirmation. A right-click opens tab actions at the pointer, including Move tab left/right
   when a neighbouring position exists. Desktop tabs have no close or dropdown buttons. Touch and narrow layouts show a `⋯` beside
-  the selected tab for the same menu; Shift+F10 or the menu key opens it from a focused tab.
+  the selected tab for a trimmed menu; Shift+F10 or the menu key opens the full tab menu from a focused tab.
   Pane actions are not tab actions. Up to 768px, where a split tab shows one pane at a time, the
   tab's menu lists the tab's panes first, the open one marked current, over a hairline.
+  Its touch menu omits New tab (the strip's `+` opens it). Only at these narrow widths does it
+  omit Split and Zoom pane; Unzoom pane stays available whenever the tab is zoomed.
 - Mouse dragging previews an accent insertion line, with edge scrolling for an overflowing strip.
   The snapshot's tab order is authoritative: a tab's stable `number` is not its place. A drop calls
   `tab.move` with an insertion boundary before removal, within that workspace and PC. The visible
@@ -727,13 +722,15 @@ One set for both themes: the card is island black wherever it shows.
   the same adjacent moves only while a tab has keyboard focus.
 - `PaneCanvas` draws every pane in the active tab at `layouts[].panes[].rect`, normalized to
   the layout's own area. Panes share thin, square boundaries: `--border-strong` when inactive,
-  `--accent` around the selected pane. The compact header names its pane and provides the
-  ellipsis for touch and keyboard access. A lone or zoomed pane is borderless; its menu button
-  stays at the top-right (visible on hover/focus, always on touch).
+  `--accent` around the selected pane. The compact header names its pane and, on a screen that takes touch
+  (`any-pointer: coarse`), the ellipsis; a mouse opens the same menu by right-click. Keyboard users
+  tab to the pane's ellipsis, which becomes visible on keyboard focus, and press Enter.
+  Shift+F10 in the terminal goes to the terminal program, not the app menu. A lone or zoomed
+  pane is borderless; on touch its actions live in the tab menu rather than a second ellipsis.
 - A left click or keyboard focus selects the actual pane. Right-click opens the clicked pane's
   menu without changing the selected pane: Rename pane, Clear pane name when named, Swap with
-  focused pane when another is selected, Split right, Split down, Zoom/Unzoom pane, the
-  right-click policy, Close pane. It appears at the pointer, clamped to the window. Up/Down
+  focused pane when another is selected, Split right, Split down, Zoom/Unzoom pane, Close
+  pane. It appears at the pointer, clamped to the window. Up/Down
   stop at the ends, hover selects, Enter acts, Escape and an outside click dismiss.
 - Split selects the new pane (`focus:true`), like the TUI. Swap exchanges the right-clicked
   pane with the previously selected pane and retains the latter's focus. A close confirms when
@@ -752,19 +749,20 @@ One set for both themes: the card is island black wherever it shows.
   release flushes the final ratio. A tab/topology change cancels the drag.
 - Every pane keeps its own xterm, attachment, input ownership, lens, chat state and file-path
   context. Only the active pane may take keyboard focus after an asynchronous operation.
-- Switching tabs retains an outgoing terminal only while its explicit submit awaits a receipt;
+- Switching tabs retains an outgoing terminal while its explicit submit awaits a receipt;
   its chat/input UI is unmounted and its grid is not resized. The receipt settles the original
   draft before the pane attachment is released. No input is replayed. A canvas that already released
   its panes while away opens a replacement as view-only until the user returns.
+  An automatic queue also retains its original pane lease until sent, discarded or held.
 - The unlocked app owns one connection per visited PC, shared by its pane mounts. A pane leaving
-  the canvas sends detach and loses its automatic-delivery lease, while the PC connection keeps
+  the canvas without an outstanding submit or automatic queue sends detach and loses its
+  automatic-delivery lease, while the PC connection keeps
   receiving authoritative held/removal receipts. Returning exposes the same pending ID for an
   explicit Send now. Only an actual disconnect, PC removal, sign-out or app teardown suspends
   connection proof; reconnect/reload never resumes pending delivery.
   A newly split pane awaiting its first snapshot does not unmount its siblings. Geometry is
   fitted inside each rendered pane; layout rectangles are never used as PTY dimensions.
-- Plain right-click can be passed to a mouse-reporting terminal when enabled for that pane.
-  Modified clicks, pane frames and non-reporting/read-only terminals still open the menu.
+  A right-click on a pane always opens its menu.
   Native app shortcuts stay Mod+Shift in the browser, so Ctrl+key continues to reach the PTY.
 
 ### Worktree dialog (`.worktree-modal`)
@@ -783,6 +781,60 @@ One set for both themes: the card is island black wherever it shows.
 - The browser demo answers the same list/create/open/remove worktree APIs with fictional
   checkout records, so its branch rows and dialogs work without a filesystem or live herdr.
 
+### Changes list and diff viewer (`.repo-changes`, `.repo-diff*`)
+- Files has two faces, **Browse** | **Changes** (`.segmented` in its header). **Changes** lists
+  what a comparison changed in the repository the pane sits in: the working tree against the
+  index, the index against HEAD, or two commits named by hand (**From commit**, **To commit**,
+  **Compare**); a Refresh button re-reads it, nothing polls. Under the controls, the branch
+  (`Detached HEAD`, `No commits yet`) beside a `GitBranch` glyph and the repository's root, mono,
+  cut from its start. The files sit under the folders they are in (lib/changeTree.ts): a
+  `.repo-change-folder` button row (caret, `--accent` folder glyph, name, and the count of files
+  below it in `.repo-change-folder-count`) stands where its first file was listed, a folder holding
+  nothing but one folder joins it into one row (`src/components/diffs`), every folder starts open,
+  a tap folds it (kept across Refresh and scope changes), and an icon button beside Refresh folds
+  or opens them all. Each level moves its rows in by `--depth` steps of `--repo-change-indent`, in
+  nested lists. One `.repo-change` row per file, like the folder browser's rows (only file rows
+  carry that class, and the folder prefix of a path stays in `.repo-change-path` as visually hidden
+  text, so a screen reader reads the whole path in listing order): git's own
+  letter in a `.repo-change-mark` chip (M, A, D, R, C, T, U, ?), the path in mono with a rename's
+  old path dimmed before an arrow, and `+added −removed` in `--syntax-inserted` /
+  `--syntax-deleted`, or **Binary**. The chip is tinted as the diff's rows are: added and
+  untracked on `--status-done-tint`, deleted and conflicts on `--status-blocked-tint`, modified on
+  `--accent-tint`; an untracked file's chip has the dashed edge of an unknown state. The status
+  word is kept for assistive tech (`.visually-hidden`), so the letter is never the only name.
+  Empty and refused comparisons say so in the list's own words (`No uncommitted changes`,
+  `Nothing staged`, `These commits are the same`, a cut list with its counts, a folder outside
+  git, a commit that does not exist, a bridge too old for the routes), never in git's.
+- A row opens `.repo-diff-viewer`, a modal above the list with a history entry of its own
+  (lib/useRepoDiffViewer.ts, as a file preview has): Back, Escape, Close and the scrim each close
+  it alone and return the focus to its row; a reload restores it. Its header is the file viewer's:
+  the name cut inside its stem, a mono meta line with the status in words (`.repo-diff-status`,
+  tinted like the chip), the counts, a `--notice` warning with an icon when the rows are left
+  plain or forced to one column, the comparison (`Working tree`, `Staged`, `abc1234..def5678`),
+  and the folder giving way first. Its actions: **Unified** | **Split** (`.segmented`, the
+  `diffStyle` setting; Split is disabled at `<=640px` with the reason as its tooltip and the note
+  in the meta line), **Fold context** (an `aria-pressed` icon button: one unchanged line around
+  each change instead of the three git printed, the rest counted in the separators), **Open
+  file** (the file viewer, on the PC that holds the repository; not for a deleted file) and
+  **Copy patch** (git's own text; without a clipboard the patch becomes a selected text box, as
+  the file viewer's Copy does). On a phone the actions take the second row under Close.
+- The rows are `@pierre/diffs`' `FileDiff` inside its `Virtualizer`: a window of a few hundred
+  rows whatever the patch's length, drawn in the shadow root with the same tokens as a
+  virtualized source (the `--diffs-*` hooks of lib/sourceTheme.ts): text `--text`, background
+  `--bg`, numbers `--line-number`, and `--syntax-inserted` / `--syntax-deleted` as the package's
+  base colors: its gutter bars, signs and word emphasis take them verbatim, and it mixes the added
+  and removed rows' backgrounds from them and `--bg` (no tint token is handed to it, since it
+  would be mixed again); separators on `--bg-elevated` with the package's own `N unmodified
+  lines`. Old and new line numbers sit in the gutters, outside a
+  selection and a copy; a blank row keeps its newline. Colors come from the package's worker
+  within the source bounds (256 KB, 5 000 lines), else the rows stay plain and the header says
+  `Too long to highlight`. Between hunks nothing expands: the routes serve the patch alone, not
+  the files around it; **Open file** is the way to the whole file.
+- What has no rows says so in a `.repo-diff-note`: a binary file, a change past the server's
+  patch cap (with the cap in bytes), a merge conflict, a path that is not a regular file, a pure
+  rename or mode change (`No lines changed.`), a file that no longer differs, and every refusal of
+  the routes in the app's words.
+
 ### Header context and connection
 - A selected pane shows agent mark + title (`--fs-md`), then on the same line the crumb
   PC › workspace › folder (`--fs-xs`, `--text-dim`). The folder shows as its last name, and only
@@ -791,9 +843,9 @@ One set for both themes: the card is island black wherever it shows.
   whole title it is not drawn, and the title has the row. The full path is in the context's
   tooltip and at the top of the More menu. With no selection, the brand fills the context slot.
 - The More menu (`.header-more-button`, the `RowMenu` popover, a bottom sheet at `<=640px`) opens
-  with the location on two lines, "PC › workspace" then the full path in mono, and holds **New
-  tab** (the selected pane's workspace), **Browse files** and **Alerts**, each under the condition
-  its own button had; at `<=480px` **Command palette** is its first item. The Alerts item says
+  with the location on two lines, "PC › workspace" then the full path in mono, and holds
+  **Browse files** and **Alerts**, each under the condition its own button had. New tab stays
+  on the tab strip's `+`; Command palette is not in More. The Alerts item says
   this device's state in words after its label ("On in the app", "On in this tab", "On, pushed to
   this device", "Off on this device") and switches it: it is a `menuitemcheckbox` with
   `aria-checked` in the popover and a button with `aria-pressed` in the sheet. While alerts are off on this device the
@@ -806,6 +858,18 @@ One set for both themes: the card is island black wherever it shows.
   document as a `role="status"` a screen reader can read (`.conn-live`; never `display: none`).
 
 ### Chat turn (`.chat-turn`)
+- Native conversation rows use LegendList 3.3.5, with the chat view as the single
+  scroll owner. The centered lane, exchange spacing and prompt portal stay separate from
+  row lifetime. The list anchors prepends by a browser-local slot, never by a timestamp or
+  mutable message text; machine, pane and history replacement reset that slot scope.
+  Selected ranges and focused rows remain mounted outside the visible window. Disclosure
+  choices and completed whole-output reads belong to logical rows and survive eviction.
+  Spare list containers may remain offscreen after a selection ends; this is not an
+  unlimited transcript DOM or a promise of bounded memory for all loaded source data.
+  The web ESM patch orders pooled DOM slots before paint, uses state-preserving
+  `moveBefore` where available, and clears stale prepend locks on explicit navigation.
+  These changes preserve native drag/copy order and prevent a later layout from undoing
+  a jump to a turn; the React Native and keyboard patches from t3code are not included.
 - The chat lens is a centered `--chat-w` transcript over the still-attached terminal surface.
   At the Default chat width the lane follows the pane: min 820px, max 60rem (960px at a 16px
   root), 71% of the pane (`.terminal-stack`) between. `PaneTerminal` measures the pane and writes
@@ -823,6 +887,16 @@ One set for both themes: the card is island black wherever it shows.
 - The register is Codex / gajae-code-app: a quiet document. User turns are right-aligned neutral
   cards (`--bg-elevated`, a `--bubble-border` edge, `--radius-lg` on all four corners, ≤80% wide,
   no avatar or name). Assistant turns have no header: the answer is plain prose.
+- A long user message (`lib/userMessageFold.ts`: more than `--chat-fold-lines` lines, or more
+  characters than about that many lines of the widest bubble hold, a link or image counted by its
+  label) is capped at `--chat-fold-lines` lines of its prose. Only such a message is measured, and
+  only where the cap cuts it does it fold: the last line fades into the card through an alpha mask
+  one prose line tall, over a **Show full message** text button on the card's right edge
+  (`--text-dim`, `--fs-xs`, `--bg-hover` and `--text-strong` under the pointer; a `--touch-target`
+  row where the primary pointer is coarse). Open, it reads **Show less**, and folding brings the
+  card's top back into view as a code block's fold does. The choice stays with the row while it
+  leaves and re-enters the list, and Find landing on the turn opens a cut message, so a match is
+  never behind the fold.
 - Space separates exchanges, not a rule: the transcript's gap is `--space-3`, so an answer sits
   close under its prompt, and a user turn that follows an assistant turn takes `--space-5` more.
   The one rule of an exchange is the hairline under its folded work block.
@@ -841,7 +915,8 @@ One set for both themes: the card is island black wherever it shows.
   **Open raw file** (Code glyph) opens the original bytes; Download still saves those bytes.
   The reader page and dialog share **Show source** (Braces glyph, pressed while the source shows, so it
   never looks like Open raw file), highlighted source with CSS-counter line
-  numbers, and **Copy file** for complete text (selecting the source if clipboard copy fails).
+  numbers (past 2 000 lines, the virtualizer's numbered rows; see File viewer under Typography),
+  and **Copy file** for complete text (selecting the source if clipboard copy fails).
   There is no separate Raw action. HTML blocks in Markdown files are parsed in the preview worker
   with HTML enabled; local images still pass through the file endpoint's image-size check.
   The page has an h1 and no Close or new-tab action; the dialog keeps its focus trap and sheet swipe.
@@ -999,17 +1074,34 @@ One set for both themes: the card is island black wherever it shows.
   and the composer column equals the transcript column (`--chat-w`, same `--space-4` gutter,
   `--space-3` at `480px` and below).
   On a phone (`<=768px`), while the card follows the transcript directly (no held message, pending
-  row or prompt card between them) and no greeting stands over it, the card floats over the
+  row, prompt card or notice between them) and no greeting stands over it, the card floats over the
   transcript's end as an iPhone's input bar does: the composer rises `--composer-over`
   (`--space-8`) into the transcript, whose last lines fade into `--bg` and blur behind the card on
   `--card-glass` and `--glass-blur`.
   The input box is a card: `--bg-elevated`, hairline border, `--radius-2xl`, `--shadow-card`
   (the only other card on this surface is the prompt card docked over it, while an agent asks);
-  focus turns its border `--accent` (no inner outline). Above it the completion popover and the
-  background-task list; inside, the image strip is its own row at the top, then the auto-growing
+  focus turns its border `--accent` (no inner outline). Above it the notices (below), the
+  completion popover and the background-task list; inside, the image strip is its own row at the top, then the auto-growing
   message box as a row of its own at the card's full width, then ONE row of controls under it:
   on the left the add button (lucide `Plus`, named "Attach files"), the mic when voice input
   shows it (see Voice input), and the background-task chip; on the right the status content and ONE round Send/Stop button.
+  The message's text starts `--space-4` in (`--space-3` on a phone, `480px` and below).
+- The strip (`.composer-strip`) tucked under the card, as t3code's composer context strip: the
+  card's own `--bg-elevated` with a `--border` hairline, inset on each side by the card's radius
+  (`--radius-2xl`, never under `--space-5`) so it stays under the card's straight bottom edge,
+  its top `--space-4` under the card, where the card's hairline and `--shadow-card` part the two,
+  and only its bottom corners rounded (`--radius-xl`); `--space-5` top padding (so `--space-1`
+  shows under the card), `--space-3` at the sides, `--space-1` under. It names the pane's
+  working folder at its start (lucide `Folder`, the folder's last name, the whole path in its
+  `title`) and the branch at its end (lucide `GitBranch`), each a glyph the text's size and a
+  name in `--text-dim` at `--fs-xs`, `--chip-h` tall; a name that does not fit is cut short.
+  A linked worktree's folder takes lucide `FolderGit2` and the word Worktree after its name, in
+  a `--border` hairline box with `--radius-sm` corners.
+  Nothing in it is pressed. `composerStrip` (`src/lib/composerStrip.ts`) decides what it draws from
+  the composer's optional `cwd` and `branch`: a blank one is absent, and with neither there is no
+  strip at all. A phone (`640px` and below, or a coarse pointer) draws no strip: the screen is the
+  conversation's. The card stands over it (`z-index: 1`, so its popovers go with it and still rise
+  over the transcript).
 - Empty chat (`.composer-greeting`): one line on the composer's column, directly over it,
   `What should <agent> do in <folder>?` in `--text-strong`, `--fs-display`, `--fw-semibold`, `--tracking-display`, centred,
   and under it `PC · full path` in `--text-dim`, `--fs-sm`. Both wrap anywhere. While dictation's
@@ -1045,7 +1137,8 @@ One set for both themes: the card is island black wherever it shows.
   `--fw-medium`; the level follows a middle dot in `--text-dim`, as the agent's own words with
   only the first letter drawn as a capital (`::first-letter`, the text is not rewritten); a pane
   that records no level draws no dot and no dash, only the name. On the
-  fill the ring's track is `--border-strong`; a ring left bare on the card keeps `--border`. It is display only: a `span` with no role, no
+  fill the ring's track is `--border-strong`; a ring left bare on the card keeps `--border`.
+  No part carries a chevron: herdr owns the agent, so none of them opens a menu. It is display only: a `span` with no role, no
   focus, no hover or pressed state, no pointer cursor and no chevron; the ring inside it is the
   one thing to press on desktop; mobile keeps the ring inert. The `title` of the model is the id as received, and the level's is its
   sentence; behind a name the id is also repeated as `.visually-hidden` text, since a touch
@@ -1065,11 +1158,15 @@ One set for both themes: the card is island black wherever it shows.
   suffix is dropped.
 - What does not fit the row gives way in this order: the task chip's words (icon and count below
   a `640px` card), then the reasoning level and model name according to the measured row. A long
-  identifier can shorten inside the pill; the context ring remains visible. The row is measured
+  identifier can shorten inside the pill; the context ring remains visible: a name that would
+  be cut to its floor (the `3ch` the box keeps) steps out whole instead, with its mark and its
+  pill (`composerLabelDraw`, `src/lib/composerLabelFit.ts`, measured again with the level
+  stepped out), so the ring stands alone and whole on a `320px` phone rather than being cut by
+  the pill's edge. The row is measured
   again after fonts arrive and the context label opens or closes. The input card keeps one row
   of controls on desktop and phones.
 - Every agent has one primary control: Stop while working with an empty draft, Send with text,
-  and Send at rest. Uploads and in-flight sends disable Send without clearing its text. There
+  and Send at rest. Uploads and in-flight sends disable Send without clearing its text. An in-flight Send keeps its accent circle at full opacity and replaces the arrow with a small progress ring, rotating in eight steps using `--dur-spin`; reduced motion keeps the ring static. Its accessible name is `Sending…` and `aria-busy` stays true until the receipt settles, without a live region. The button keeps the same size and position, even if its draft is edited to empty while sending. There
   is no separate Queue button or send menu. The placeholder is `Message <agent>…`; message text
   uses `--fs-chat` scaled by `--chat-scale` on `--lh-code` with a fine pointer. Otherwise it
   uses that scaled size or `--fs-input`, whichever is larger, keeping the 16px floor that avoids
@@ -1098,7 +1195,13 @@ One set for both themes: the card is island black wherever it shows.
   of its own under it, without its leading dot, and wraps there; its `title` repeats it. Only
   the sentence takes a line: the mark, the model, the level and the ring stay one row over it
   (`.composer-status-meta`), where the label gives way exactly as it does with no sentence. The
-  status content is then left-aligned, beside the add button. The primary control and add are disabled. With a draft, the reconnecting sentence is said instead of
+  status content is then left-aligned, beside the add button. In a narrow card (`data-compact`,
+  below `640px`) add, the icons and the round button at touch size leave it too little of the
+  row for a word, so while a sentence shows the status content takes a row of its own over them,
+  the card's width (`.composer-surface[data-compact]:has(> .composer-status[data-hint])`): the
+  sentence is read whole beside the model pill or under it, from where the message's text
+  starts, add and the round button keep their row, and the card grows by that row while the
+  sentence shows. The primary control and add are disabled. With a draft, the reconnecting sentence is said instead of
   `Uploading file…`, never both: the attachment's own tile says it is uploading.
 - The resize grip is a short bar on the card's top edge. On a fine pointer (`(hover: hover) and
   (pointer: fine) and (not (any-pointer: coarse))`) the bar is drawn while the card is hovered,
@@ -1106,7 +1209,24 @@ One set for both themes: the card is island black wherever it shows.
   pointer it is always drawn. Its hit area lies above the card (`--composer-grip-h`), and the
   composer keeps that strip free after the held-message list and after a prompt card.
 - The stack over the input card, on its column, is written once (PaneTerminal): held messages,
-  then the prompt card (see Prompt card), then the input card.
+  then the prompt card (see Prompt card), then the input card. The notices are the input card's
+  own: they stand inside the composer, over the card and its quick replies, so they move with it
+  (a lifted greeting, a phone's keyboard) and the prompt card keeps its place directly over them.
+- Notices (`.composer-notices`): under the chat lens, while the input card shows, the states the
+  terminal lens floats as top-right pills (another app holds the pane, a failed output stream, the
+  input held for the terminal, a copy note) stand over the card instead, in the held messages'
+  anatomy: one `--border` hairline above the group, then a row per notice (`role="status"`), no
+  tint and no box, every line of text `--space-3` in. A row is its lucide mark and its sentence in
+  `--text-dim` at `--fs-xs` (`--status-working` for the two warnings: another app holds the pane,
+  the stream failed), its own way on at its end (`Open here`, `Reconnect`, the held input's `Send`
+  and quiet `Discard`, in the held rows' buttons) and an X named `Dismiss notice`. Top to bottom
+  the rows are the plain notice, then the urgent ones, then the activity (the held input) nearest
+  the card, as t3code's composer banner stack orders them (`src/lib/composerNotices.ts`). A
+  dismissal lasts while the notice stands and says the same thing; it is forgotten once the
+  notice goes or changes its words, so the next one shows again, and another pane's dismissals
+  never carry over. The group keeps the grip's hit strip free under it. With no input card (view
+  only, ended, a secret prompt) the pills stay where the terminal lens draws them, and a notice
+  keeps a phone's card docked: it never floats over the transcript.
 - Held messages (`.composer-queue`) are quiet rows on the input card's column, above it: the
   card's width and gutter at every window width, no tint and no box. One `--border` hairline
   above the group, then one caption line in `--text-dim` at `--fs-xs` (a clock and the sentence
@@ -1131,12 +1251,13 @@ One set for both themes: the card is island black wherever it shows.
   still `Discard`.
 - `/` completions come from `GET /api/pane/commands` and group built-in, user and project commands;
   `@` completions query `GET /api/pane/files`. Arrow keys navigate, Enter/Tab accepts, Escape closes.
-- Paste, picker or drag/drop attaches up to **Files at once** files per action (Settings → Chat, 20 unless the
-  device chose 1 to 50); the message box names how many it left out. An image is stored as a paste, any other
-  file under its own sanitised name. Each uploads through `POST /api/pane/image`, three at a time
+- Paste, picker or drag/drop attaches up to 100 files per action; the message box names how many it left out.
+  An image is stored as a paste, any other file under its own sanitised name. Each uploads through `POST /api/pane/image`, three at a time
   across all picks, and puts a removable editable `@path` mention at the start of the message (after
   a leading `/command`), in the order the files were picked. A path waits while the box holds only a
-  `/command` still being typed or an IME composition. The caret and selection move only with the
+  `/command` still being typed or an IME composition, and a path that does not fit whole under the
+  length cap waits on a "No room" tile, with Send off and the status line saying how many characters
+  to remove; within 200 characters of the cap the status line counts what is left. The caret and selection move only with the
   text they sit in, so typing while files upload is not disturbed.
 - While a phone's keyboard is up, a tap on the transcript or a drag down it (`32px`) puts the
   keyboard away. Each only blurs the field, so the draft stays. The prompt card, which can stand
@@ -1146,10 +1267,7 @@ One set for both themes: the card is island black wherever it shows.
 - On a touch screen, picking a pane (drawer, palette, notification) or switching its lens never
   raises the keyboard: the user reads first, and a tap on the message box or the grid raises it.
   A desktop's picked pane takes typing at once.
-- Enter sends and Shift+Enter breaks by default; with **Enter sends** off, Mod+Enter sends. IME Enter
-  is ignored. Stop sends Escape. While the agent works and a draft shows Send in Stop's place,
-  Escape in the box is Stop; an open completion menu takes the first Escape. Working Send
-  schedules a pending message; its Send now action submits that same message now.
+- Enter sends and Shift+Enter breaks by default; with **Enter sends** off, Mod+Enter sends. On touch screens the same device setting is shown inverted as **Return inserts a new line**, with Send and hardware Mod+Enter explained below it. IME Enter is ignored. Stop sends Escape. While the agent works and a draft shows Send in Stop's place, Escape in the box is Stop; an open completion menu takes the first Escape. Working Send schedules a pending message; its Send now action submits that same message now.
 
 ### Voice input
 - A mic button sits beside the add button in the composer and beside Send in the terminal input line; it
@@ -1162,6 +1280,9 @@ One set for both themes: the card is island black wherever it shows.
   Amber only; `--danger` stays for errors.
 
 ### Command palette
+- The command palette and its plugin actions are not available in the phone touch UI
+  (`<=480px`): neither the header nor Files offers a palette button. Use a wider screen;
+  a connected keyboard can still open it with `Mod+Shift+K` (or the configured binding).
 - `Mod+Shift+K` opens a top-offset `--palette-w` dialog searching panes across all connected PCs
   and the selected PC's actions. PC names participate in search. Recent panes
   lead an empty query; arrows in the search field cycle through visible results, Enter activates
@@ -1224,11 +1345,11 @@ One set for both themes: the card is island black wherever it shows.
   control, the X, Escape and the scrim take the same entries off. Beside the list, turning pages
   replaces the one entry. A reload steps out of the entries it finds; Forward reopens the page.
 - Pages, in order: **Appearance** (theme, colors, density, language, sidebar rows), **Chat**
-  (panes open in, show thinking, chat width, chat font size and family, highlight code; then
-  **Composer**: optional plain PageUp/PageDown chat scrolling (off by default), Enter sends, files at once, suggestion chip; then **Quick replies**; then **File viewer**: wrap long
-  lines, Markdown width), **Terminal** (font size, 80 columns in a split, font family, wheel
+  (panes open in, show thinking, chat width, chat font size and family; then
+  **Composer**: Enter sends; then **Quick replies**; then **File viewer**: wrap long
+  lines, Markdown width, Diff layout), **Terminal** (font size, font family, wheel
   speed, input mode, Key bar), **Alerts**, **Voice input**, **Subscription usage**,
-  **Shortcuts** (the platform-resolved global bindings, then **Paging** with a 0–100 line overlap stepper; one line by default, zero for a full viewport), **Phone & devices** (the phone address,
+  **Shortcuts** (the platform-resolved global bindings), **Phone & devices** (the phone address,
   Keep screen on, Install; then Portal, where the server offers it; then paired devices),
   **Remote PCs**, **About** (Updates, herdr, the repository links). A button that points at
   Updates opens the dialog on About.
@@ -1294,22 +1415,32 @@ One set for both themes: the card is island black wherever it shows.
 - Automatic refresh uses `jump:false` only after an explicit search response includes both
   `matches` and `scroll`. Older bridges can ignore unknown request fields, so they receive no
   automatic search POST. Their explicit count and previous/next navigation remain unchanged.
-  Read-only views also send no automatic search POST and cannot drag the history scrollbar.
-- The separate history scrollbar sits in a reserved gutter alongside the grid and is hidden
-  when herdr reports no scrollback. Dragging the thumb, clicking the track or its focused arrows,
-  Page Up/Down and Home/End call `pane.scroll`; this moves the shared viewport for every client,
-  including the TUI. Pending pointer moves are coalesced, requests retain their owning PC/pane,
-  and a failed request displays an error instead of inventing a local history position.
+  Read-only views also send no automatic search POST and cannot page native history.
+- The terminal draws no history scrollbar and reserves no gutter for one: the grid takes the
+  mount's full width. Wheel, touch drag, page keys and Find move native history; paging calls
+  `pane.scroll`, which moves the shared viewport for every client, including the TUI. Requests
+  retain their owning PC/pane, and a failed request displays an error instead of inventing a
+  local history position.
+- While herdr's viewport is above the bottom and the pane is interactive, a round ArrowDown
+  "Jump to bottom" button floats over the grid's bottom-right corner and sends `pane.scroll`
+  offset 0, the one-tap way back to the live bottom now that no scrollbar offers End. It uses
+  the chat lens' round button form (`--control-h`, `--touch-target` on coarse pointers,
+  `--radius-pill`, `--shadow-pop`), keeps focus in the terminal, and is hidden at the bottom, in
+  read-only views and while Find owns the viewport. A grown touch input line floats over it.
 - Mod+Shift+PageUp/PageDown pages the selected pane only, preserving chat composer focus and
-  selection. Chat moves instantly by its viewport minus the configured prose-line overlap;
-  Terminal and focused scrollbar PageUp/PageDown use native viewport rows minus that overlap.
-  A large overlap still advances one pixel or one terminal row. Paging is blocked by modals;
+  selection. Chat moves instantly by its viewport minus one prose line;
+  Terminal uses native viewport rows minus one. A page still
+  advances at least one pixel or one terminal row. Plain PageUp/PageDown always scroll the chat
+  transcript. Paging is blocked by modals;
   repeated terminal pages accumulate against the pending offset until herdr acknowledges it.
-- Explicit Find cancels unsent scrollbar offsets and waits for a native scroll already sent;
-  the scrollbar is disabled until that search ends, so an older drag cannot overwrite its result.
+- Explicit Find cancels unsent page offsets and waits for a native scroll already sent;
+  paging is disabled until that search ends, so an older page cannot overwrite its result.
 - xterm has `scrollback: 0`; wheel/touch gestures reach herdr's alternate-screen scrollback. The
-  mount clips its own gutter and hides the unused xterm scrollbar.
+  mount hides the unused xterm scrollbar.
 - Terminal banners stack top-right for ended, reconnecting, observe and held-draft review states.
+  Under the chat lens, while the input card shows, the ones it shares with the composer (another
+  app holds the pane, a failed output stream, the held draft, a copy note) stand over the card
+  instead (Composer: Notices).
 - The mobile key bar starts with Esc, Tab and `^C`, then sticky Ctrl/Alt/Shift, Enter and arrows;
   it never steals typing focus. Modifiers remain highlighted until toggled off,
   leaving the pane/lens or disconnecting; each exposes `aria-pressed`.
@@ -1345,6 +1476,8 @@ One set for both themes: the card is island black wherever it shows.
 ## 6. Motion & Interaction
 
 ### Timing
+
+The values are the ones in `src/styles.css`.
 
 | Type | Token | Value | Usage |
 |------|-------|-------|-------|
@@ -1423,9 +1556,10 @@ One set for both themes: the card is island black wherever it shows.
   Paging scrolls herdr history when present; an explicit valid zero-history result instead sends
   one plain PageUp/PageDown through the existing live input lease to the running application.
   Application-owned paging has its own page length; no page input is queued across disconnects.
-  The opt-in plain chat page keys preserve composer draft, selection and focus, excluding modified
+  The plain chat page keys preserve composer draft, selection and focus, excluding modified
   keys, composition, other editable controls and modal input. They do not capture terminal keys.
-- On touch screens app actions stay in buttons and menus, including the palette in More on phones.
+- On touch screens app actions stay in buttons and menus. The command palette and its plugin
+  actions are not available in the phone touch UI; a wider screen or keyboard is required.
   The key bar sends terminal input only; it is not an app-action toolbar. Hardware keyboards use
   the same global bindings on phones and desktops.
 - `document.title` is `<pane title> · herdr` while selected, otherwise `herdr web ui`.

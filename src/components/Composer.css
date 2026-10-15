@@ -142,9 +142,11 @@
   }
 }
 
+/* the notices (ComposerNotices.css) take the card's column too */
 .composer-quick,
 .composer-surface,
-.composer-note {
+.composer-note,
+.composer-notices {
   width: min(100%, var(--chat-w));
   margin-inline: auto;
 }
@@ -159,11 +161,9 @@
    (.visually-hidden: the mark stays, and the state is told by Stop, the live row and the prompt
    card). What does not fit gives way in this order: the task chip's words (BackgroundTasks.css,
    by the card's width); then the model label, as composerModelDraw says of the measured row
-   (Composer.tsx marks data-model): while Queue is showing the mark, the name and the level step
-   out whole and their pill with them, without it the level alone does, each read and not drawn,
-   so no word is drawn in part; then, with no Queue, the model's name and the opened context
-   text. Nothing overlaps its neighbour, and the context ring at the end is never the part that
-   is cut. */
+   (Composer.tsx marks data-model): the level steps out whole, read and not drawn, so no word is
+   drawn in part; then the model's name and the opened context text. Nothing overlaps its
+   neighbour, and the context ring at the end is never the part that is cut. */
 .composer-status {
   grid-area: status;
   display: flex;
@@ -190,6 +190,26 @@
 .composer-status[data-hint] {
   flex-wrap: wrap;
   row-gap: 0;
+}
+
+/* A narrow card (data-compact: the card's own width, Composer.tsx) with a sentence to say: add,
+   the icons and the round button at touch size leave the status content too little of the row
+   for a word, so it takes a row of its own over them, the card's width, where the sentence is
+   read whole beside the model pill or under it, from where the message's text starts. Add and
+   the round button keep their row. The card grows by that row while the sentence shows.
+   data-hint is the sentence's presence, not a measurement, so this layout never feeds back into
+   the fit that measures the row */
+.composer-surface[data-compact]:has(> .composer-status[data-hint]) {
+  grid-template-areas:
+    "attachments attachments attachments"
+    "text text text"
+    "status status status"
+    "left . right";
+}
+
+.composer-surface[data-compact]:has(> .composer-status[data-hint]) > .composer-status {
+  justify-content: flex-start;
+  padding: var(--space-1) var(--space-4) 0;
 }
 
 /* everything but the sentence. No box of its own at rest: its items are the status line's. Beside
@@ -369,6 +389,28 @@
   cursor: default;
 }
 
+/* Compact context: beside the opened number, desktop only (the mobile ring is inert) */
+.composer-compact {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.composer-compact svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer-compact:hover,
+.composer-compact:focus-visible {
+  color: var(--text);
+}
+
 .composer-usage {
   flex: none;
   color: var(--text-dim);
@@ -411,12 +453,14 @@
   height: var(--chip-h);
 }
 
-/* the message is the card's first row at its full width; under it one row: add and the task
-   chip | the status content | the one round Send/Stop button. The attachment strip is its own
+/* the message is the card's first row at its full width; under it one row: add, the mic and the
+   task chip | the status content | the one round Send/Stop button. The attachment strip is its own
    row above both. The three cells of the last row stretch and centre what they hold, so the
-   controls and the model share one centre line */
+   controls and the model share one centre line. The card stands over the strip tucked under it (below), so
+   it is raised; its popovers go with it and still rise over the transcript, which comes first */
 .composer-surface {
   position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-areas:
@@ -515,7 +559,7 @@
   min-width: 0;
   min-height: calc(1lh + var(--space-5));
   max-height: 10lh;
-  padding: var(--space-4) var(--space-5) var(--space-1);
+  padding: var(--space-4) var(--space-4) var(--space-1);
   resize: none;
   overflow-x: hidden;
   overflow-y: auto;
@@ -678,6 +722,18 @@
   cursor: default;
 }
 
+.composer-send[aria-busy="true"] {
+  opacity: 1;
+}
+
+.composer-send-progress {
+  animation: composer-send-spin var(--dur-spin) steps(8) infinite;
+}
+
+@keyframes composer-send-spin {
+  to { transform: rotate(360deg); }
+}
+
 @media (hover: hover) {
   .composer-send:hover:not(:disabled) {
     --composer-action-fill: var(--primary-hover);
@@ -690,6 +746,66 @@
   .composer-controls .icon-button:hover:not(:disabled) {
     background: var(--bg-hover);
   }
+}
+
+/* The strip tucked under the card, as t3code's composer context strip: the card's own surface,
+   inset on each side by the card's radius (never less than --space-5, for a sharp palette), so it
+   stays under the card's straight bottom edge; its top --space-4 under the card, where the card's
+   hairline and shadow part the two (the seam), and only its bottom corners rounded. It names the
+   pane's working folder (the whole path in its title) at its start and the branch at its end,
+   each a glyph and a name in --text-dim at --fs-xs, and nothing in it is pressed. Composer.tsx
+   draws it only with a folder or a branch to name; a name that does not fit is cut short */
+.composer-strip {
+  --composer-strip-inset: max(var(--radius-2xl), var(--space-5));
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: calc(min(100%, var(--chat-w)) - 2 * var(--composer-strip-inset));
+  margin: calc(-1 * var(--space-4)) auto 0;
+  padding: var(--space-5) var(--space-3) var(--space-1);
+  border: var(--hairline) solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.composer-strip-item {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  height: var(--chip-h);
+}
+
+/* a linked worktree says what it is: the folder's name alone reads like any checkout's */
+.composer-strip-kind {
+  flex: none;
+  padding: 0 var(--space-1);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.composer-strip-branch {
+  margin-inline-start: auto;
+}
+
+/* the glyph is the text's size, as the task chip's is */
+.composer-strip-item svg {
+  flex: none;
+  width: var(--fs-xs);
+  height: var(--fs-xs);
+}
+
+.composer-strip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-menu {
@@ -747,7 +863,7 @@
   grid-area: attachments;
   display: flex;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-5) 0;
+  padding: var(--space-3) var(--space-4) 0;
   overflow-x: auto;
 }
 
@@ -784,7 +900,8 @@
   white-space: nowrap;
 }
 
-.composer-attachment.is-error {
+.composer-attachment.is-error,
+.composer-attachment.is-no-room {
   border-color: var(--status-blocked);
 }
 
@@ -864,11 +981,11 @@
   }
 
   .composer-attachments {
-    padding-inline: var(--space-4);
+    padding-inline: var(--space-3);
   }
 
   .composer-text {
-    padding: var(--space-3) var(--space-4) 0;
+    padding: var(--space-3) var(--space-3) 0;
   }
 
   .composer-controls-left {
@@ -891,6 +1008,10 @@
 
   .composer-status {
     padding: var(--space-1) var(--space-2) var(--space-2) var(--space-1);
+  }
+
+  .composer-surface[data-compact]:has(> .composer-status[data-hint]) > .composer-status {
+    padding: var(--space-1) var(--space-3) 0;
   }
 
   /* A phone fits neither half of a pi command's row, and pi writes explanations twice as long as
@@ -933,6 +1054,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .composer-send-progress {
+    animation: none;
+  }
+
   .composer-surface,
   .composer-action::before,
   .composer-resize::before {
@@ -1305,22 +1430,22 @@
 /* A phone's input card floats over the transcript's end, as an iPhone's input bar does: the
    composer rises --composer-over into the transcript, whose last lines fade into the chat's
    surface and blur behind the glass card. Only while the card follows the transcript directly
-   (no held message, pending row or prompt card between them) and no greeting stands over it;
+   (no held message, pending row, prompt card or notice between them) and no greeting stands over it;
    ChatView.css keeps the last line and its jump button clear of the card. The transcript's box
    still shrinks as the card grows, so a reader at the end stays at the end. Raised over the
    transcript, which is positioned (z-index 1) and comes first. */
 @media (max-width: 768px) {
-  .terminal-stack.is-chat:not(.is-greeted):has(> .terminal-surface + .prompt-dock:empty + .composer) {
+  .terminal-stack.is-chat:not(.is-greeted):has(> .terminal-surface + .prompt-dock:empty + .composer:not(.has-notices)) {
     --composer-over: var(--space-8);
   }
 
-  .terminal-stack.is-chat:not(.is-greeted) > .terminal-surface + .prompt-dock:empty + .composer {
+  .terminal-stack.is-chat:not(.is-greeted) > .terminal-surface + .prompt-dock:empty + .composer:not(.has-notices) {
     z-index: 1;
     margin-top: calc(-1 * var(--composer-over));
     background: linear-gradient(transparent, var(--bg) var(--composer-over));
   }
 
-  .terminal-stack.is-chat:not(.is-greeted) > .terminal-surface + .prompt-dock:empty + .composer .composer-surface {
+  .terminal-stack.is-chat:not(.is-greeted) > .terminal-surface + .prompt-dock:empty + .composer:not(.has-notices) .composer-surface {
     background: var(--card-glass);
     -webkit-backdrop-filter: var(--glass-blur);
     backdrop-filter: var(--glass-blur);

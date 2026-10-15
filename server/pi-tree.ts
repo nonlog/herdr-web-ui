@@ -9,6 +9,10 @@
  */
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 
+/** Bound work/retention, not cumulative history bytes: pages already bound transcript reads. */
+export const MAX_PI_INDEX_ENTRIES = 100_000;
+export const MAX_PI_ENTRY_BYTES = 16 * 1024 * 1024;
+const MAX_PI_INDEX_METADATA_BYTES = 32 * 1024 * 1024;
 /**
  * Bound the number of disjoint ranges, not the accumulated transcript bytes. A
  * long-lived Pi session can exceed 64 MiB while its live branch remains one
@@ -19,6 +23,9 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
  * thousands of little file slices, so keep that independent resource bound.
  */
 export const MAX_BRANCH_SEGMENTS = 4096;
+/** Index cache is bounded by metadata size rather than the transcript's cumulative bytes. */
+export const PI_INDEX_CACHE_BYTES = MAX_PI_INDEX_METADATA_BYTES;
+const PI_INDEX_CACHE_FILES = 4;
 
 /** One range of the transcript file, in the order it should be read. */
 export interface TranscriptSegment { start: number; end: number }
@@ -27,6 +34,7 @@ interface PiEntry { id: string; parent: string | null; start: number; end: numbe
 interface PiIndex {
   /** the file the index was built from (device and inode): another file at the same path starts over */
   file: string;
+  retainedBytes: number;
   /** the tree's children in append order; entries without an id (the session header) are not nodes */
   entries: PiEntry[];
   children: Map<string, PiEntry[]>;
@@ -47,7 +55,9 @@ function indexEntry(line: string, start: number, end: number): PiEntry | null {
   // type and role are taken here because the line is parsed for this anyway: what counts as a
   // turn is decided later by a reader that must not pay for a second pass over the file
   const message = entry.message;
+  if (entry.id.length > 256 || (typeof entry.parentId === "string" && entry.parentId.length > 256)) throw new Error("Pi entry identity exceeds limit");
   const role = message !== null && typeof message === "object" && typeof message.role === "string" ? message.role : "";
+  if ((typeof entry.type === "string" && entry.type.length > 64) || role.length > 64) throw new Error("Pi entry metadata exceeds limit");
   return {
     id: entry.id,
     parent: typeof entry.parentId === "string" && entry.parentId.length > 0 ? entry.parentId : null,
@@ -55,12 +65,12 @@ function indexEntry(line: string, start: number, end: number): PiEntry | null {
     end,
     type: typeof entry.type === "string" ? entry.type : "",
     role,
-    summary: typeof entry.summary === "string" ? entry.summary : null,
+    summary: entry.type === "branch_summary" && typeof entry.summary === "string" ? entry.summary : null,
   };
 }
 
 function buildIndex(path: string, size: number, file: string): PiIndex {
-  const index: PiIndex = { file, entries: [], children: new Map(), scanned: 0, tail: "" };
+  const index: PiIndex = { file, retainedBytes: 0, entries: [], children: new Map(), scanned: 0, tail: "" };
   extendIndex(index, path, size);
   return index;
 }
@@ -88,6 +98,7 @@ function extendIndex(index: PiIndex, path: string, size: number): void {
       const read = chunk.subarray(0, got);
       if (!read.includes(0x0a)) {
         open.push(read);
+        if (carry.length + open.reduce((sum, part) => sum + part.length, 0) > MAX_PI_ENTRY_BYTES) throw new Error("Pi record exceeds read limit");
         end += got;
         continue;
       }
@@ -97,11 +108,13 @@ function extendIndex(index: PiIndex, path: string, size: number): void {
       const base = end - held - carry.length; // absolute offset of bytes[0]
       let offset = 0;
       for (let newline = bytes.indexOf(0x0a); newline !== -1; newline = bytes.indexOf(0x0a, offset)) {
+        if (newline - offset > MAX_PI_ENTRY_BYTES) throw new Error("Pi record exceeds read limit");
         const entry = indexEntry(bytes.subarray(offset, newline).toString("utf8"), base + offset, base + newline + 1);
         if (entry) addEntry(index, entry);
         offset = newline + 1;
       }
       carry = bytes.subarray(offset);
+      if (carry.length > MAX_PI_ENTRY_BYTES) throw new Error("Pi record exceeds read limit");
       end += got;
     }
     index.scanned = end - carry.length - open.reduce((sum, part) => sum + part.length, 0);
@@ -120,6 +133,9 @@ function readBefore(path: string, offset: number, bytes: number): string {
 }
 
 function addEntry(index: PiIndex, entry: PiEntry): void {
+  if (index.entries.length >= MAX_PI_INDEX_ENTRIES) throw new Error("Pi index entry limit reached");
+  index.retainedBytes += 192 + 2 * (entry.id.length + (entry.parent?.length ?? 0) + entry.type.length + entry.role.length + (entry.summary?.length ?? 0));
+  if (index.retainedBytes > MAX_PI_INDEX_METADATA_BYTES) throw new Error("Pi index metadata budget reached");
   index.entries.push(entry);
   if (entry.parent === null) return;
   const siblings = index.children.get(entry.parent);
@@ -137,14 +153,22 @@ export function piEntryIndex(path: string): PiIndex | null {
   // a truncation or an in-place replacement can, and only the tail check tells them apart;
   // a file put in the old one's place (an import, a restore) is another file even where its
   // tail reads the same
-  if (cached && cached.file === file && cached.scanned <= size && readBefore(path, cached.scanned, 64) === cached.tail) {
-    extendIndex(cached, path, size);
-    return cached;
-  }
-  const fresh = buildIndex(path, size, file);
-  piIndexes.set(path, fresh);
-  if (piIndexes.size > 32) piIndexes.delete(piIndexes.keys().next().value!);
-  return fresh;
+  piIndexes.delete(path); // a failed extension must not leave a partially indexed graph cached
+  try {
+    const reusable = cached && cached.file === file && cached.scanned <= size && readBefore(path, cached.scanned, 64) === cached.tail;
+    const fresh = reusable ? cached : buildIndex(path, size, file);
+    if (reusable) extendIndex(fresh, path, size);
+    piIndexes.set(path, fresh); // last in the map's order: the most recently read
+    let total = 0;
+    for (const item of piIndexes.values()) total += item.retainedBytes;
+    for (const [other, item] of piIndexes) {
+      if (piIndexes.size <= PI_INDEX_CACHE_FILES && total <= PI_INDEX_CACHE_BYTES) break;
+      if (other === path) break; // the builder never accepts more than the budget, so this one fits alone
+      piIndexes.delete(other);
+      total -= item.retainedBytes;
+    }
+    return fresh;
+  } catch { return null; }
 }
 
 /** Drops one file's index: the next read rebuilds it from the file, which is all it ever was. */
@@ -194,6 +218,34 @@ export function piBranchSegments(path: string, size: number): TranscriptSegment[
     }
   }
   return segments;
+}
+
+/** Read auxiliary tool/image records one at a time, never allocating a merged branch range. */
+export function* piBranchRecords(path: string, size: number): Generator<string> {
+  const branch = piBranchSegments(path, size), index = piEntryIndex(path);
+  if (!branch || !index || (index.entries.at(-1)?.end ?? 0) > size) return;
+  let fd: number;
+  try { fd = openSync(path, "r"); } catch { return; } // moved or removed since it was indexed: nothing to read
+  try {
+    for (const segment of branch) {
+      let low = 0, high = index.entries.length;
+      while (low < high) { const mid = (low + high) >>> 1; if (index.entries[mid]!.start < segment.start) low = mid + 1; else high = mid; }
+      for (let at = low; at < index.entries.length; at++) {
+        const entry = index.entries[at]!;
+        if (entry.end > segment.end) break;
+        const length = entry.end - entry.start;
+        if (length > MAX_PI_ENTRY_BYTES + 1) return;
+        const bytes = Buffer.alloc(length);
+        if (readSync(fd, bytes, 0, length, entry.start) !== length) return;
+        yield bytes.toString("utf8");
+      }
+    }
+  } finally { closeSync(fd); }
+}
+
+/** Test/diagnostic summary: metadata estimates only; never session contents. */
+export function piIndexCacheUsage(): { files: number; estimatedBytes: number } {
+  return { files: piIndexes.size, estimatedBytes: [...piIndexes.values()].reduce((sum, item) => sum + item.retainedBytes, 0) };
 }
 
 /**

@@ -8,7 +8,7 @@
 
 - Fork：`nonlog/herdr-web-ui`；插件 ID 仍为 `devswha.herdr-web-ui`，不得因仓库名称不同而更改。
 - Windows 工作区：`D:\Workspace\herdr-web-ui`。
-- 上游同步：最初吸收 v0.4.1 后，继续合并 v0.4.5（`21d1b9208ac489f8690fe8ba758dc5cd73842cf6`）；现已真正合并其后 87 个上游提交至 `5a9fe391e8239c5f038c129e885b7cec15a68b99`，保留完整祖先关系。`docs/upstream-sync-state.json` 的 `last_merged_sha` 与 Git 历史共同验证同步状态。Fork 保留 Windows Codex 回归、运行包产物和四项完整验证门禁。
+- 上游同步：最初吸收 v0.4.1 与 v0.4.5 后，先合并至 `5a9fe391e8239c5f038c129e885b7cec15a68b99`，再处理积压的 163 个上游提交至 `79beb36a82e0ca2eff7ab995c774b290af52a9b8`，保持真实的双父 Git 祖先关系。`docs/upstream-sync-state.json` 的 `last_merged_sha` 与 Git 历史共同验证同步状态。Fork 保留 Windows Codex 回归、运行包产物和四项完整验证门禁；源码通过 CI 后才可并入 main。
 - 验证使用的 Herdr 基线：0.9.3；原生 Windows 不具备直接 `terminal attach`，不能误当成 Unix 平台。
 - 只向用户 Fork 推送，不向上游提交 PR。所有助手创建的提交，author 与 committer 均为 `Codex <codex@openai.com>`。
 

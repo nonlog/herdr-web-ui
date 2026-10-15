@@ -4,7 +4,6 @@ import { canHighlight, countLines, extendLines, LINE_ELEMENT_LIMIT, normalizeCod
 import { highlightedFrom, highlightKnown, highlightOffThread, type Highlighted } from "../lib/highlightOffThread.ts";
 import { useT } from "../lib/i18n.ts";
 import { linkFilePaths, linksFilePaths } from "./FilePathLink.tsx";
-import { useSettings } from "../lib/settings.ts";
 import "./HighlightedCode.css";
 
 /**
@@ -12,13 +11,12 @@ import "./HighlightedCode.css";
  * never holds the page: short code is highlighted at once, longer code in a worker (shown plain
  * until it answers, or with the colors it had while a reply grows), and code the worker gives up on
  * stays plain. Above `limit` characters, or `LINE_ELEMENT_LIMIT` lines, it is not tried at all;
- * otherwise the worker's budget bounds it. Off in Settings, or in a language it has no grammar for,
- * every code is plain and never too long.
+ * otherwise the worker's budget bounds it. In a language it has no grammar for, every code is plain
+ * and never too long.
  */
 export function useHighlightedLines(code: string, language: string | null, limit?: number): Highlighted {
-  const { settings } = useSettings();
   const source = useMemo(() => normalizeCode(code), [code]);
-  const highlighted = settings.highlightCode && canHighlight(language) ? language : null;
+  const highlighted = canHighlight(language) ? language : null;
   const manyLines = useMemo(() => countLines(source) > LINE_ELEMENT_LIMIT, [source]);
   const overLimit = highlighted !== null && ((limit !== undefined && code.length > limit) || manyLines);
   // what is known without waiting: no language, too long, short enough, or highlighted before
@@ -58,6 +56,8 @@ interface CodeLinesProps {
   lineNumbers?: boolean;
   wrap?: boolean;
   className?: string;
+  /** A requested source line; the host has checked that it is among the numbered lines. */
+  markedLine?: number | null;
   /** opens a file path the code names; null leaves every path as text */
   open: ((path: string) => void) | null;
 }
@@ -74,7 +74,7 @@ interface CodeLinesProps {
  * Past `LINE_ELEMENT_LIMIT` lines it is one text, as drawing an element per line would hold the page.
  * The ref is that `<pre>`: the file viewer selects it when the clipboard is out of reach.
  */
-export const CodeLines = memo(forwardRef<HTMLPreElement, CodeLinesProps>(function CodeLines({ lines, open, lineNumbers = false, wrap = false, className }, ref) {
+export const CodeLines = memo(forwardRef<HTMLPreElement, CodeLinesProps>(function CodeLines({ lines, open, lineNumbers = false, wrap = false, className, markedLine = null }, ref) {
   // one text past LINE_ELEMENT_LIMIT lines, with no numbers then: they are an element per line
   const plain = lines.length > LINE_ELEMENT_LIMIT;
   // index keys: the lines are a static list that is rebuilt as a whole
@@ -83,11 +83,11 @@ export const CodeLines = memo(forwardRef<HTMLPreElement, CodeLinesProps>(functio
     : lines.map((tokens, index) => (
       <Fragment key={index}>
         {index > 0 && "\n"}
-        <span className="hl-line">
+        <span className={index + 1 === markedLine ? "hl-line is-marked" : "hl-line"} data-line={index + 1}>
           {tokens.map((token, n) => token.role === null ? <Fragment key={n}>{linkFilePaths(token.text, open)}</Fragment> : <span className={`hl-${token.role}`} key={n}>{linkFilePaths(token.text, open)}</span>)}
         </span>
       </Fragment>
-    )), [lines, plain, open]);
+    )), [lines, plain, open, markedLine]);
   const numbered = lineNumbers && !plain;
   // the gutter is as wide as the last line's number, at least two digits
   const gutter = numbered ? { "--hl-digits": String(Math.max(2, String(lines.length).length)) } as CSSProperties : undefined;

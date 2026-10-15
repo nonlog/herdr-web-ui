@@ -1,26 +1,27 @@
 import { type CSSProperties, type DragEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Bell, Ellipsis, FolderInput, FolderOpen, Link, Lock, Menu, MessageSquare, PanelLeft, Plus, Search, SquareTerminal, X } from "lucide-react";
+import { Bell, Ellipsis, FolderOpen, Link, Menu, MessageSquare, PanelLeft, Search, SquareTerminal, X } from "lucide-react";
 
 import type { AgentStatus, ServerMessage, AccessRefusal, HealthAuth, HerdrPane } from "../shared/protocol.ts";
 import { ApiError, authenticate, fetchHealth, fetchBridgeHealth, fetchMachines, fetchSession, pairDevice, routeMissing, sendTestPush, signOut, splitPane, zoomPane, type HealthInfo } from "./lib/api.ts";
 import { deviceLabel, takePairCode } from "./lib/phone.ts";
-import { displayPaneTitle } from "./components/Sidebar.tsx";
+import { alertPaneTitle, displayPaneTitle } from "./components/Sidebar.tsx";
 import { PaneCanvas } from "./components/PaneCanvas.tsx";
 import { MachineSessionsProvider } from "./lib/machineSessionContext.tsx";
 import { PaneTerminal } from "./components/PaneTerminal.tsx";
 import { PANE_TABPANEL_ID, paneTabPanelLabel } from "./lib/paneRegion.ts";
+import { worktreeRepoName } from "./lib/composerStrip.ts";
 import { AccessGate } from "./components/AccessGate.tsx";
 import { AgentMark } from "./components/AgentMark.tsx";
 import { NewSessionDialog, type NewTabTarget } from "./components/NewSessionDialog.tsx";
-import { MovePaneMenu } from "./components/MovePaneMenu.tsx";
 import { passingFolder, recentDirectories } from "./lib/recent-directories.ts";
 import { usePreferencesSync } from "./lib/preferencesSync.ts";
 import { TabStrip } from "./components/TabStrip.tsx";
 import { SettingsDialog } from "./components/SettingsDialog.tsx";
 import { loadedOnSettingsEntry, onSettingsHistory, recordSettings, settingsEntry } from "./lib/settingsHistory.ts";
-import { fileFromLink, followMoved, isNavigation, linkSearch, linksSomewhere, NAV_KEY, readLink, resolveLink, slugOf, type AppLink, type CreateDraft, type LinkNote } from "./lib/deepLink.ts";
+import { fileFromLink, isNavigation, linkSearch, linksSomewhere, NAV_KEY, readLink, resolveLink, slugOf, type AppLink, type CreateDraft, type LinkNote } from "./lib/deepLink.ts";
 import { copyText } from "./lib/clipboard.ts";
 import { CommandPalette } from "./components/CommandPalette.tsx";
+import { paletteOpenQuery } from "./lib/paletteSeed.ts";
 import { MachineContext } from "./lib/machineContext.tsx";
 import { MachineActionBanner, MachineSidebar } from "./components/MachineSidebar.tsx";
 import { SidebarResizer } from "./components/SidebarResizer.tsx";
@@ -33,7 +34,6 @@ import { paneStorageId, type Machine, type MachineEvent } from "../shared/machin
 import { takeAuthTokenFromUrl } from "./lib/authLink.ts";
 import { applyPaneStatus } from "./lib/snapshot.ts";
 import { rosterPanes } from "./lib/dagPane.ts";
-import { carryPaneRecords, paneMovedTo, paneMovePending, paneMovesVersion, recordPaneMove, subscribePaneMoves } from "./lib/paneMove.ts";
 import { SnapshotRequests } from "./lib/snapshotRequests.ts";
 import { alertPrefs, useSettings } from "./lib/settings.ts";
 import { useShortcuts } from "./lib/shortcuts.ts";
@@ -52,15 +52,18 @@ import {
   type NotificationState,
 } from "./lib/notifications.ts";
 import { ensurePushSubscription, pushSupported, removePushSubscription } from "./lib/push.ts";
-import { notificationTargetFromSearch, notificationViewForPane, onNotificationTarget, type NotificationTarget } from "./lib/notificationTarget.ts";
+import { machineGone, notificationLanding, notificationTargetFromSearch, sameLink, notificationViewForPane, onNotificationTarget, type NotificationTarget } from "./lib/notificationTarget.ts";
 import { useUpdates } from "./lib/updates.ts";
 import { UpdateNotice } from "./components/UpdateControls.tsx";
 import { LanExposureNotice } from "./components/LanExposureNotice.tsx";
 import { TelemetryNotice } from "./components/TelemetryControls.tsx";
 import { FilesDialog } from "./components/FilesDialog.tsx";
+import { folderQueryFor } from "./lib/paletteFolders.ts";
 import { FileViewer } from "./components/FileViewer.tsx";
+import { RepoDiffViewer } from "./components/RepoDiffViewer.tsx";
 import { OpenFileContext } from "./lib/filePaths.ts";
 import { useFileViewer } from "./lib/useFileViewer.ts";
+import { useRepoDiffViewer } from "./lib/useRepoDiffViewer.ts";
 import { useT } from "./lib/i18n.ts";
 import { markSelection, selectionStill, type SelectionMark } from "./lib/selectionMark.ts";
 import { useScreenWakeLock } from "./lib/wakeLock.ts";
@@ -72,6 +75,8 @@ import { createAlertTurnPlayer } from "./lib/alertTurns.ts";
 import { dockPane, draggedPane, dropSide, otherSlot, PANE_DRAG_TYPE, sameTarget, slotSide, storedSplit, storeSplit, type SplitSide, type SplitSlot, type SplitState, type SplitTarget } from "./lib/split.ts";
 import { paneDrag } from "./lib/paneDrag.ts";
 import { SplitDropPreview } from "./components/SplitDropPreview.tsx";
+import { CrashProbe, RegionCrash } from "./components/AppCrash.tsx";
+import { RenderBoundary } from "./components/RenderBoundary.tsx";
 
 const APP_TITLE = "herdr web ui";
 /** how soon after a key press a focus counts as the user's own (lastKeyAtRef) */
@@ -150,7 +155,7 @@ function Brand() {
 export function App() {
   const t = useT();
   const apple = /Mac|iPhone|iPad/.test(navigator.platform);
-  const { settings, resolvedTheme, update: updateSettings } = useSettings();
+  const { settings, resolvedTheme, resolvedPalette, update: updateSettings } = useSettings();
   // this device's alert choices: sent with its push subscription, and applied to tab alerts here
   const alerts = useMemo(() => alertPrefs(settings), [settings.alertInput, settings.alertDone]);
   const alertsRef = useRef(alerts);
@@ -240,8 +245,26 @@ export function App() {
   const pendingLink = useRef<AppLink | null>(initialLink && (initialLink.pane || initialLink.workspace || fileFromLink(initialLink)) ? initialLink : null);
   // state, not only the ref: what waits on the link landing (the address, its file) runs again when it does
   const [linkLanded, setLinkLanded] = useState(() => pendingLink.current === null);
+  // A PC is gone only by a roster the server sent after it was named (lib/notificationTarget.ts
+  // machineGone): the count of rosters in, and the count when the pending link and the selection
+  // were made (a remembered selection: 0, so the first roster checks it)
+  const rosterSeq = useRef(0);
+  const linkSince = useRef(0);
+  const selectionSince = useRef(0);
+  // the checks run again on a roster that came in while a link waits (the same list, kept as it
+  // was, changes nothing they watch), and on a link a tap set (its pane may be the one selected)
+  const [rosterTick, setRosterTick] = useState(0);
+  const [linkTick, setLinkTick] = useState(0);
+  const rosterIn = useCallback((): void => {
+    rosterSeq.current += 1;
+    if (pendingLink.current !== null) setRosterTick(rosterSeq.current);
+  }, []);
   // the file a link named, opened over its pane once that pane is shown
   const pendingFile = useRef<string | null>(initialLink ? fileFromLink(initialLink) : null);
+  // the workspace a tapped alert named for the pane it selected at once: a roster in hand may
+  // still list a pane that has ended (a phone resumed from the background), and when the next
+  // one drops it, that workspace opens with a word, as a link's does. Any other pick clears it.
+  const selectionHint = useRef<{ machine: string; pane: string; workspace: string } | null>(null);
   // a short word in the header: a link that could not open what it named, or a link copied
   const [headerNote, setHeaderNote] = useState<LinkNote | "copied" | null>(null);
   useEffect(() => {
@@ -268,6 +291,19 @@ export function App() {
   }, [selectedMachineId, selectedPaneId]);
   // on a phone the drawer follows a swipe in from the left edge, and a swipe back (lib/edgeSwipe.ts)
   useEffect(() => watchDrawerSwipe(() => drawerOpenRef.current, setDrawerOpen), []);
+  // Escape puts the open drawer away and goes no further: in the capture phase, so a terminal that kept the
+  // focus never receives it. A dialog or an IME composition on top keeps its own Escape
+  useEffect(() => {
+    const onEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || !drawerOpenRef.current || event.isComposing || event.keyCode === 229) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onEscape, true);
+    return () => window.removeEventListener("keydown", onEscape, true);
+  }, []);
   // a desktop opened by a link that says so starts with the sidebar collapsed, and the address says so while it is
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => initialLink?.sidebar === "hidden");
   // the width the sidebar's edge was dragged to on this device; null is the density's own
@@ -316,33 +352,23 @@ export function App() {
   // a tab dragged out of its strip (lib/paneDrag.ts)
   const tabDrag = useSyncExternalStore(paneDrag.subscribe, paneDrag.snapshot);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const openPalette = useCallback((query?: unknown) => { setPaletteQuery(paletteOpenQuery(query)); setPaletteOpen(true); }, []);
   const paneControls = useRef<PaneControls | null>(null);
   const [findRequest, setFindRequest] = useState<{ paneId: string | null; serial: number }>({ paneId: null, serial: 0 });
-  // the header's More menu: its button, and whether it opened on a phone-width screen
-  const [more, setMore] = useState<{ anchor: HTMLElement; phone: boolean } | null>(null);
+  // the header's More menu: its button
+  const [more, setMore] = useState<{ anchor: HTMLElement } | null>(null);
   const closeMore = useCallback(() => setMore(null), []);
   // the pane canvas's actions, for the phone's tab menu (TabStrip)
   const paneActionsRef = useRef<((target: HerdrPane) => RowMenuItem[]) | null>(null);
-  const moreOpen = more !== null;
-  // a sheet stays up through a resize: its palette item follows the header's palette button,
-  // which the same breakpoint hides
-  useEffect(() => {
-    if (!moreOpen) return;
-    const media = window.matchMedia("(max-width: 480px)");
-    const onChange = (): void => setMore((open) => open && { ...open, phone: media.matches });
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }, [moreOpen]);
   // the Files dialog, and the file open in the viewer (a path as the chat or the dialog gave it)
   const [filesOpen, setFilesOpen] = useState(false);
-  const [movingPane, setMovingPane] = useState<{ machineId: string; paneId: string; anchor: HTMLElement } | null>(null);
-  const movingOwner = movingPane ? machines.find((machine) => machine.id === movingPane.machineId) : null;
-  const movingLivePane = movingOwner?.state === "connected" ? movingOwner.snapshot?.panes.find((pane) => pane.pane_id === movingPane?.paneId) : null;
-  useEffect(() => { if (movingPane && !movingLivePane) setMovingPane(null); }, [movingPane, movingLivePane]);
   const { viewing, openFile, closeFile } = useFileViewer();
   const viewFile = useCallback((path: string) => {
     openFile({ path, paneId: selectedPaneId, machineId: selectedMachineId });
   }, [openFile, selectedPaneId, selectedMachineId]);
+  // a repository diff from the Files dialog's Changes tab, an entry of its own like a file
+  const { viewing: diffViewing, openDiff, closeDiff } = useRepoDiffViewer();
   // a link to Settings opens it on its page, for that first opening alone
   const [settingsOpen, setSettingsOpen] = useState(() => initialLink?.settings != null);
   const [settingsLinkPage, setSettingsLinkPage] = useState<string | null>(() => initialLink?.settings ?? null);
@@ -376,6 +402,8 @@ export function App() {
   // the dialog makes a tab in this workspace instead of a workspace, while set
   const [newTab, setNewTab] = useState<NewTabTarget | null>(null);
   const [connected, setConnected] = useState(false);
+  // the active slot's pane could not be drawn: no terminal is attached there to say so itself
+  const paneLost = useCallback(() => setConnected(false), []);
   const [outputStopped, setOutputStopped] = useState(false);
   const [notifications, setNotifications] = useState<NotificationState>(() => notificationState());
   // this device has a server-side push subscription: alerts come from the server, not the tab
@@ -411,6 +439,7 @@ export function App() {
     try {
       await snapshotRequests.current.read(fetchMachines, (next) => {
         setMachines((previous) => sameData(previous, next) ? previous : next);
+        rosterIn();
         setMachineRosterLoaded(true);
         setError(null); setLocked(false);
       });
@@ -419,7 +448,7 @@ export function App() {
       if (err instanceof ApiError && err.status === 401) { setLocked(true); return; }
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, []);
+  }, [rosterIn]);
 
   useEffect(() => {
     const tick = (): void => {
@@ -493,7 +522,7 @@ export function App() {
       machineId: machine.id,
       paneId: pane.pane_id,
       agent: pane.agent ?? null,
-      title: displayPaneTitle(pane),
+      title: alertPaneTitle(pane),
       machine: machinesRef.current.length > 1 ? machine.name : null,
       kind,
     });
@@ -545,6 +574,7 @@ export function App() {
       if (payload.type === "machines") {
         seedStatuses(statusRef.current, alerting(payload.machines), { started: turnStartRef.current, lasted: lastTurnRef.current });
         setMachines((previous) => sameData(previous, payload.machines) ? previous : payload.machines);
+        rosterIn();
         setMachineRosterLoaded(true);
         return;
       }
@@ -564,7 +594,7 @@ export function App() {
           dropIn(machine, pane, kind);
           chime(machine, pane, kind);
         }
-        if (pane && shouldNotifyStatus(previous, status) && alertsOnRef.current && !pushOnRef.current && alertsAllow(alertsRef.current, status)) showPaneStatusNotification(message.pane_id, `${machine.name} · ${displayPaneTitle(pane)}`, status, () => selectTargetRef.current(machine.id, message.pane_id, "chat"), machine.id);
+        if (pane && shouldNotifyStatus(previous, status) && alertsOnRef.current && !pushOnRef.current && alertsAllow(alertsRef.current, status)) showPaneStatusNotification(message.pane_id, `${machine.name} · ${alertPaneTitle(pane)}`, status, () => takeNotificationTargetRef.current({ machine_id: machine.id, pane_id: message.pane_id, view: "chat", workspace_id: pane.workspace_id }), machine.id, pane.workspace_id);
         setMachines((list) => {
           let changed = false;
           const next = list.map((m) => {
@@ -587,7 +617,7 @@ export function App() {
       }
       if (message.type === "pane-exited" && alertsOnRef.current && !pushOnRef.current && alertsRef.current.done !== "off") {
         const pane = machine.snapshot?.panes.find((p) => p.pane_id === message.pane_id);
-        if (pane) showPaneEndedNotification(message.pane_id, `${machine.name} · ${displayPaneTitle(pane)}`, () => selectTargetRef.current(machine.id, message.pane_id, "chat"), machine.id);
+        if (pane) showPaneEndedNotification(message.pane_id, `${machine.name} · ${alertPaneTitle(pane)}`, () => takeNotificationTargetRef.current({ machine_id: machine.id, pane_id: message.pane_id, view: "chat", workspace_id: pane.workspace_id }), machine.id, pane.workspace_id);
       }
       if (message.type === "session-changed" || message.type === "pane-exited") scheduleRefetch();
     };
@@ -673,10 +703,12 @@ export function App() {
     try {
       await signOut();
     } catch {
-      /* the cookie may still be set: the health answer decides whether the gate shows */
+      throw new Error(t("Could not sign out. Try again."));
+    } finally {
+      // The response may have been lost after the cookie was cleared.
+      await loadHealth();
     }
-    await loadHealth();
-  }, [loadHealth]);
+  }, [loadHealth, t]);
 
   const selectedMachineRef = useRef(selectedMachineId);
   selectedMachineRef.current = selectedMachineId;
@@ -698,11 +730,11 @@ export function App() {
     storeSelection(machineId, paneId);
     // a pane picked (a tapped notification, the sidebar, Back) before a link landed supersedes the link
     pendingLink.current = null; pendingFile.current = null; setLinkLanded(true);
+    selectionHint.current = null;
+    // a PC picked now (Open PC, before load() brings it) is checked against a roster sent after this
+    selectionSince.current = rosterSeq.current;
   }, [inOtherHalf, setSplit]);
   const selectTargetRef = useRef(selectTarget); selectTargetRef.current = selectTarget;
-  // the moves this client asked for and has no answer to yet (MovePaneMenu): the effect below
-  // looks again when one ends, since a failed move leaves the selection to it after all
-  const movesVersion = useSyncExternalStore(subscribePaneMoves, paneMovesVersion);
   useEffect(() => {
     // An offline PC's cached roster cannot invalidate a selection. Once connected,
     // a closed pane (including one remembered across reloads) must release its selection.
@@ -756,20 +788,29 @@ export function App() {
     let cancelled = false;
     void fetchSession(selectedMachineId).then((current) => {
       if (cancelled || current.panes.some((pane) => pane.pane_id === selectedPaneId)) return;
-      // the pane is gone because this client is moving it and the roster outran the answer:
-      // the answer names the id to follow (actions.paneMoved), and herdr's focus is not it
-      if (paneMovePending(selectedMachineId, selectedPaneId)) return;
+      // a pane a tapped alert selected: the workspace the alert named opens, and says so
+      const hint = selectionHint.current;
+      selectionHint.current = null;
+      if (hint && hint.machine === selectedMachineId && hint.pane === selectedPaneId) {
+        const landed = resolveLink(current, { workspace: hint.workspace, workspaceSlug: null, pane: hint.pane });
+        if (landed.note) setHeaderNote(landed.note);
+        setNotificationViewTarget(null);
+        setSelectedPaneId(landed.pane ?? fallback(current));
+        setAutoSelected(true);
+        return;
+      }
       setSelectedPaneId(fallback(current));
       setAutoSelected(true);
     }).catch(() => { /* a failed read is not evidence that the pane disappeared */ });
     return () => { cancelled = true; };
-  }, [snapshot, selectedPaneId, selectedMachineId, selectedMachine?.state, movesVersion]);
+  }, [snapshot, selectedPaneId, selectedMachineId, selectedMachine?.state, linkTick]);
   useEffect(() => {
     storeSelection(selectedMachineId, selectedPaneId);
   }, [selectedMachineId, selectedPaneId]);
 
   const selectPane = useCallback((paneId: string, focusInput = true) => {
     pendingLink.current = null; pendingFile.current = null; setLinkLanded(true);
+    selectionHint.current = null;
     const open = splitRef.current;
     const current = selectionRef.current;
     if (open && current.paneId !== null && inOtherHalf(current.machineId, paneId)) {
@@ -789,8 +830,28 @@ export function App() {
     else console.warn(what, err);
   }, [t]);
 
-  // a tapped notification focuses this window and names the pane (public/sw.js)
-  useEffect(() => onNotificationTarget((target) => selectTargetRef.current(target.machine_id, target.pane_id, target.view)), []);
+  // a tapped notification focuses this window and names the pane (public/sw.js). A pane not known
+  // yet waits as a link does (this also keeps a cold start's link, which the worker names again
+  // once the page is up), and so does one on a PC this roster lacks: a roster asked for now says
+  // whether it was removed (the [machines] effect below) or set up since this one was read
+  const takeNotificationTarget = useCallback((target: NotificationTarget): void => {
+    const landing = notificationLanding(machinesRef.current, target);
+    if (landing.kind === "select") {
+      selectTargetRef.current(target.machine_id, target.pane_id, target.view);
+      if (target.workspace_id) selectionHint.current = { machine: target.machine_id, pane: target.pane_id, workspace: target.workspace_id };
+      return;
+    }
+    // the worker names one tap twice, before and after focus: the second leaves the first's lookup be
+    if (sameLink(pendingLink.current, landing.link)) return;
+    selectTargetRef.current(target.machine_id, target.pane_id, target.view);
+    pendingLink.current = landing.link; pendingFile.current = null; setLinkLanded(false);
+    linkSince.current = rosterSeq.current;
+    setLinkTick((tick) => tick + 1);
+    if (landing.stale) void load();
+  }, [load]);
+  // the tab's own alerts shown without a worker (lib/notifications.ts) land the same way
+  const takeNotificationTargetRef = useRef(takeNotificationTarget); takeNotificationTargetRef.current = takeNotificationTarget;
+  useEffect(() => onNotificationTarget(takeNotificationTarget), [takeNotificationTarget]);
 
 
   const selectedPane = snapshot?.panes.find((pane) => pane.pane_id === selectedPaneId) ?? null;
@@ -955,6 +1016,9 @@ export function App() {
     const inside = !!box && !!point && point.x >= box.left && point.x < box.right && point.y >= box.top && point.y < box.bottom;
     showDropTarget(box && point && inside ? dropSide(point.x, box.left, box.width, dropAtRef.current) : null);
   }, [tabDrag, splitDragOn, showDropTarget]);
+  // dragenter too: a drop hit-tests once more, and when the node under the pointer was replaced since
+  // the last dragover (xterm redraws its rows, a transcript renders again) the new node gets a
+  // dragenter instead. Chromium refuses a drop whose last drag event nobody accepted.
   const paneDragOver = (event: DragEvent<HTMLDivElement>): void => {
     if (!splitDragOn || !event.dataTransfer.types.includes(PANE_DRAG_TYPE)) return;
     event.preventDefault();
@@ -1031,9 +1095,7 @@ export function App() {
     // Back and Forward land where the address already says: nothing to write
     if (search === window.location.search) return;
     const url = `${window.location.pathname}${search}${window.location.hash}`;
-    // a move gives the pane a new id (lib/paneMove.ts): the same pane, so the same entry
-    const sameMoved = previous !== null && previous.machine === link.machine && paneMovedTo(previous.machine, previous.pane) === link.pane;
-    if (previous !== null && !popped && !sameMoved && !autoSelected && !settingsOpen && !newSessionOpen && isNavigation(previous, link)) window.history.pushState({ [NAV_KEY]: true }, "", url);
+    if (previous !== null && !popped && !autoSelected && !settingsOpen && !newSessionOpen && isNavigation(previous, link)) window.history.pushState({ [NAV_KEY]: true }, "", url);
     else window.history.replaceState(window.history.state, "", url);
   }, [locked, machines.length, snapshot, linkLanded, selectedMachineId, selectedPaneId, linkWorkspaceId, linkSlug, linkFile, view, settingsOpen, settingsPage, settingsLinkPage, settingsLinkSection, newSessionOpen, newTab, newFields, wideScreen, sidebarCollapsed, autoSelected]);
 
@@ -1061,6 +1123,7 @@ export function App() {
         if (!link.pane && !link.workspace) return;
         selectTargetRef.current(link.machine, link.pane, link.view ?? undefined);
         pendingLink.current = link; pendingFile.current = null; setLinkLanded(false);
+        linkSince.current = rosterSeq.current;
         poppedTo.current = true;
         return;
       }
@@ -1073,13 +1136,12 @@ export function App() {
       // an entry naming a PC since removed leaves the app where it is and says so, as a link to it would
       if (missing) setHeaderNote("machine-missing");
       else {
-        const target = followMoved(link, paneMovedTo(link.machine, link.pane), machine?.snapshot);
-        const pane = machine?.snapshot ? resolveLink(machine.snapshot, target).pane : target.pane;
+        const pane = machine?.snapshot ? resolveLink(machine.snapshot, link).pane : link.pane;
         if (pane === null) return;
         const current = selectionRef.current;
         // the entry's lens is drawn over the pane's own, as a tapped notification's is. Where it
         // lands is written over the entry, so Forward keeps the entries after it
-        if (current.machineId !== link.machine || current.paneId !== pane) { poppedTo.current = true; selectTargetRef.current(link.machine, pane, target.pane === pane ? link.view ?? undefined : undefined); return; }
+        if (current.machineId !== link.machine || current.paneId !== pane) { poppedTo.current = true; selectTargetRef.current(link.machine, pane, link.pane === pane ? link.view ?? undefined : undefined); return; }
       }
       // the same pane, or no PC to go to: the entry landed on may still say what is no longer shown
       // (the address a link to Settings opened the page with, under the dialog's own entries), so it says it now
@@ -1140,7 +1202,8 @@ export function App() {
         if (next) selectPane(next.pane_id);
       },
       setView,
-      toggleView: () => setView(view === "chat" ? "terminal" : "chat"),
+      toggleView: () => { setView(view === "chat" ? "terminal" : "chat"); setDrawerOpen(false); },
+      focusInput: () => paneControls.current?.focusInput(),
       scrollPage: (direction) => paneControls.current?.scrollPage(direction),
       openNewSession: () => {
         setDrawerOpen(false);
@@ -1167,20 +1230,12 @@ export function App() {
         setNewTab({ workspaceId: workspace.workspace_id, workspaceLabel: workspace.label, cwd: workspace.worktree?.checkout_path ?? inFront?.cwd ?? null, number: workspace.tab_count + 1 });
         setNewSessionOpen(true);
       },
-      openPalette: () => setPaletteOpen(true),
-      paneMoved: (machineId, previousPaneId, paneId) => {
-        if (previousPaneId === paneId) return;
-        carryPaneRecords(machineId, previousPaneId, paneId);
-        recordPaneMove(machineId, previousPaneId, paneId);
-        lenses.move(paneStorageId(machineId, previousPaneId), paneStorageId(machineId, paneId));
-        // the new id is selected before a snapshot without the old one can fall the selection
-        // back to herdr's focus; a pane moved from the sidebar while another is open stays unselected
-        const current = selectionRef.current;
-        if (current.machineId === machineId && current.paneId === previousPaneId) selectPane(paneId);
-      },
+      openPalette,
+      agentStarted: (machineId, paneId) => lenses.startedAgent(paneStorageId(machineId, paneId), window.matchMedia?.("(pointer: coarse)").matches === true),
       openFind: () => {
         if (selectedPaneId === null) return;
         setView("terminal");
+        setDrawerOpen(false);
         setFindRequest((request) => ({ paneId: selectedPaneId, serial: request.serial + 1 }));
       },
       openSettings: () => {
@@ -1200,7 +1255,7 @@ export function App() {
         else setSidebarCollapsed((collapsed) => !collapsed);
       },
       toggleTheme: () => updateSettings({ theme: resolvedTheme === "dark" ? "light" : "dark" }),
-      lock: canSignOut ? () => void lock() : null,
+      lock: canSignOut ? lock : null,
       enableNotifications: bellVisible && bell.run === enableNotifications ? () => void enableNotifications() : null,
       refresh: () => void load(),
       openFiles: selectedPaneId !== null ? () => { setDrawerOpen(false); setFilesOpen(true); } : null,
@@ -1232,19 +1287,22 @@ export function App() {
 
   // The header's More menu: what used to be three buttons of its own. Each item is there under
   // the condition its button had. At phone width the palette's button gives its room to the
-  // pane's title, and the palette is the menu's first item.
-  const paletteItem: RowMenuItem = { id: "palette", label: t("Command palette"), icon: Search, run: () => setPaletteOpen(true) };
+  // pane's title.
   // a link to a PC this app does not have lands on this PC instead, and says so: the roster lists
-  // every configured PC, connected or not, so one missing from it is not set up here
+  // every configured PC, connected or not, so one missing from it is not set up here. So does a
+  // selection of a PC removed since (a reload, a new window), here or on another device. Only a
+  // roster the server sent after the PC was named decides (lib/notificationTarget.ts machineGone)
   useEffect(() => {
     const linked = pendingLink.current;
-    if (!linked || machines.length === 0 || machines.some((machine) => machine.id === linked.machine)) return;
+    const machineId = linked ? linked.machine : selectedMachineRef.current;
+    const since = linked ? linkSince.current : selectionSince.current;
+    if (!machineGone(machines, rosterSeq.current, since, machineId)) return;
     pendingLink.current = null; pendingFile.current = null;
     setLinkLanded(true);
     setHeaderNote("machine-missing");
     // no pane: the link's pane id means nothing on another PC, so the pane herdr has in front opens
-    selectTarget("local", null);
-  }, [machines, selectTarget]);
+    selectTargetRef.current("local", null);
+  }, [machines, rosterTick, linkTick]);
 
   // a link to the New workspace dialog opens it once the PCs are in; one for a tab, once the
   // linked workspace's pane is selected (its folder is the workspace's, as the tab strip's + does)
@@ -1270,13 +1328,6 @@ export function App() {
 
   const moreItems: RowMenuItem[] = [
     ...(selectedPane && !selectedPane.restore_error ? [{ id: "find", label: t("Find in terminal"), icon: Search, run: actions.openFind }] : []),
-    ...(selectedPane && selectedWorkspace
-      ? [{ id: "new-tab", label: t("New tab"), title: t("New tab in {workspace}", { workspace: selectedWorkspace.label }), icon: Plus, run: () => actions.openNewTab() }]
-      : []),
-    ...(selectedPane ? [{ id: "move-pane", label: t("Move pane to…"), icon: FolderInput, run: () => {
-      const anchor = document.querySelector<HTMLElement>(".header-more-button");
-      if (anchor) setMovingPane({ machineId: selectedMachineId, paneId: selectedPane.pane_id, anchor });
-    } }] : []),
     ...(selectedPane ? [{ id: "files", label: t("Browse files"), icon: FolderOpen, run: () => setFilesOpen(true) }] : []),
     // the address says where the app is (lib/deepLink.ts); a phone has no address bar to copy it from
     { id: "copy-link", label: t("Copy link"), icon: Link, run: () => void copyText(window.location.href).then((ok) => { if (ok) setHeaderNote("copied"); }) },
@@ -1342,7 +1393,7 @@ export function App() {
           >
             <PanelLeft />
           </button>
-          <button type="button" className="icon-button palette-button" aria-label={t("Command palette")} title={t("Command palette (⌘⇧K)")} onClick={() => setPaletteOpen(true)}>
+          <button type="button" className="icon-button palette-button" aria-label={t("Command palette")} title={t("Command palette (⌘⇧K)")} onClick={() => openPalette()}>
             <Search />
           </button>
         </div>
@@ -1374,11 +1425,11 @@ export function App() {
         )}
         {selectedPane && (
           <div className="segmented view-switch" role="group" aria-label="Pane view">
-            <button type="button" aria-pressed={view === "chat"} onClick={() => setView("chat")} title={t("Chat transcript (⌘⇧J)")}>
+            <button type="button" aria-pressed={view === "chat"} onClick={() => { setView("chat"); setDrawerOpen(false); }} title={t("Chat transcript (⌘⇧J)")}>
               <MessageSquare />
               <span className="header-desktop-only">{t("Chat")}</span>
             </button>
-            <button type="button" aria-pressed={view === "terminal"} onClick={() => setView("terminal")} title={terminalAvailable ? t("Live terminal (⌘⇧J)") : t("Live terminal is unavailable on this bridge")}>
+            <button type="button" aria-pressed={view === "terminal"} onClick={() => { setView("terminal"); setDrawerOpen(false); }} title={terminalAvailable ? t("Live terminal (⌘⇧J)") : t("Live terminal is unavailable on this bridge")}>
               <SquareTerminal />
               <span className="header-desktop-only">{t("Terminal")}</span>
               {!terminalAvailable && <span className="pill pill-soon">{t("soon")}</span>}
@@ -1397,13 +1448,7 @@ export function App() {
             <span className="conn-text">{connWord}</span>
           </span>
           {!targetHerdr && <span className="pill pill-offline">{t("herdr offline")}</span>}
-          {canSignOut && (
-            <button type="button" className="icon-button lock-button header-desktop-only" aria-label={t("Sign out")} title={t("Sign out")} onClick={() => void lock()}>
-              <Lock />
-            </button>
-          )}
-          {/* with nothing of its own to offer it is still the phone's way to the palette */}
-          <span className={`header-more${moreItems.length === 0 ? " is-phone-only" : ""}`}>
+          <span className="header-more">
             <button
               type="button"
               className="icon-button header-more-button"
@@ -1413,7 +1458,7 @@ export function App() {
               aria-expanded={more !== null}
               onClick={(event) => {
                 const anchor = event.currentTarget;
-                setMore((open) => (open ? null : { anchor, phone: window.matchMedia("(max-width: 480px)").matches }));
+                setMore((open) => (open ? null : { anchor }));
               }}
             >
               <Ellipsis />
@@ -1431,7 +1476,7 @@ export function App() {
                 {crumb.path !== null && <span className="header-more-path">{crumb.path}</span>}
               </div>
             ) : undefined}
-            items={more.phone ? [paletteItem, ...moreItems] : moreItems}
+            items={moreItems}
             onClose={closeMore}
           />
         )}
@@ -1440,7 +1485,11 @@ export function App() {
       <div className="app-body">
         <aside id="workspace-drawer" className={`sidebar${drawerOpen ? " is-open" : ""}`}>
           {error && <div className="error-state" role="alert"><p>{error}</p><button className="btn" onClick={() => void load()}>{t("Retry")}</button></div>}
-          <MachineSidebar machines={machines} selectedMachineId={selectedMachineId} selectedPaneId={selectedPaneId} actions={actions} onSelect={selectTarget} onSetup={(machine, update = false) => { setUpdateRemote(update); setMachineDialog(machine); }} onNew={(id) => { setNewSessionMachineId(id); setNewTab(null); setNewSessionOpen(true); setDrawerOpen(false); }} />
+          {/* a sidebar that cannot be drawn leaves the panes working */}
+          <RenderBoundary resetKey={null} fallback={(retry) => <RegionCrash message={t("The sidebar can't be shown.")} retry={retry} />}>
+            <CrashProbe region="sidebar" />
+            <MachineSidebar machines={machines} selectedMachineId={selectedMachineId} selectedPaneId={selectedPaneId} actions={actions} onSelect={selectTarget} onSetup={(machine, update = false) => { setUpdateRemote(update); setMachineDialog(machine); }} onNew={(id) => { setNewSessionMachineId(id); setNewTab(null); setNewSessionOpen(true); setDrawerOpen(false); }} />
+          </RenderBoundary>
           <SidebarResizer width={sidebarWidth} onResize={setSidebarWidth} />
         </aside>
 
@@ -1458,7 +1507,7 @@ export function App() {
         {health?.lan_exposure && <LanExposureNotice host={health.lan_exposure.host} onOpen={() => { setSettingsLinkPage("devices"); setSettingsOpen(true); }} />}
         {/* the pane's tab, or two tabs side by side (lib/split.ts): a tab dragged down out of its strip,
             or a sidebar row dragged over this area, opens its pane in the half it is dropped on */}
-        <div ref={paneAreaRef} className={`pane-split${splitOn ? " is-split" : ""}`} onDragOverCapture={paneDragOver} onDragLeave={paneDragLeave} onDropCapture={paneDrop}>
+        <div ref={paneAreaRef} className={`pane-split${splitOn ? " is-split" : ""}`} onDragEnterCapture={paneDragOver} onDragOverCapture={paneDragOver} onDragLeave={paneDragLeave} onDropCapture={paneDrop}>
           {(["a", "b"] as const).map((slot) => {
             // one pane: the solo slot, or a split's active half where the window is too narrow for both
             if (!splitOn && slot !== (split ? split.active : soloSlot)) return null;
@@ -1466,6 +1515,7 @@ export function App() {
             const machineId = active ? selectedMachineId : split.other.machineId;
             const paneId = active ? selectedPaneId : split.other.paneId;
             const machine = active ? selectedMachine : otherMachine;
+            const herdr = active ? targetHerdr : otherHerdr;
             const pane = active ? selectedPane : otherPane;
             const workspace = active ? selectedWorkspace : otherWorkspace;
             const slotSnapshot = active ? snapshot : otherMachine?.snapshot ?? null;
@@ -1510,6 +1560,10 @@ export function App() {
                     </button>
                   </div>
                 )}
+                {/* a pane this half cannot draw leaves the sidebar and the other half working; picking
+                    another pane tries again */}
+                <RenderBoundary resetKey={`${machineId}:${paneId ?? ""}`} fallback={(retry) => <RegionCrash message={t("This pane can't be shown.")} retry={retry} onShown={active ? paneLost : undefined} />}>
+                <CrashProbe region="pane" />
                 {slotSnapshot && pane && workspace && (
                   <TabStrip snapshot={slotSnapshot} workspace={workspace} selectedPane={pane} panelId={slotPanelId} splitDrag={wideScreen} onSelectPane={onSelect}
                     onNewTab={() => actions.openNewTab(active ? undefined : { machineId, workspaceId: workspace.workspace_id })}
@@ -1526,13 +1580,13 @@ export function App() {
                 <main className="terminal-host">
                   <div id={slotPanelId} className="terminal-tabpanel" role={slotPanelLabel === null ? undefined : "tabpanel"} aria-label={slotPanelLabel ?? undefined}>
                   <PaneCanvas key={machineId} snapshot={slotSnapshot} pane={pane} selectedPaneId={paneId} onSelect={onSelect} onChanged={actions.refresh} actionsRef={active ? paneActionsRef : undefined}
-                    isTerminal={(item) => lensOf(item) === "terminal"}
                     renderPane={(item, itemActive, herdrSplit) => <OpenFileContext.Provider value={item ? (path) => openFile({ path, paneId: item.pane_id, machineId }) : null}>
                       <PaneTerminal
                         title={item ? displayPaneTitle(item) : active ? selectedTitle : null}
                         // Wait for the roster before attaching: the loading placeholder is replaced
                         // by the keyed tile, and must never claim the pane on a throwaway connection.
                         paneId={item?.restore_error ? null : item?.pane_id ?? null}
+                        mirrored={herdr ? herdr.terminal_attach === false || herdr.terminal_mirror === true : null}
                         restoreError={item?.restore_error ?? null}
                         agent={item?.agent ?? null}
                         agentStatus={item?.agent_status}
@@ -1541,6 +1595,8 @@ export function App() {
                         plan={machine?.state === "connected" ? (item as HerdrPane | undefined)?.plan ?? null : null}
                         backgroundWait={item?.background_wait === true}
                         cwd={item?.cwd ?? null}
+                        workspaceId={item?.workspace_id ?? null}
+                        worktreeRepo={worktreeRepoName(item === null ? undefined : slotSnapshot?.workspaces.find((workspace) => workspace.workspace_id === item.workspace_id))}
                         machineName={machine?.name ?? machineId}
                         view={item ? lensOf(item) : slotView}
                         // the other half never takes the keyboard: a press in it makes it active first
@@ -1551,18 +1607,17 @@ export function App() {
                         autoSelected={active ? autoSelected : true}
                         terminalFontSize={settings.terminalFontSize}
                         split={herdrSplit || splitOn}
-                        terminalCursorStyle={settings.terminalCursorStyle}
-                        terminalCursorBlink={settings.terminalCursorBlink}
                         terminalWheelSpeed={settings.terminalWheelSpeed}
                         terminalFontFamily={settings.terminalFontFamily}
                         theme={resolvedTheme}
-                        palette={settings.palette}
+                        palette={resolvedPalette}
                         onConnectionChange={active && itemActive ? (next) => { setConnected(next); if (next) setOutputStopped(false); } : undefined}
                         onServerMessage={active && itemActive ? handleServerMessage : undefined}
                       />
                     </OpenFileContext.Provider>} />
                   </div>
                 </main>
+                </RenderBoundary>
               </div>
               </MachineContext.Provider>
             );
@@ -1585,7 +1640,7 @@ export function App() {
         onClose={closeNewSession}
         onCreated={(paneId, agentStarted) => {
           closeNewSession();
-          if (agentStarted) lenses.startedAgent(paneStorageId(newSessionMachineId, paneId), window.matchMedia?.("(pointer: coarse)").matches === true);
+          if (agentStarted) actions.agentStarted(newSessionMachineId, paneId);
           selectTarget(newSessionMachineId, paneId);
           void load();
         }}
@@ -1598,17 +1653,20 @@ export function App() {
         setFilesOpen(false);
         selectTargetRef.current(machineId, paneId);
       }} />
-      {movingPane && movingLivePane && movingOwner?.snapshot && <MachineContext.Provider value={movingPane.machineId}><MovePaneMenu anchor={movingPane.anchor} snapshot={movingOwner.snapshot} pane={movingLivePane}
-        paneTitle={displayPaneTitle(movingLivePane)} onMoved={(moved) => actions.paneMoved(movingPane.machineId, moved.previous_pane_id, moved.pane.pane_id)}
-        onError={(reason) => setLayoutNotice(t("Move failed: {reason}", { reason }))} onClose={() => setMovingPane(null)} /></MachineContext.Provider>}
-      <SettingsDialog auth={auth} herdrVersion={health?.herdr?.version ?? null} open={settingsOpen} section={settingsSection} linkPage={settingsLinkPage} linkSection={settingsLinkSection} onPage={onSettingsPage} onClose={closeSettings} actions={actions} updates={updates} onEnableNotifications={enableNotifications} overPreview={viewing !== null} />
+      <SettingsDialog auth={auth} herdrVersion={health?.herdr?.version ?? null} open={settingsOpen} section={settingsSection} linkPage={settingsLinkPage} linkSection={settingsLinkSection} onPage={onSettingsPage} onClose={closeSettings} actions={actions} updates={updates} onEnableNotifications={enableNotifications} overPreview={viewing !== null || diffViewing !== null} />
       {filesOpen && selectedPane && (
-        <FilesDialog start={selectedPane.foreground_cwd ?? selectedPane.cwd ?? ""} viewing={viewing !== null} onOpenFile={viewFile} onClose={() => setFilesOpen(false)} />
+        <FilesDialog start={selectedPane.foreground_cwd ?? selectedPane.cwd ?? ""} paneId={selectedPane.pane_id} viewing={viewing !== null || diffViewing !== null} onOpenFile={viewFile}
+          onOpenDiff={(comparison, file) => openDiff({ machineId: selectedMachineId, paneId: selectedPane.pane_id, directory: selectedPane.foreground_cwd ?? selectedPane.cwd ?? null, ...comparison, path: file.path, oldPath: file.old_path })}
+          onBrowseFolders={(path) => actions.openPalette(folderQueryFor(path, null))}
+          onClose={() => setFilesOpen(false)} />
       )}
+      {diffViewing !== null && <MachineContext.Provider value={diffViewing.machineId}>
+        <RepoDiffViewer key={`${diffViewing.scope}:${diffViewing.path}`} target={diffViewing} onClose={closeDiff} onOpenFile={(path) => openFile({ path, paneId: diffViewing.paneId, machineId: diffViewing.machineId })} keyboardActive={!settingsOpen && viewing === null} />
+      </MachineContext.Provider>}
       {viewing !== null && <MachineContext.Provider value={viewing.machineId}>
         <FileViewer key={viewing.path} path={viewing.path} paneId={viewing.paneId} onClose={closeFile} onOpen={(path) => openFile({ ...viewing, path })} keyboardActive={!settingsOpen} />
       </MachineContext.Provider>}
-      <CommandPalette key={selectedMachineId} machines={machines} onSelect={selectTarget} open={paletteOpen} onClose={() => setPaletteOpen(false)} snapshot={snapshot} online={selectedMachine?.state === "connected"} selectedPaneId={selectedPaneId} view={view} actions={actions} />
+      <CommandPalette key={selectedMachineId} machines={machines} onSelect={selectTarget} open={paletteOpen} initialQuery={paletteQuery} onClose={() => setPaletteOpen(false)} snapshot={snapshot} online={selectedMachine?.state === "connected"} selectedPaneId={selectedPaneId} view={view} actions={actions} />
     </div></MachineContext.Provider></MachineSessionsProvider>
   );
 }

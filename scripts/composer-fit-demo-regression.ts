@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -7,6 +7,7 @@ import { appFaces } from "./app-faces.ts";
 import panes from "../site/demo/fixtures/panes.json";
 import { buildDemoApp } from "./demo-build.ts";
 import { openSettingsPage } from "./settings-page.ts";
+import { chromePath } from "./chrome-path.ts";
 
 // The model label in the input card's last row, fitted to what is measured there, on the
 // unmodified app over the demo's fixture transport. The demo's panes name no context window and
@@ -21,7 +22,7 @@ const LONG_MODEL = "gpt-5.6-sol-codex-preview-2026-10";
 // ids it names: "GPT-5.6" and "Opus 5.5"; null: the conversation names no model
 const NAMED = ["gpt-5.6", "claude-opus-5-5"] as const;
 
-interface Case { model: string | null; agent?: "claude" | "codex" | "pi" | "omo"; pending?: boolean; effort?: string | null; status?: "working" | "idle"; mic?: boolean; ring?: boolean; chatFontSize?: number | null; showUsage?: boolean; weeklyOnly?: boolean }
+interface Case { model: string | null; agent?: "claude" | "codex" | "pi" | "omo"; pending?: boolean; effort?: string | null; status?: "working" | "idle"; mic?: boolean; ring?: boolean; chatFontSize?: number | null; showUsage?: boolean; weeklyOnly?: boolean; suggestion?: string | null; contextUsed?: number; stream?: number }
 type Draw = "full" | "no-effort" | "out";
 
 const measure = (page: Page) => page.evaluate(() => {
@@ -150,12 +151,25 @@ try {
         if ("agent" in value) Object.assign(value, { agent: window.fitCase.agent, background_tasks: 2 });
         value.agent_status = window.fitCase.status;
       }
+      if ("prompt" in value && window.fitCase.suggestion !== undefined) value.suggestion = window.fitCase.suggestion;
       if (Array.isArray(value.features) && !window.fitCase.pending) value.features = value.features.filter((feature) => feature !== "pending-input");
+      if (Array.isArray(value.commands) && !value.commands.some((command) => command.name === "delegate")) value.commands.push(
+        { name: "delegate", description: "Delegate a task", source: "skill", ...(window.fitCase.agent === "codex" ? { trigger: "$" } : {}) },
+        { name: "template-creator", description: "Create a reusable template", source: "skill", ...(window.fitCase.agent === "codex" ? { trigger: "$" } : {}) },
+        { name: "deploy", description: "Deploy a project", source: "project" },
+        { name: "plugin:deploy", description: "Deploy through a plugin", source: "plugin" }
+      );
       if (window.fitCase.weeklyOnly && value.id === "codex" && Array.isArray(value.windows)) value.windows = value.windows.filter((limit) => limit.kind !== "session");
-      if (Array.isArray(value.turns) && value.metadata) value.metadata = { model: window.fitCase.model, reasoning_effort: window.fitCase.effort, ...(window.fitCase.ring ? { context: { used: 151000, window: 272000 } } : {}) };
+      if (Array.isArray(value.turns) && value.metadata) value.metadata = { model: window.fitCase.model, reasoning_effort: window.fitCase.effort, ...(window.fitCase.ring ? { context: { used: window.fitCase.contextUsed ?? 151000, window: 272000 } } : {}) };
+      if (Array.isArray(value.turns) && window.fitCase.stream) {
+        const turn = value.turns.findLast((turn) => turn.role === "assistant");
+        const text = "Streamed update " + window.fitCase.stream;
+        if (turn && !turn.parts.some((part) => part.kind === "text" && part.text === text)) turn.parts.push({ kind: "text", text });
+      }
       for (const key of Object.keys(value)) fix(value[key]);
       return value;
     };
+    window.fitHoldSend = false;
     const clone = structuredClone;
     window.structuredClone = (value, options) => fix(clone(value, options));
     const later = window.setTimeout.bind(window);
@@ -165,7 +179,17 @@ try {
     const json = Response.prototype.json;
     Response.prototype.json = async function () { return fix(await json.call(this)); };
   })();</script>`;
-  writeFileSync(index, html.replace(/<script type="module"/, () => `${patch}\n    <script src="./demo-transport.js"></script>\n    <script>(() => { const Socket = window.WebSocket; const Wrapped = function(...args) { const socket = new Socket(...args); window.fitSocket = socket; return socket; }; Object.assign(Wrapped, { CONNECTING: Socket.CONNECTING, OPEN: Socket.OPEN, CLOSING: Socket.CLOSING, CLOSED: Socket.CLOSED }); window.WebSocket = Wrapped; const demoFetch = window.fetch; window.fetch = (input, init) => String(typeof input === "string" ? input : input.url ?? input).includes("/pane/image") ? new Promise(() => {}) : demoFetch(input, init); })();</script>\n    <script type="module"`));
+  writeFileSync(index, html.replace(/<script type="module"/, () => `${patch}\n    <script src="./demo-transport.js"></script>\n    <script>(() => { const Socket = window.WebSocket; const Wrapped = function(...args) { const socket = new Socket(...args); window.fitSocket = socket;
+      const send = socket.send.bind(socket);
+      socket.send = (raw) => {
+        const frame = JSON.parse(raw);
+        if (!window.fitHoldSend || frame.type !== "submit") return send(raw);
+        window.fitReply = (ok) => socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+          type: "submit-result", id: frame.id, pane_id: frame.pane_id, ok,
+          ...(ok ? {} : { code: "agent_not_ready", message: "The demo agent cannot take this submission." }),
+        }) }));
+      };
+      return socket; }; Object.assign(Wrapped, { CONNECTING: Socket.CONNECTING, OPEN: Socket.OPEN, CLOSING: Socket.CLOSING, CLOSED: Socket.CLOSED }); window.WebSocket = Wrapped; const demoFetch = window.fetch; window.fetch = (input, init) => String(typeof input === "string" ? input : input.url ?? input).includes("/pane/image") ? new Promise(() => {}) : demoFetch(input, init); })();</script>\n    <script type="module"`));
 
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const path = new URL(request.url).pathname;
@@ -186,7 +210,7 @@ try {
     const context = await browser.newContext({ viewport: { width, height: 844 }, hasTouch: touch, isMobile: touch, locale: "en-US" });
     try {
       await context.addInitScript((fitCase) => {
-        localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", voiceInput: fitCase.mic ? "on" : "off", chatFontSize: fitCase.chatFontSize ?? null, showUsage: fitCase.showUsage ?? false }));
+        if (localStorage.getItem("herdr-web-ui:settings") === null) localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", voiceInput: fitCase.mic ? "on" : "off", chatFontSize: fitCase.chatFontSize ?? null, showUsage: fitCase.showUsage ?? false }));
         Object.assign(window, { fitCase });
       }, { agent: "claude", pending: true, status: "working", effort: "xhigh", mic: false, ring: true, ...state });
       const page = await context.newPage();
@@ -207,8 +231,298 @@ try {
   };
 
   try {
-    const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+    const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     try {
+      for (const width of [390, 1440]) await withCard(browser, width, { status: "idle", model: "gpt-5.6" }, async (page) => {
+        await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        const settings = async () => {
+          await page.keyboard.press("ControlOrMeta+Shift+Comma");
+          await openSettingsPage(page, "Chat");
+        };
+        const close = () => page.getByRole("button", { name: "Close settings", exact: true }).click();
+        const sent = async (text: string) => {
+          await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>(".composer-text")?.value === "");
+          await page.waitForFunction(async ({ paneId, text }) => {
+            const conversation = await (await fetch(`/api/pane/conversation?pane_id=${encodeURIComponent(paneId)}`)).json();
+            return conversation.turns.some((turn: { role: string; parts: { kind: string; text?: string }[] }) => turn.role === "user" && turn.parts.some((part) => part.kind === "text" && part.text === text));
+          }, { paneId: panes.api, text }, { timeout: 5_000 });
+        };
+        await box.fill("Default Return sends");
+        await box.press("Enter");
+        await sent("Default Return sends");
+        await settings();
+        const label = width === 390 ? "Return inserts a new line" : "Enter sends";
+        const toggle = page.getByRole("switch", { name: label, exact: true });
+        assert.equal(await toggle.getAttribute("aria-checked"), width === 390 ? "false" : "true", "the default still sends Return");
+        await toggle.click();
+        await close();
+        await page.reload();
+        await box.waitFor();
+        await settings();
+        assert.equal(await toggle.getAttribute("aria-checked"), width === 390 ? "true" : "false", "the choice survives reload on this device");
+        if (width === 390 && process.env.UI_EVIDENCE_DIR) {
+          const evidence = process.env.UI_EVIDENCE_DIR;
+          mkdirSync(evidence, { recursive: true });
+          for (const theme of ["dark", "light"] as const) {
+            await openSettingsPage(page, "Appearance");
+            await page.getByRole("button", { name: theme === "dark" ? "Dark" : "Light", exact: true }).click();
+            await openSettingsPage(page, "Chat");
+            await appFaces(page);
+            await page.locator(".settings-row").filter({ has: toggle }).evaluate((row) => row.scrollIntoView({ block: "center", behavior: "instant" }));
+            const capture = await toggle.evaluate((node) => {
+              const row = node.closest(".settings-row")!.getBoundingClientRect();
+              const body = node.closest(".settings-body")!.getBoundingClientRect();
+              return { top: row.top, bottom: row.bottom, visibleTop: body.top, visibleBottom: Math.min(body.bottom, window.innerHeight) };
+            });
+            assert.ok(capture.top >= capture.visibleTop - 1 && capture.bottom <= capture.visibleBottom + 1, `the phone capture includes the whole Return setting and its explanation: ${JSON.stringify(capture)}`);
+            await page.screenshot({ path: join(evidence, `return-newline-phone-${theme}.png`) });
+          }
+        }
+        await close();
+        const pasted = "# Reply\n\n- first\n- second\n\n```ts\n  run();\n```";
+        await page.evaluate((text) => navigator.clipboard.writeText(text), pasted);
+        await box.focus();
+        await page.keyboard.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
+        assert.equal(await box.inputValue(), pasted, "native paste keeps blank lines, Markdown and code indentation");
+        await box.press("Enter");
+        assert.equal(await box.inputValue(), pasted + "\n", "Return inserts a native newline without sending");
+        await page.getByRole("button", { name: "Send message", exact: true }).click();
+        await sent(pasted);
+        await box.fill("Hardware keyboard sends");
+        await box.press("ControlOrMeta+Enter");
+        await sent("Hardware keyboard sends");
+      });
+      console.log("PASS phone Return choice persists, desktop Mod+Enter stays, and native multiline paste reaches chat through Send");
+
+      // Only the transport receipt is held: the real composer and draft lifecycle stay intact.
+      for (const agent of ["claude", "codex"] as const) for (const width of [390, 1440]) for (const theme of ["dark", "light"] as const) await withCard(browser, width, { agent, model: agent === "claude" ? "claude-opus-5-5" : "gpt-5.6", status: "idle" }, async (page) => {
+        await page.evaluate((theme) => {
+          document.documentElement.dataset.theme = theme;
+          (window as any).fitHoldSend = true;
+        }, theme);
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        const button = page.getByRole("button", { name: "Send message", exact: true });
+        const geometry = () => button.evaluate((node) => { const { x, y, width, height } = node.getBoundingClientRect(); return { x, y, width, height }; });
+        const empty = await geometry();
+        assert.equal(await button.getAttribute("aria-busy"), null, "empty is not busy");
+        await box.fill("Check the delivery feedback.");
+        const before = await geometry();
+        await button.click();
+        await page.waitForFunction(() => typeof (window as any).fitReply === "function");
+        assert.equal(await button.getAttribute("aria-busy"), "true", "a held receipt shows in-flight progress");
+        assert.equal(await button.getAttribute("title"), "Sending…", "sending describes the stable Send action");
+        assert.equal(await button.isDisabled(), true);
+        assert.equal(await box.inputValue(), "Check the delivery feedback.", "text stays until acknowledged");
+        assert.deepEqual(await geometry(), before, "sending does not move or resize the button");
+        assert.equal(before.width, empty.width);
+        assert.equal(before.height, empty.height);
+        assert.equal(await button.locator("[aria-live], [role=status]").count(), 0, "no repeated live announcement");
+        const progress = button.locator(".composer-send-progress");
+        for (const palette of ["amber", "report", "charcoal", "catppuccin", "lilac", "forest"]) {
+          await page.evaluate((palette) => { document.documentElement.dataset.palette = palette; }, palette);
+          assert.equal(await progress.evaluate((node) => getComputedStyle(node).animationTimingFunction), "steps(8)");
+          assert.equal(await button.evaluate((node) => getComputedStyle(node).opacity), "1");
+          assert.deepEqual(await geometry(), before, `${palette} does not change the button geometry`);
+          const colors = await button.evaluate((node) => ({ ink: getComputedStyle(node).color, fill: getComputedStyle(node, "::before").backgroundColor }));
+          assert.notEqual(colors.ink, colors.fill, `${palette} progress contrasts with its accent circle`);
+        }
+        await page.evaluate(() => { document.documentElement.dataset.palette = "amber"; });
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        assert.equal(await progress.evaluate((node) => getComputedStyle(node).animationName), "none", "reduced motion retains a static ring");
+        assert.equal(await progress.isVisible(), true);
+        await page.emulateMedia({ reducedMotion: "no-preference" });
+        if (process.env.UI_EVIDENCE_DIR) {
+          mkdirSync(process.env.UI_EVIDENCE_DIR, { recursive: true });
+          await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, `send-${agent}-${width}-${theme}.png`) });
+        }
+        await page.evaluate(() => (window as any).fitReply(true));
+        await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>(".composer-text")!.value === "");
+        assert.equal(await button.getAttribute("aria-busy"), null);
+        assert.equal(await button.getAttribute("aria-label"), "Send message");
+        assert.deepEqual(await geometry(), before);
+        await box.fill("Keep this draft after refusal.");
+        await button.click();
+        await page.waitForFunction(() => document.querySelector(".composer-send")?.getAttribute("aria-busy") === "true");
+        await page.evaluate(() => (window as any).fitReply(false));
+        await page.waitForFunction(() => !document.querySelector(".composer-send")?.hasAttribute("aria-busy"));
+        assert.equal(await box.inputValue(), "Keep this draft after refusal.");
+        assert.equal(await button.isEnabled(), true, "refusal returns to the existing retry path");
+        await page.locator(".composer-note").waitFor();
+      });
+      console.log("PASS held Send receipts show progress without moving the button, retain drafts, settle and recover on Claude/Codex desktop/phone in both themes");
+      await withCard(browser, 390, { agent: "claude", model: "claude-opus-5-5", status: "working" }, async (page) => {
+        await page.evaluate(() => { (window as any).fitHoldSend = true; });
+        await draft(page);
+        await page.locator(".composer-send").click();
+        await page.getByRole("textbox", { name: "Message", exact: true }).fill("");
+        assert.equal(await page.locator('.composer-send[aria-busy="true"]').count(), 1, "editing a working send to empty does not replace progress with Stop");
+        await page.evaluate(() => (window as any).fitReply(true));
+        await page.locator(".composer-stop").waitFor();
+      });
+      // Typography is applied by SettingsProvider after the render. At this fixed card width,
+      // the larger interface font must step effort out without needing a viewport resize.
+      await withCard(browser, 1075, { agent: "codex", model: LONG_MODEL }, async (page) => {
+        const before = await measure(page);
+        assert.equal(before.draw, "full");
+        assert.equal(before.model?.clipped, false);
+        const chooseSize = async (size: number) => {
+          await page.keyboard.press("ControlOrMeta+Shift+Comma");
+          await openSettingsPage(page, "Appearance");
+          const current = Number.parseInt(await page.locator('.settings-stepper[aria-label="Interface font size"] output').innerText(), 10);
+          const button = page.getByRole("button", { name: size > current ? "Increase interface font size" : "Decrease interface font size", exact: true });
+          for (let step = 0; step < Math.abs(size - current); step++) await button.click();
+          await page.getByRole("button", { name: "Close settings", exact: true }).click();
+          await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+        };
+        await chooseSize(20);
+        const large = await measure(page);
+        assert.equal(large.card.width, before.card.width, "the card did not resize to trigger a width observer");
+        assert.equal(large.draw, "no-effort", "interface font changes refit after the new typography is applied");
+        assert.equal(large.model?.clipped, false, "the model stays whole at the larger font size");
+        await chooseSize(14);
+        const restored = await measure(page);
+        assert.equal(restored.draw, "full", "shrinking the interface font restores the effort label");
+        assert.equal(restored.effort?.clipped, false);
+      });
+      console.log("PASS live interface typography changes refit status labels at a fixed card width");
+
+      for (const width of [390, 1440]) await withCard(browser, width, { model: LONG_MODEL }, async (page) => {
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        await box.fill("Keep the draft at its insertion point.\n".repeat(80));
+        await upload(page);
+        await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+        const before = await box.evaluate((node) => {
+          node.focus(); node.setSelectionRange(600, 600); node.scrollTop = 300;
+          return { value: node.value, start: node.selectionStart, end: node.selectionEnd, scroll: node.scrollTop, height: node.getBoundingClientRect().height, top: node.getBoundingClientRect().top, offsetTop: node.offsetTop };
+        });
+        await box.evaluate((node) => {
+          const remove = Element.prototype.removeAttribute;
+          const samples: number[] = [];
+          Object.assign(window, { draftTopSamples: samples });
+          Element.prototype.removeAttribute = function(name) {
+            remove.call(this, name);
+            if (this.classList.contains("composer-status")) samples.push(node.getBoundingClientRect().top);
+          };
+        });
+        await page.evaluate((paneId) => {
+          const fixture = window as unknown as { fitCase: Case; fitSocket: { push(message: unknown): void } };
+          fixture.fitCase.contextUsed = 160_000;
+          fixture.fitCase.stream = 1;
+          fixture.fitSocket.push({ type: "conversation-changed", pane_id: paneId, signature: "composer-stream-update" });
+        }, panes.api);
+        await page.waitForFunction(() => { const ring = document.querySelector(".composer-context"); return `${ring?.getAttribute("aria-label")} ${ring?.textContent}`.includes("160k"); }, undefined, { timeout: 5_000 });
+        await page.getByText("Streamed update 1", { exact: true }).waitFor({ state: "attached" });
+        await page.evaluate((paneId) => {
+          const fixture = window as unknown as { fitCase: Case; fitSocket: { push(message: unknown): void } };
+          fixture.fitCase.effort = "high";
+          fixture.fitSocket.push({ type: "conversation-changed", pane_id: paneId, signature: "composer-model-update" });
+        }, panes.api);
+        await page.waitForFunction(() => document.querySelector(".composer-reasoning-short")?.textContent === "high", undefined, { timeout: 5_000 });
+        const samples = await page.evaluate(() => (window as unknown as { draftTopSamples: number[] }).draftTopSamples);
+        assert.ok(samples.every((top) => Math.abs(top - before.top) <= 1), `${width}px: streaming context updates never move the focused textarea during status fitting: ${before.top} -> ${samples.join(", ")}`);
+        const after = await box.evaluate((node) => ({ value: node.value, start: node.selectionStart, end: node.selectionEnd, scroll: node.scrollTop, height: node.getBoundingClientRect().height, top: node.getBoundingClientRect().top, offsetTop: node.offsetTop }));
+        assert.deepEqual(after, before);
+      });
+      console.log("PASS streaming context updates preserve draft geometry and selection while an upload hint is visible");
+
+      // Prompt suggestions update independently while an agent works. A populated draft keeps
+      // its own viewport and insertion point when only the unused placeholder changes.
+      for (const width of [390, 1440]) await withCard(browser, width, { model: LONG_MODEL, suggestion: null }, async (page) => {
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        await box.fill(Array.from({ length: 80 }, (_, i) => `Draft line ${i}: keep this text while the agent works.`).join("\n"));
+        await box.evaluate((node) => {
+          node.focus();
+          node.setSelectionRange(Math.floor(node.value.length / 2), Math.floor(node.value.length / 2));
+          node.scrollTop = Math.floor((node.scrollHeight - node.clientHeight) / 2);
+        });
+        const snapshot = () => box.evaluate((node) => ({ value: node.value, start: node.selectionStart, end: node.selectionEnd, scroll: node.scrollTop, height: node.getBoundingClientRect().height, top: node.getBoundingClientRect().top, offsetTop: node.offsetTop, focused: document.activeElement === node }));
+        const before = await snapshot();
+        // Record the real DOM geometry at height writes as well as after the update. Reading
+        // scrollHeight in auto-sizing forces this intermediate layout before the next paint;
+        // a final snapshot alone misses the collapse that native caret scrolling can react to.
+        await box.evaluate((node) => {
+          const prototype = CSSStyleDeclaration.prototype;
+          const samples: number[] = [];
+          Object.assign(window, { draftHeightSamples: samples });
+          Object.defineProperty(prototype, "height", { configurable: true, get() { return this.getPropertyValue("height"); }, set(value: string) {
+            this.setProperty("height", value);
+            if (this === node.style) samples.push(node.getBoundingClientRect().height);
+          } });
+        });
+        assert.ok(before.scroll > 0 && before.start > 0 && before.start < before.value.length);
+        await page.evaluate(() => { (window as unknown as { fitCase: Case }).fitCase.suggestion = "A new suggestion from the agent"; });
+        await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>(".composer-text")?.placeholder === "A new suggestion from the agent", undefined, { timeout: 5_000 });
+        const heightSamples = await page.evaluate(() => (window as unknown as { draftHeightSamples: number[] }).draftHeightSamples);
+        assert.ok(heightSamples.every((height) => Math.abs(height - before.height) <= 1), `${width}px: an agent prompt update never collapses the populated textarea: ${before.height} -> ${heightSamples.join(", ")}`);
+        assert.deepEqual(await snapshot(), before, `${width}px: an agent prompt update preserves the focused draft's geometry, scroll and selection`);
+      });
+      console.log("PASS prompt updates preserve a focused, internally scrolled draft and its mid-text caret at 390 and 1440px");
+
+      for (const agent of ["claude", "codex", "pi"] as const) for (const width of [320, 1280]) await withCard(browser, width, { agent, model: "gpt-5.6", status: "idle" }, async (page) => {
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        const menu = page.getByRole("listbox", { name: "Slash commands", exact: true });
+        await box.fill("/");
+        await menu.getByRole("option").filter({ hasText: "/clear" }).waitFor();
+        for (const text of ["a/b", "http://", "see https://example.test/path", "run tests then /clear"]) {
+          await box.fill(text);
+          await menu.waitFor({ state: "hidden" });
+        }
+        for (const text of ["run tests then /", "run tests\n/", "run tests\t/"]) {
+          await box.fill(text);
+          if (agent === "pi") { await menu.waitFor({ state: "hidden" }); continue; }
+          await menu.getByRole("option").first().waitFor();
+          const prefix = agent === "codex" ? "$" : "/";
+          assert.deepEqual(await menu.locator(".menu-item-main").allTextContents(), [prefix + "delegate", prefix + "template-creator"]);
+        }
+        if (agent !== "pi") {
+          await box.fill("run tests then /del afterwards");
+          for (let i = 0; i < 11; i++) await box.press("ArrowLeft");
+          assert.equal(await box.evaluate((node: HTMLTextAreaElement) => node.selectionStart), 19);
+          await menu.getByRole("option").first().waitFor();
+          assert.equal(await menu.evaluate((node) => {
+            const box = node.getBoundingClientRect();
+            return box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight;
+          }), true, "the picker fits the viewport");
+          if (process.env.UI_EVIDENCE_DIR) {
+            mkdirSync(process.env.UI_EVIDENCE_DIR, { recursive: true });
+            await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, `slash-${agent}-${width}.png`), fullPage: true });
+          }
+          // A committing IME Enter belongs to the input method, even while a skill is offered.
+          await box.evaluate((node) => node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true })));
+          assert.equal(await box.inputValue(), "run tests then /del afterwards");
+          await box.press("Tab");
+          const expected = `run tests then ${agent === "codex" ? "$" : "/"}delegate afterwards`;
+          assert.equal(await box.inputValue(), expected);
+          assert.equal(await box.evaluate((node: HTMLTextAreaElement) => node.selectionStart), 25);
+          await page.keyboard.type("next");
+          assert.equal(await box.inputValue(), expected.slice(0, 25) + "next" + expected.slice(25));
+          await box.fill("run tests then /del");
+          await menu.getByRole("option").first().waitFor();
+          await menu.getByRole("option").first().click();
+          assert.equal(await box.inputValue(), `run tests then ${agent === "codex" ? "$" : "/"}delegate `);
+          if (agent === "codex") {
+            await box.fill("use $del");
+            await menu.getByRole("option").first().waitFor();
+            await box.press("Enter");
+            assert.equal(await box.inputValue(), "use $delegate ");
+            await box.fill("look at $tmp");
+            await menu.waitFor({ state: "hidden" });
+          }
+          const prefix = agent === "codex" ? "$" : "/";
+          for (const text of [prefix + "tmp", "look\n" + prefix + "tmp", "use " + prefix + "creator"]) {
+            await box.fill(text);
+            await menu.getByRole("option").filter({ hasText: prefix + "template-creator" }).waitFor();
+          }
+        }
+        await box.fill("see @src");
+        await page.getByRole("listbox", { name: "Files", exact: true }).waitFor();
+        await box.fill("look at /tmp");
+        await box.press("Enter");
+        await page.getByText("look at /tmp", { exact: true }).waitFor();
+        assert.equal(await box.inputValue(), "", "Enter sends a path verbatim instead of accepting a fuzzy skill");
+        console.log(`PASS skill completion at word boundaries (${agent}, ${width}px)`);
+      });
       // One primary control across agents: Stop with an empty working draft, Send with text.
       for (const agent of ["claude", "codex"] as const) for (const width of [350, 390, 800, 1440]) for (const mic of [false, true]) await withCard(browser, width, { agent, model: "gpt-5.6", mic }, async (page) => {
         const rest = await measure(page);
@@ -238,7 +552,7 @@ try {
       });
       console.log("PASS agents at 350, 390, 800 and 1440px use one Stop/Send control with no Queue or dropdown");
 
-      for (const width of [350, 390]) await withCard(browser, width, { agent: "codex", model: LONG_MODEL, mic: true }, async (page) => {
+      for (const width of [320, 330, 350, 390]) await withCard(browser, width, { agent: "codex", model: LONG_MODEL, mic: true }, async (page) => {
         await draft(page);
         await upload(page);
         const row = await measure(page);
@@ -364,6 +678,97 @@ try {
         if (chatFontSize === null) assert.equal(box, width <= 480 ? 16 : 15, "with no size chosen the box keeps its size");
       });
       console.log("PASS the message box follows Chat font size: with a mouse at the transcript's size, on a phone never under 16px");
+
+      // Pressing Send leaves focus in the message box. On a phone, moving it closes the soft keyboard
+      // and shifts the layout, so the tap never lands as a click. Press and release away from the
+      // button, so nothing is sent.
+      for (const width of [390, 1440]) await withCard(browser, width, { model: "claude-opus-5-5" }, async (page) => {
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        await box.fill("a draft that stays");
+        const bounds = (await page.getByRole("button", { name: "Send message", exact: true }).boundingBox())!;
+        await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        await page.mouse.down();
+        assert.equal(await box.evaluate((node) => node === document.activeElement), true, `${width}px: pressing Send keeps the message box focused`);
+        await page.mouse.move(0, 0);
+        await page.mouse.up();
+        assert.equal(await box.inputValue(), "a draft that stays", "nothing was sent");
+      });
+      console.log("PASS pressing Send keeps focus in the message box");
+
+      // With focus kept, the tap does not end a composition (Gboard composes every word, a Korean
+      // keyboard the open syllable): Send finishes the word itself and sends the box as shown.
+      await withCard(browser, 390, { status: "idle", model: "claude-opus-5-5" }, async (page) => {
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        const holds = (value: string, label: string) => box.evaluate((node: HTMLTextAreaElement, value) => new Promise<void>((resolve, reject) => {
+          const deadline = performance.now() + 5_000;
+          const check = () => node.value === value ? resolve() : performance.now() > deadline ? reject(new Error(`value ${JSON.stringify(node.value)}`)) : requestAnimationFrame(check);
+          check();
+        }), value).catch((error) => { throw new Error(`${label}: ${error}`); });
+        await box.tap();
+        await box.fill("hello ");
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Input.imeSetComposition", { text: "안", selectionStart: 1, selectionEnd: 1 });
+        await holds("hello 안", "the syllable is composing");
+        await page.getByRole("button", { name: "Send message", exact: true }).tap();
+        await holds("", "Send during a composition sends the message");
+        assert.equal(await box.evaluate((node) => node === document.activeElement), true, "the message box keeps focus");
+        await cdp.send("Input.imeSetComposition", { text: "나", selectionStart: 1, selectionEnd: 1 });
+        await cdp.send("Input.insertText", { text: "나" });
+        await holds("나", "the next syllable starts in an empty box");
+        await cdp.detach();
+      });
+      console.log("PASS Send tapped mid-composition finishes the word and sends");
+
+      // A keyboard that does not commit inside the tap leaves it waiting for the word. A drop inside
+      // that wait withdraws it: the commit after a quick reconnect sends nothing on the new connection.
+      await withCard(browser, 390, { status: "idle", model: "claude-opus-5-5" }, async (page) => {
+        const box = page.getByRole("textbox", { name: "Message", exact: true });
+        await box.tap();
+        await box.fill("dropped while composing ");
+        await page.evaluate(() => {
+          // the keyboard keeps composing through the tap's blur, and the tap's 300 ms deadline is held,
+          // so only the drop can withdraw the tap, however long the reconnect takes
+          document.querySelector<HTMLTextAreaElement>(".composer-text")!.blur = () => {};
+          const later = window.setTimeout;
+          window.setTimeout = ((callback: TimerHandler, ms?: number, ...args: unknown[]) => ms !== undefined && ms >= 280 && ms <= 300 ? 0 : later(callback, ms, ...args)) as typeof window.setTimeout;
+        });
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Input.imeSetComposition", { text: "안", selectionStart: 1, selectionEnd: 1 });
+        await page.getByRole("button", { name: "Send message", exact: true }).tap();
+        const note = page.locator(".composer-note");
+        await note.filter({ hasText: "Finishing the word…" }).waitFor({ timeout: 5_000 });
+        // drop the connection and wait, a frame at a time, until it went offline and came back
+        await page.evaluate(() => new Promise<void>((resolve, reject) => {
+          const fixture = window as unknown as { fitSocket: WebSocket };
+          const dropped = fixture.fitSocket;
+          const offline = () => document.querySelector(".composer-status")?.hasAttribute("data-offline") === true;
+          const deadline = performance.now() + 10_000;
+          let sawOffline = false;
+          const check = () => {
+            sawOffline ||= offline();
+            if (sawOffline && !offline() && fixture.fitSocket !== dropped && fixture.fitSocket.readyState === WebSocket.OPEN) return resolve();
+            if (performance.now() > deadline) return reject(new Error(`reconnect: sawOffline ${sawOffline}`));
+            requestAnimationFrame(check);
+          };
+          dropped.close();
+          check();
+        }));
+        // count the submits on the new connection, then let the keyboard commit the word
+        await page.evaluate(() => {
+          const fixture = window as unknown as { fitSocket: WebSocket; fitSubmits: number };
+          fixture.fitSubmits = 0;
+          const send = fixture.fitSocket.send.bind(fixture.fitSocket);
+          fixture.fitSocket.send = (raw) => { if (typeof raw === "string" && JSON.parse(raw).type === "submit") fixture.fitSubmits += 1; send(raw); };
+        });
+        await cdp.send("Input.insertText", { text: "안" });
+        // the committed word's send runs a task after compositionend: wait one task and a frame past it
+        await page.evaluate(() => new Promise((resolve) => setTimeout(() => requestAnimationFrame(resolve))));
+        assert.equal(await page.evaluate(() => (window as unknown as { fitSubmits: number }).fitSubmits), 0, "nothing is submitted on the new connection");
+        assert.equal(await box.inputValue(), "dropped while composing 안", "the message stays in the box");
+        assert.equal(await note.textContent(), "Not sent: the terminal is disconnected.");
+        await cdp.detach();
+      });
+      console.log("PASS a drop while Send waits for the word withdraws it; the reconnect sends nothing");
 
       // Changing the setting in an already-open chat rewraps the existing draft: an automatic
       // box grows and shrinks with it, while a height chosen with the grip stays chosen.

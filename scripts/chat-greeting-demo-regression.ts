@@ -6,6 +6,7 @@ import { chromium, type Page } from "playwright-core";
 import { appFaces } from "./app-faces.ts";
 import panes from "../site/demo/fixtures/panes.json";
 import { buildDemoApp } from "./demo-build.ts";
+import { chromePath } from "./chrome-path.ts";
 
 // An empty chat's greeting, on the unmodified app over the demo's fixture transport: a workspace
 // the demo creates starts with a conversation of no turns. All files and HTTP traffic stay in
@@ -27,10 +28,10 @@ interface Geometry {
 }
 
 const geometryOf = (page: Page): Promise<Geometry> => page.evaluate(() => {
-  const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
-  const composer = document.querySelector<HTMLElement>(".composer")!;
-  const greeting = document.querySelector(".composer-greeting")?.getBoundingClientRect() ?? null;
-  const lines = [...document.querySelectorAll<HTMLElement>(".composer-greeting p")];
+  const rect = (selector: string) => document.querySelector(`.pane-frame.is-current ${selector}`)!.getBoundingClientRect();
+  const composer = document.querySelector<HTMLElement>(".pane-frame.is-current .composer")!;
+  const greeting = document.querySelector(".pane-frame.is-current .composer-greeting")?.getBoundingClientRect() ?? null;
+  const lines = [...document.querySelectorAll<HTMLElement>(".pane-frame.is-current .composer-greeting p")];
   return {
     stack: { top: rect(".terminal-stack").top, bottom: rect(".terminal-stack").bottom },
     composer: { top: rect(".composer").top, bottom: rect(".composer").bottom },
@@ -52,9 +53,9 @@ const newWorkspace = (page: Page, cwd: string): Promise<string> => page.evaluate
 
 /** The greeting and the composer, as one block, at the stack's vertical centre (the observer that places them answers a frame after a resize). */
 const centred = (page: Page): Promise<unknown> => page.waitForFunction(() => {
-  const greeting = document.querySelector(".composer-greeting")?.getBoundingClientRect();
-  const composer = document.querySelector(".composer")?.getBoundingClientRect();
-  const stack = document.querySelector(".terminal-stack")?.getBoundingClientRect();
+  const greeting = document.querySelector(".pane-frame.is-current .composer-greeting")?.getBoundingClientRect();
+  const composer = document.querySelector(".pane-frame.is-current .composer")?.getBoundingClientRect();
+  const stack = document.querySelector(".pane-frame.is-current .terminal-stack")?.getBoundingClientRect();
   return greeting !== undefined && composer !== undefined && stack !== undefined
     && Math.abs((greeting.top + composer.bottom) / 2 - (stack.top + stack.bottom) / 2) <= 2;
 }, undefined, { timeout: 5_000 });
@@ -66,7 +67,7 @@ const select = async (page: Page, pane: string): Promise<void> => {
   await row.evaluate((node: HTMLElement) => node.click());
   await page.locator(`.pane-select[title^="${pane} —"][aria-current="true"]`).first().waitFor({ state: "attached" });
   await page.getByTitle("Chat transcript (⌘⇧J)", { exact: true }).click();
-  await page.locator(".terminal-stack.is-chat").waitFor();
+  await page.locator(".pane-frame.is-current .terminal-stack.is-chat").waitFor();
 };
 
 try {
@@ -108,7 +109,7 @@ try {
   const url = `http://127.0.0.1:${server.port}/herdr-web-ui/demo/app/?pane=${encodeURIComponent(panes.infra)}`;
   const settings = (): void => { localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" })); };
   try {
-    const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+    const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     try {
       // a mouse-driven window: the greeting and the input card sit at the pane's vertical centre
       const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
@@ -119,22 +120,22 @@ try {
         page.on("pageerror", (error) => errors.push(error.message));
         await page.goto(url);
         await page.locator(".conn-live").waitFor({ state: "attached" });
-        await page.locator(".chat-turn").first().waitFor();
+        await page.locator(".pane-frame.is-current .chat-turn").first().waitFor();
         await appFaces(page);
-        assert.equal(await page.locator(".composer-greeting").count(), 0, "a conversation with turns is not greeted");
+        assert.equal(await page.locator(".pane-frame.is-current .composer-greeting").count(), 0, "a conversation with turns is not greeted");
         const docked = await geometryOf(page);
         assert.equal(docked.transform, "none");
         console.log("PASS a pane with a conversation keeps its composer docked and shows no greeting");
 
         const pane = await newWorkspace(page, "/home/demo/new-project");
         await select(page, pane);
-        const greeting = page.locator(".composer-greeting");
+        const greeting = page.locator(".pane-frame.is-current .composer-greeting");
         // the demo's new agent works for a moment first: it is greeted once it rests
         await greeting.waitFor({ timeout: 8_000 });
         assert.equal(await greeting.locator(".composer-greeting-title").textContent(), "What should Claude do in new-project?");
         assert.equal(await greeting.locator(".composer-greeting-where").textContent(), "workstation · /home/demo/new-project");
-        assert.equal(await page.locator(".chat-empty").count(), 0, "the greeting stands in for the chat's own empty line");
-        assert.equal(await page.locator(".chat-turn").count(), 0);
+        assert.equal(await page.locator(".pane-frame.is-current .chat-empty").count(), 0, "the greeting stands in for the chat's own empty line");
+        assert.equal(await page.locator(".pane-frame.is-current .chat-turn").count(), 0);
         assert.equal(await page.locator(".conn-live").count(), 1);
         await centred(page);
         const lifted = await geometryOf(page);
@@ -146,7 +147,7 @@ try {
         // a draft of several lines grows the box: the pair stays centred
         const message = page.getByRole("textbox", { name: "Message", exact: true });
         await message.fill("one\ntwo\nthree\nfour");
-        await page.waitForFunction((before) => document.querySelector(".composer")!.getBoundingClientRect().height > before, lifted.composer.bottom - lifted.composer.top);
+        await page.waitForFunction((before) => document.querySelector(".pane-frame.is-current .composer")!.getBoundingClientRect().height > before, lifted.composer.bottom - lifted.composer.top);
         await centred(page);
         await page.setViewportSize({ width: 1000, height: 620 });
         await centred(page);
@@ -159,12 +160,12 @@ try {
         await page.setViewportSize({ width: 1440, height: 450 });
         await centred(page);
         await message.fill("/");
-        const menu = page.locator(".composer-menu");
+        const menu = page.locator(".pane-frame.is-current .composer-menu");
         await menu.waitFor();
         const room = await page.evaluate(() => {
-          const box = document.querySelector(".composer-menu")!.getBoundingClientRect();
-          const stack = document.querySelector(".terminal-stack")!.getBoundingClientRect();
-          const menu = document.querySelector(".composer-menu")!;
+          const box = document.querySelector(".pane-frame.is-current .composer-menu")!.getBoundingClientRect();
+          const stack = document.querySelector(".pane-frame.is-current .terminal-stack")!.getBoundingClientRect();
+          const menu = document.querySelector(".pane-frame.is-current .composer-menu")!;
           return { top: box.top, stack: stack.top, scrolls: menu.scrollHeight > menu.clientHeight, rows: menu.querySelectorAll(".menu-item").length };
         });
         assert.ok(room.top >= room.stack, `the menu stays inside the pane: ${JSON.stringify(room)}`);
@@ -177,16 +178,16 @@ try {
         // chat's own empty line in its place, and comes back when there is room. 140px: with the
         // one-line 46px header (#461) a 200px window still held the card and the greeting
         await page.setViewportSize({ width: 1440, height: 140 });
-        await page.locator(".composer-greeting.is-out").waitFor({ state: "attached" });
-        assert.equal(await page.locator(".composer-greeting").evaluate((node) => getComputedStyle(node).visibility), "hidden");
-        assert.equal(await page.locator(".composer-greeting").getAttribute("aria-hidden"), "true");
-        assert.equal(await page.locator(".chat-empty").count(), 1, "the chat's own empty line stands in");
+        await page.locator(".pane-frame.is-current .composer-greeting.is-out").waitFor({ state: "attached" });
+        assert.equal(await page.locator(".pane-frame.is-current .composer-greeting").evaluate((node) => getComputedStyle(node).visibility), "hidden");
+        assert.equal(await page.locator(".pane-frame.is-current .composer-greeting").getAttribute("aria-hidden"), "true");
+        assert.equal(await page.locator(".pane-frame.is-current .chat-empty").count(), 1, "the chat's own empty line stands in");
         const short = await geometryOf(page);
         assert.equal(short.transform, "none", "a composer with no room over it stays docked");
         await page.setViewportSize({ width: 1440, height: 900 });
-        await page.locator(".composer-greeting:not(.is-out)").waitFor();
+        await page.locator(".pane-frame.is-current .composer-greeting:not(.is-out)").waitFor();
         await centred(page);
-        assert.equal(await page.locator(".chat-empty").count(), 0);
+        assert.equal(await page.locator(".pane-frame.is-current .chat-empty").count(), 0);
         console.log("PASS a pane too short for the greeting keeps the chat's empty line and a docked composer");
 
         // The first message puts the composer back at the bottom, with no animation, before
@@ -194,18 +195,18 @@ try {
         await page.evaluate(() => { (window as unknown as { heldSubmits: (() => void)[] | null }).heldSubmits = []; });
         await message.fill("Start with the README");
         const sent = await page.evaluate(async () => {
-          document.querySelector<HTMLElement>('button[aria-label="Send message"]')!.click();
+          document.querySelector<HTMLElement>('.pane-frame.is-current button[aria-label="Send message"]')!.click();
           // the frame the click is painted in, and nothing later
           await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-          const composer = document.querySelector<HTMLElement>(".composer")!;
+          const composer = document.querySelector<HTMLElement>(".pane-frame.is-current .composer")!;
           return {
             held: (window as unknown as { heldSubmits: unknown[] }).heldSubmits.length,
-            greetings: document.querySelectorAll(".composer-greeting").length,
+            greetings: document.querySelectorAll(".pane-frame.is-current .composer-greeting").length,
             transform: getComputedStyle(composer).transform,
             animations: composer.getAnimations().length,
-            gap: Math.abs(composer.getBoundingClientRect().bottom - document.querySelector(".terminal-stack")!.getBoundingClientRect().bottom),
-            turns: document.querySelectorAll(".chat-turn").length,
-            status: document.querySelector(".composer-status")!.getAttribute("data-status"),
+            gap: Math.abs(composer.getBoundingClientRect().bottom - document.querySelector(".pane-frame.is-current .terminal-stack")!.getBoundingClientRect().bottom),
+            turns: document.querySelectorAll(".pane-frame.is-current .chat-turn").length,
+            status: document.querySelector(".pane-frame.is-current .composer-status")!.getAttribute("data-status"),
           };
         });
         assert.equal(sent.held, 1, "the message is on its way and nothing answered it");
@@ -221,12 +222,12 @@ try {
         // still nothing heard back: another lens and back, and a conversation read again, do not
         // bring the greeting back over a message already sent
         await page.getByTitle("Live terminal (⌘⇧J)", { exact: true }).click();
-        await page.locator(".terminal-stack:not(.is-chat)").waitFor();
+        await page.locator(".pane-frame.is-current .terminal-stack:not(.is-chat)").waitFor();
         await page.getByTitle("Chat transcript (⌘⇧J)", { exact: true }).click();
-        await page.locator(".terminal-stack.is-chat").waitFor();
-        await page.locator(".chat-empty").waitFor();
-        assert.equal(await page.locator(".chat-turn").count(), 0);
-        assert.equal(await page.locator(".composer-greeting").count(), 0, "the greeting does not return after a send");
+        await page.locator(".pane-frame.is-current .terminal-stack.is-chat").waitFor();
+        await page.locator(".pane-frame.is-current .chat-empty").waitFor();
+        assert.equal(await page.locator(".pane-frame.is-current .chat-turn").count(), 0);
+        assert.equal(await page.locator(".pane-frame.is-current .composer-greeting").count(), 0, "the greeting does not return after a send");
         assert.equal((await geometryOf(page)).transform, "none");
         console.log("PASS the greeting does not return when the chat is left and shown again after a send");
 
@@ -236,8 +237,8 @@ try {
           page.heldSubmits = null;
           for (const send of held) send();
         });
-        await page.locator(".chat-turn").first().waitFor({ timeout: 8_000 });
-        assert.equal(await page.locator(".composer-greeting").count(), 0);
+        await page.locator(".pane-frame.is-current .chat-turn").first().waitFor({ timeout: 8_000 });
+        assert.equal(await page.locator(".pane-frame.is-current .composer-greeting").count(), 0);
         assert.deepEqual(errors, []);
         console.log("PASS the message arrives and the conversation shows it, with no greeting");
       } finally { await desktop.close(); }
@@ -259,9 +260,9 @@ try {
         await page.locator(".conn-live").waitFor({ state: "attached" });
         const pane = await newWorkspace(page, `/home/demo/projects/${LONG_FOLDER}`);
         await select(page, pane);
-        await page.locator(".composer-greeting").waitFor({ timeout: 8_000 });
+        await page.locator(".pane-frame.is-current .composer-greeting").waitFor({ timeout: 8_000 });
         await appFaces(page);
-        assert.equal(await page.locator(".composer-greeting-title").textContent(), `What should Claude do in ${LONG_FOLDER}?`);
+        assert.equal(await page.locator(".pane-frame.is-current .composer-greeting-title").textContent(), `What should Claude do in ${LONG_FOLDER}?`);
         const geometry = await geometryOf(page);
         assert.equal(geometry.transform, "none", "a phone does not lift the composer");
         assert.ok(Math.abs(geometry.composer.bottom - geometry.stack.bottom) <= 1, `composer docked on a phone: ${JSON.stringify(geometry)}`);
@@ -283,10 +284,14 @@ try {
         });
         await page.waitForFunction(() => document.documentElement.hasAttribute("data-keyboard"));
         assert.equal(await box.evaluate((node) => document.activeElement === node), true);
-        const title = (await page.locator(".composer-greeting-title").boundingBox())!;
+        const title = (await page.locator(".pane-frame.is-current .composer-greeting-title").boundingBox())!;
         // Chromium blurs a field on any tap outside it and iOS does not, so the blur alone proves
         // nothing here: what counts is that the touch lands on the chat, whose handler iOS needs
-        const hit = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest(".chat-view, .composer")?.className ?? null, { x: title.x + title.width / 2, y: title.y + title.height / 2 });
+        const hit = await page.evaluate(({ x, y }) => {
+          // which of the two the touch reaches, whatever other classes it carries (a virtualized chat has one more)
+          const surface = document.elementFromPoint(x, y)?.closest(".chat-view, .composer");
+          return surface == null ? null : surface.matches(".chat-view") ? "chat-view" : "composer";
+        }, { x: title.x + title.width / 2, y: title.y + title.height / 2 });
         assert.equal(hit, "chat-view", "a touch on the greeting lands on the chat under it");
         await page.touchscreen.tap(title.x + title.width / 2, title.y + title.height / 2);
         await page.waitForFunction(() => !(document.activeElement instanceof HTMLTextAreaElement), undefined, { timeout: 3_000 });

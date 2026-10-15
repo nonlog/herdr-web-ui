@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Browser, Page } from "playwright-core";
 import { appFaces } from "./app-faces.ts";
 import { herdrRpc, tabCreate, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
+import { chromePath } from "./chrome-path.ts";
 
 type Box = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 type KeyboardQA = Window & { keyboardQA: (height: number | null) => void };
@@ -25,7 +26,7 @@ async function box(page: Page, selector: string): Promise<Box> {
 /** The header keeps the pane's title and the strip sits right under it, whatever the lens. */
 async function assertShell(page: Page, label: string, titleRoom = 60): Promise<void> {
   assert.equal(await page.locator(".app-header").getByRole("button", { name: "New tab" }).count(), 0, `${label}: the header has no New tab button of its own`);
-  assert.equal(await page.locator(".app-header .header-more-button").isVisible(), true, `${label}: New tab is an item of the header's More menu`);
+  assert.equal(await page.locator(".app-header .header-more-button").isVisible(), true, `${label}: the header keeps its More menu`);
   const title = await box(page, ".context-title-text");
   assert.ok(title.width >= titleRoom, `${label}: the pane's title keeps its room in the header (${title.width}px)`);
   const header = await box(page, ".app-header");
@@ -135,7 +136,7 @@ export async function checkMobileTabs(browser: Browser, origin: string): Promise
     const tabItems = await tabSheet.locator(".row-sheet-item").allTextContents();
     assert.equal(tabItems.indexOf("Rename pane"), 2, "a split tab's menu lists its two panes first on a phone");
     assert.ok(tabItems.includes("Rename pane") && tabItems.includes("Close pane"), "the open pane's actions are in the tab's menu on a phone");
-    assert.deepEqual(tabItems.slice(-4), ["Move tab right", "New tab", "Rename tab", "Close tab"], "the first tab offers only its available adjacent move, with the same actions as right-click");
+    assert.deepEqual(tabItems.slice(-3), ["Move tab right", "Rename tab", "Close tab"], "the first tab offers only its available adjacent move, and no New tab beside the strip's +");
     await tabSheet.getByRole("button", { name: "Cancel", exact: true }).tap();
     await tabSheet.waitFor({ state: "detached" });
 
@@ -207,7 +208,7 @@ if (import.meta.main) {
   const { UsageService } = await import("../server/usage.ts");
   const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-mobile-tabs-state-"));
   const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state, usage: new UsageService(undefined, []) });
-  const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   try {
     await checkMobileTabs(browser, `http://127.0.0.1:${server.port}`);
   } finally {

@@ -127,9 +127,9 @@ test.skipIf(process.platform === "win32")(`the sync script holds ${reason} for r
 });
 }
 
-for (const sensitive of ["", "portal.ts", "index.ts"]) {
-  test.skipIf(process.platform === "win32")(`complete sync ${sensitive ? `holds ${sensitive} changes for review` : "promotes the tested commit and dispatches Pages"}`, () => {
-    const { root, previous, latest } = fixture();
+for (const sensitive of ["", "portal.ts", "index.ts", "workflow"]) {
+  test.skipIf(process.platform === "win32")(`complete sync ${sensitive && sensitive !== "workflow" ? `holds ${sensitive} changes for review` : "promotes the tested commit and dispatches Pages"}`, () => {
+    const { root, previous, latest } = fixture(sensitive === "workflow");
     git(root, "switch", "-c", "main");
     mkdirSync(join(root, "docs"));
     writeFileSync(join(root, "docs", "upstream-sync-state.json"), JSON.stringify({
@@ -145,7 +145,7 @@ for (const sensitive of ["", "portal.ts", "index.ts"]) {
     const origin = join(remotes, "origin.git");
     git(root, "clone", "--bare", root, upstream);
     let target = latest;
-    if (sensitive) {
+    if (sensitive && sensitive !== "workflow") {
       git(root, "switch", "upstream");
       mkdirSync(join(root, "server"));
       writeFileSync(join(root, "server", sensitive), "export const publicIngress = true;\n");
@@ -176,7 +176,7 @@ for (const sensitive of ["", "portal.ts", "index.ts"]) {
       source "$1"
     `, "sync-test", join(import.meta.dir, "sync-upstream.sh")], {
       cwd: root, encoding: "utf8", timeout: 15_000,
-      env: { ...process.env, GH_REPO: "nonlog/herdr-web-ui", GITHUB_STEP_SUMMARY: summary, GH_CALL_LOG: calls },
+      env: { ...process.env, GH_REPO: "nonlog/herdr-web-ui", GITHUB_STEP_SUMMARY: summary, GH_CALL_LOG: calls, SYNC_WORKFLOWS_AUTHORIZED: sensitive === "workflow" ? "true" : "false" },
     });
     expect(result.status).toBe(0);
     const branch = `automation/upstream-sync-${base.slice(0, 12)}-${target.slice(0, 12)}`;
@@ -191,8 +191,8 @@ for (const sensitive of ["", "portal.ts", "index.ts"]) {
     expect(git(origin, "show", "-s", "--format=%an <%ae>%n%cn <%ce>", candidate)).toBe("Codex <codex@openai.com>\nCodex <codex@openai.com>");
     const published = readFileSync(calls, "utf8");
     expect(published).toContain(`workflow run ci.yml --repo nonlog/herdr-web-ui --ref ${branch}`);
-    expect(git(origin, "rev-parse", "main")).toBe(sensitive ? base : candidate);
-    if (sensitive) {
+    expect(git(origin, "rev-parse", "main")).toBe(sensitive && sensitive !== "workflow" ? base : candidate);
+    if (sensitive && sensitive !== "workflow") {
       expect(published).toContain(`pr create --repo nonlog/herdr-web-ui --base main --head ${branch} --draft`);
       expect(published).not.toContain("workflow run pages.yml");
     } else {

@@ -26,8 +26,13 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # The builtin GITHUB_TOKEN cannot push upstream commits containing
+          # workflow history. Optional narrowly scoped credential unlocks true
+          # ancestral merges without replacing our protected CI workflows.
+          token: ${{ secrets.UPSTREAM_WORKFLOWS_TOKEN || github.token }}
       - name: Check upstream, report conflicts, and validate eligible updates
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          SYNC_WORKFLOWS_AUTHORIZED: ${{ secrets.UPSTREAM_WORKFLOWS_TOKEN != '' }}
         run: bash scripts/sync-upstream.sh

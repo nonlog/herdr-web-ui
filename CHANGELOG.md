@@ -121,6 +121,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   ([#860](https://github.com/devswha/herdr-web-ui/pull/860))
 
 ### Fixed
+- First-device pairing waits for the browser to return its device cookie before restricting
+  access. A proxy that drops the cookie no longer locks out an otherwise open installation;
+  Settings reports the failed pairing instead. Already restricted installations stay restricted.
+  ([#915](https://github.com/devswha/herdr-web-ui/pull/915))
 - A message another Claude Code session sends into a pane (its `peer` messages) shows in the chat as
   a folded **Message from another session: {name}** that opens its own turn, instead of being skipped so the work it
   started was appended to the answer before it.
@@ -128,6 +132,9 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   to the start of the message in the order the files were picked, once a `/command` being typed or
   an IME composition is finished. It used to go where the caret
   was, so a path that arrived while you typed landed in the middle of your words and moved the caret.
+- A Pi conversation whose session file has grown past 64 MiB reads as a conversation again, where
+  the chat fell back to the terminal's text (`branch_unreadable`): the reader no longer refuses a
+  long active branch as a whole, and pages it the way it pages a short one, within the same budgets.
 - One paste, pick or drop attaches up to 20 files instead of silently keeping the first four, and
   the message box says how many it left out. **Settings → Chat → Files at once** sets the number
   for the device, from 1 to 50.
@@ -138,6 +145,10 @@ between releases do not reach them. Remote-PC runtime bundles are versioned sepa
   itself offers to interrupt the turn and send it. An ordinary Send and the automatic next-turn
   delivery never interrupt Codex.
   ([#783](https://github.com/devswha/herdr-web-ui/pull/783) by @kilhyeonjun)
+- On Windows, a pane that runs a launcher which starts OmO as its child is recognized as OmO. herdr
+  names only the launcher there, so the bridge now also looks for OmO below the pane's shell in the
+  PC's process table, so its chat and session are found. Only processes below that pane's own
+  shell count. ([#886](https://github.com/devswha/herdr-web-ui/pull/886) by @willowite)
 
 ## [0.4.8] - 2026-10-12
 

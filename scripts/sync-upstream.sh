@@ -68,18 +68,30 @@ if ! git merge-base --is-ancestor "$previous" "$base"; then
   review 'recorded source baseline is not in main history; a real maintainer merge is required'
   exit 1
 fi
-if [[ -s "$tmp/workflows" ]]; then
-  review 'upstream workflow commits require maintainer review and workflow write permission'
+if [[ -s "$tmp/workflows" && "${SYNC_WORKFLOWS_AUTHORIZED:-false}" != true ]]; then
+  review 'upstream workflow commits need the optional UPSTREAM_WORKFLOWS_TOKEN (GitHub App Workflows:write or a fine-grained credential) to publish their original commit ancestry'
   exit 1
 fi
 
 branch="automation/upstream-sync-${base:0:12}-${latest:0:12}"
 git checkout -B upstream-sync-candidate "$base"
 if ! git merge --no-ff --no-commit "$latest" > "$tmp/merge.log" 2>&1; then
+  # Keep the fork's verified CI and sync pipeline when upstream changes
+  # workflows. If those were the only conflicts, the original upstream commits
+  # can still become our second parent with the authorized token.
+  if [[ -s "$tmp/workflows" && "${SYNC_WORKFLOWS_AUTHORIZED:-false}" == true ]]; then
+    git restore --source="$base" --staged --worktree -- .github/workflows
+  fi
   git diff --name-only --diff-filter=U > "$tmp/conflicts" || true
-  if [[ ! -s "$tmp/conflicts" ]]; then cat "$tmp/merge.log" >> "$tmp/conflicts"; fi
-  review 'source code conflicts during Git merge'
-  exit 1
+  if [[ -s "$tmp/conflicts" ]]; then
+    review 'source code conflicts during Git merge'
+    exit 1
+  fi
+fi
+# Never import unreviewed upstream workflow changes into the write-capable sync
+# job. Preserve fork CI even when a privileged token makes ancestry possible.
+if [[ -s "$tmp/workflows" ]]; then
+  git restore --source="$base" --staged --worktree -- .github/workflows
 fi
 
 jq -n --arg sha "$latest" \
@@ -94,12 +106,23 @@ git diff --cached --name-only > "$tmp/changed"
 : > "$tmp/security"
 while IFS= read -r file; do
   case "$file" in
-    server/auth.ts|server/access.ts|server/machine-security.ts|server/ssh.ts|server/input-guard.ts|server/http.ts|server/open-access.ts|server/portal.ts|server/index.ts|scripts/sync-upstream.sh|.github/actions/*)
+    server/auth.ts|server/access.ts|server/machine-security.ts|server/ssh.ts|server/input-guard.ts|server/http.ts|server/open-access.ts|server/portal.ts|scripts/sync-upstream.sh|.github/actions/*)
       echo "$file" >> "$tmp/security" ;;
+    server/index.ts)
+      # Most upstream features register normal API handlers in this very large
+      # file. Reviewing *all* edits makes every release manual. Only touch the
+      # privileged authentication, CORS, pairing, token or ingress code path.
+      if git diff --cached --unified=0 -- server/index.ts |
+        grep -E '^[+-][^+-]' |
+        grep -Eiq '(authoriz|auth[_A-Z]|access.control|pairing|token|ingress|cookie|csrf|origin.check|public.access|device.revoke|login)'; then
+        echo "$file (security-related hunk)" >> "$tmp/security"
+      fi ;;
   esac
 done < "$tmp/changed"
 
-git diff --cached --check || { review 'merge has whitespace errors'; exit 1; }
+# Vendor .patch files intentionally contain lines beginning with +<space>:
+# check source whitespace, not the embedded diffs inside patch payloads.
+git diff --cached --check -- . ':(exclude)patches' || { review 'merge has whitespace errors'; exit 1; }
 git commit -m "chore(sync): merge upstream $(git rev-parse --short=12 "$latest")" \
   -m 'Sync-Generated-By: nonlog/upstream-commit-sync' -m "Upstream-Merged-SHA: $latest"
 candidate="$(git rev-parse HEAD)"

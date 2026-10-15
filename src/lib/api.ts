@@ -14,20 +14,20 @@ import type {
   IntegrationsResponse,
   LanExposure,
   InteractivePrompt,
-  MovePaneDestination,
-  MovePaneRequest,
   MoveTabRequest,
   TabMoved,
   OmoActivity,
   OpenWorktreeRequest,
   PairedDevice,
   PairingCode,
-  PaneMoved,
   PaneDirection,
   PaneInfo,
   PanePlan,
   PaneReadResult,
   PaneResized,
+  RepoDiffFileList,
+  RepoDiffFilePatch,
+  RepoDiffScope,
   PaneSplit,
   PaneSwapped,
   PaneZoomed,
@@ -58,6 +58,7 @@ import type {
   WorktreeRemoved,
   ZoomPaneRequest,
 } from "../../shared/protocol.ts";
+import { SUPPORTED_AGENT_KINDS } from "../../shared/supported-agents.ts";
 import type { PaneScrollInfo } from "../../shared/herdr-api.generated.ts";
 import { readInstalledNotes, readUpdateNotes, type HerdrUpdateStatus, type InstalledNotes, type UpdateCommand, type UpdateNotes, type UpdateStatus } from "../../shared/update.ts";
 import type { AlertPrefs } from "../../shared/notify-policy.ts";
@@ -281,13 +282,25 @@ function trimConversationAnswers(keep: string): void {
   }
 }
 
-/** GET /api/pane/conversation: structured turns, or scrollback fallback; `page` as ConversationResponse.cursor describes. */
-export async function fetchPaneConversation(paneId: string, machineId = "local", page: ConversationPageQuery = {}): Promise<ConversationResponse> {
+function conversationUrl(paneId: string, machineId: string, page: ConversationPageQuery): string {
   const query = new URLSearchParams({ pane_id: paneId });
   if (page.before !== undefined) query.set("before", page.before);
   if (page.since !== undefined) query.set("since", page.since);
   if (page.from !== undefined) query.set("from", page.from);
-  const url = machinePath(machineId, `pane/conversation?${query.toString()}`);
+  return machinePath(machineId, `pane/conversation?${query.toString()}`);
+}
+
+/**
+ * The newest page last answered for this pane (no page query), without asking the server: a chat
+ * that mounts draws it at once while its read revalidates it. It leaves the cache order alone.
+ */
+export function peekPaneConversation(paneId: string, machineId = "local"): ConversationResponse | undefined {
+  return conversationAnswers.get(conversationUrl(paneId, machineId, {}))?.body;
+}
+
+/** GET /api/pane/conversation: structured turns, or scrollback fallback; `page` as ConversationResponse.cursor describes. */
+export async function fetchPaneConversation(paneId: string, machineId = "local", page: ConversationPageQuery = {}): Promise<ConversationResponse> {
+  const url = conversationUrl(paneId, machineId, page);
   const polled = page.before === undefined;
   const known = polled ? conversationAnswers.get(url) : undefined;
   const { response, body } = await withChatReadDeadline(async (signal) => {
@@ -496,16 +509,6 @@ export async function renameAgent(paneId: string, name: string | null, machineId
 }
 
 /**
- * POST /api/pane/move: the pane into another tab, a new tab (of its workspace or another) or a
- * new workspace, herdr's `pane move`. A pane that leaves its workspace answers to a new id:
- * `pane.pane_id`, beside `previous_pane_id`, which is the one sent. herdr's own focus stays.
- */
-export async function movePane(paneId: string, destination: MovePaneDestination, machineId = "local"): Promise<PaneMoved> {
-  const response = await sendJson(machinePath(machineId, "pane/move"), "POST", { pane_id: paneId, destination } satisfies MovePaneRequest);
-  return (await response.json()) as PaneMoved;
-}
-
-/**
  * POST /api/pane/split: a new pane beside this one in herdr (its prefix+v / prefix+-), answered as
  * herdr lists it. herdr's focus stays put unless `focus` asks for the new pane; the sidebar and the
  * tab strip learn of it from the server's session-changed broadcast.
@@ -549,9 +552,11 @@ export async function clearPane(paneId: string, machineId = "local"): Promise<vo
   await sendJson(machinePath(machineId, "pane/clear"), "POST", { pane_id: paneId });
 }
 
-/** GET /api/agents: the agent kinds herdr can start, for the new-session dialog. */
+/** GET /api/agents: of the agent kinds herdr can start, the ones this app supports and that PC has installed, for the new-session dialog. */
 export async function fetchAgentKinds(machineId = "local"): Promise<AgentKind[]> {
-  return (await getJson<{ agents: AgentKind[] }>(machinePath(machineId, "agents"))).agents;
+  // filtered here, not on the server: a remote PC's older bridge still answers every manifest,
+  // and says nothing of what is installed, so its supported kinds are all offered
+  return (await getJson<{ agents: AgentKind[] }>(machinePath(machineId, "agents"))).agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && agent.installed !== false);
 }
 
 /** GET /api/integrations: herdr's agent integrations on that PC and whether each is installed. */
@@ -587,6 +592,42 @@ export async function fetchFileInfo(path: string, paneId: string | null, machine
 /** GET /api/fs/file: the file itself, streamed (ranges for media); `download` saves it instead. */
 export function fileUrl(path: string, paneId: string | null, machineId = "local", download = false): string {
   return machinePath(machineId, `fs/file?${fileQuery(path, paneId)}${download ? "&download=1" : ""}`);
+}
+
+/**
+ * Which repository and which two of its states: the pane's folder (or `directory`, read when the
+ * pane is gone), and the working tree against the index, the index against HEAD, or two commits.
+ */
+export interface RepoDiffQuery {
+  paneId: string | null;
+  directory: string | null;
+  scope: RepoDiffScope;
+  /** `commit` only: the list's hashes, so a file is read from the same comparison */
+  base: string | null;
+  head: string | null;
+}
+
+function repoDiffQuery(query: RepoDiffQuery): URLSearchParams {
+  return new URLSearchParams({
+    ...(query.paneId ? { pane_id: query.paneId } : {}),
+    ...(query.directory ? { directory: query.directory } : {}),
+    scope: query.scope,
+    ...(query.scope === "commit" && query.base ? { base: query.base } : {}),
+    ...(query.scope === "commit" && query.head ? { head: query.head } : {}),
+  });
+}
+
+/** GET /api/workspace/diff/files: the files a comparison changed, with their status and counts. */
+export async function fetchRepoDiffFiles(query: RepoDiffQuery, machineId = "local"): Promise<RepoDiffFileList> {
+  return getJson<RepoDiffFileList>(machinePath(machineId, `workspace/diff/files?${repoDiffQuery(query).toString()}`));
+}
+
+/** GET /api/workspace/diff/file: one changed file's patch, as git prints it, or why there is none. */
+export async function fetchRepoDiffFile(query: RepoDiffQuery, path: string, oldPath: string | null, machineId = "local"): Promise<RepoDiffFilePatch> {
+  const params = repoDiffQuery(query);
+  params.set("path", path);
+  if (oldPath !== null) params.set("old_path", oldPath);
+  return getJson<RepoDiffFilePatch>(machinePath(machineId, `workspace/diff/file?${params.toString()}`));
 }
 
 export type { CreateTabRequest, CreateWorkspaceRequest } from "../../shared/protocol.ts";

@@ -109,7 +109,6 @@
    positioned against THIS, never against the stack — the composer and key bar
    below keep their rows no matter which lens is on */
 .terminal-surface {
-  --terminal-history-gutter: var(--space-3);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -217,7 +216,10 @@
   /* below a phone's glass header when it lies over the chat (styles.css) */
   top: calc(var(--space-2) + var(--header-over, 0px));
   right: var(--space-3);
-  z-index: var(--z-banner);
+  /* one above the input line and the masked input, which float at --z-banner from a slot later
+     in the stack (TerminalInput.css): in a short pane a grown line reaches the grid's top, and the
+     banners and their buttons (Send/Discard, Dismiss) must stay over it */
+  z-index: calc(var(--z-banner) + 1);
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -251,6 +253,37 @@
 }
 
 /* not a fault: a lens herdr does not offer on this PC yet */
+/* the selection's quote button: a banner that is a button */
+.terminal-quote {
+  font-family: inherit;
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+.terminal-quote svg {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  flex: none;
+}
+
+.terminal-quote:hover {
+  border-color: var(--accent);
+}
+
+.terminal-quote:focus-visible {
+  outline: var(--ring);
+  outline-offset: var(--ring-offset);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-quote {
+    transition: none;
+  }
+}
+
 .terminal-banner-soon {
   border-color: var(--accent);
   color: var(--text);
@@ -384,6 +417,3 @@
 .terminal-stack.is-chat .pane-terminal {
   content-visibility: hidden;
 }
-
-.pane-terminal.has-viewport-tools { width: calc(100% - var(--terminal-history-gutter)); }
-@media (pointer: coarse) { .terminal-surface { --terminal-history-gutter: var(--space-6); } }

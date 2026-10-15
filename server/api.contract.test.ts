@@ -14,13 +14,15 @@ import { VoiceService } from "./voice.ts";
 import { Telemetry } from "./telemetry.ts";
 import { NOTICE_VERSION, type TelemetryEvent, type TelemetryStatus } from "../shared/telemetry.ts";
 import { DEFAULT_SETTINGS, telemetrySettingsSnapshot } from "../src/lib/settings.ts";
-import { herdrRpc, ping, sessionSnapshot, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
+import { HerdrSocket } from "../src/lib/ws.ts";
+import { herdrRpc, paneRead, ping, sessionSnapshot, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 import { descriptorPath, type BridgeDescriptor } from "./bridge.ts";
 import { handleMachineRequest } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 import { TailnetIdentitySource } from "./tailscale.ts";
 import { forgetTranscriptState } from "./conversation.ts";
+import type { RepoDiffFileList, RepoDiffFilePatch } from "../shared/protocol.ts";
 
 /**
  * Contract test for herdr-web-ui's HTTP + WS surface.
@@ -651,7 +653,7 @@ describe("mutation body validation", () => {
   it("rejects non-object JSON without touching herdr or losing the error envelope", async () => {
     for (const path of [
       "/api/workspace/create", "/api/tab/create", "/api/tab/rename", "/api/tab/close", "/api/tab/move", "/api/workspace/rename", "/api/workspace/move", "/api/workspace/close",
-      "/api/pane/rename", "/api/pane/input", "/api/pane/keys", "/api/pane/close", "/api/pane/move", "/api/pane/image",
+      "/api/pane/rename", "/api/pane/input", "/api/pane/keys", "/api/pane/close", "/api/pane/image",
       "/api/pane/scroll", "/api/agent/rename",
     ]) {
       for (const body of [null, [], "text", 42, true]) {
@@ -706,6 +708,9 @@ describe("tab rename and close", () => {
       expect(res.status).toBe(400);
       expect(((await res.json()) as ApiError).error.code).toBe("missing_label");
     }
+    const long = await post("rename", { tab_id: "unknown:t9", label: "T".repeat(81) });
+    expect(long.status).toBe(400);
+    expect(((await long.json()) as ApiError).error.code).toBe("label_too_long");
   });
 
   it("renames a tab, closes one beside another, and takes the workspace with its last tab", async () => {
@@ -903,6 +908,7 @@ describe("tab creation", () => {
       [{ cwd: join(tmpdir(), crypto.randomUUID()) }, "invalid_cwd"],
       [{ cwd: 42 }, "invalid_cwd"],
       [{ label: false }, "missing_label"],
+      [{ label: "T".repeat(81) }, "label_too_long"],
       [{ agent: {} }, "invalid_agent"],
       [{ agent: { kind: "muse", args: "--help" } }, "invalid_agent"],
     ] as const) {
@@ -1094,8 +1100,10 @@ describe("workspace and discovery endpoints", () => {
       expect((await kinds()).map((agent) => agent.kind)).not.toContain("gjc");
       for (const name of ["omo", "gjc"]) writeFileSync(join(bin, name), "#!/bin/sh\n", { mode: 0o755 });
       const offered = await kinds();
-      expect(offered).toContainEqual({ kind: "omo", label: "OmO" });
-      expect(offered).toContainEqual({ kind: "gjc", label: "Gajae Code" });
+      expect(offered).toContainEqual({ kind: "omo", label: "OmO", installed: true });
+      expect(offered).toContainEqual({ kind: "gjc", label: "Gajae Code", installed: true });
+      // claude is always listed, and said to be missing where its command is not on PATH
+      expect(offered).toContainEqual({ kind: "claude", label: "Claude Code", installed: false });
     } finally {
       process.env["PATH"] = path;
       rmSync(bin, { recursive: true, force: true });
@@ -1160,6 +1168,48 @@ describe("workspace and discovery endpoints", () => {
     expect(close.status).toBe(200);
     expect(await close.json()).toEqual({ ok: true });
     workspaceId = null;
+  }, 20_000);
+
+  it("pushes session-changed when POST /api/workspace/close answers, not after the collector's debounce", async () => {
+    const closing = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-close-push" });
+    const socket = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
+    try {
+      // the creation's own frame, debounced, is not the close's
+      await socket.waitFor((frame) => frame.type === "session-changed", "session-changed after create", 5_000);
+      const before = new Set(socket.seen);
+      const changed = socket.waitFor((frame) => frame.type === "session-changed" && !before.has(frame), "session-changed after close", 5_000).then(() => performance.now());
+      const response = await fetch(`${base()}/api/workspace/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace_id: closing.workspace.workspace_id }),
+      });
+      const answered = performance.now();
+      expect(response.status).toBe(200);
+      expect(await changed - answered).toBeLessThan(250);
+    } finally {
+      socket.close();
+      await herdrRpc("workspace.close", { workspace_id: closing.workspace.workspace_id }).catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("says a repository has no commits yet instead of passing git's refusal on", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "herdr-web-ui-worktree-empty-"));
+    expect(Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: repo, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+    const parent = await workspaceCreate({ cwd: repo, label: "herdr-web-ui-test-worktree-empty" });
+    const checkout = join(`${repo}-checkouts`, "feature");
+    try {
+      const create = await fetch(`${base()}/api/worktree/create`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace_id: parent.workspace.workspace_id, branch: "herdr-web-ui-test-unborn", path: checkout }),
+      });
+      expect(create.status).toBe(409);
+      expect(((await create.json()) as ApiError).error.code).toBe("repository_without_commits");
+      expect(existsSync(checkout)).toBeFalse();
+    } finally {
+      await herdrRpc("workspace.close", { workspace_id: parent.workspace.workspace_id }).catch(() => undefined);
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(`${repo}-checkouts`, { recursive: true, force: true });
+    }
   }, 20_000);
 
   it("creates a worktree of an owned repository as a grouped workspace, lists it, and opens it again", async () => {
@@ -1332,6 +1382,12 @@ describe("workspace and discovery endpoints", () => {
   it("uses the shared error envelope for malformed mutation bodies", async () => {
     for (const [path, body, code] of [
       ["/api/workspace/rename", {}, "missing_workspace_id"],
+      // #927: herdr would keep a blank or any-length name
+      ["/api/workspace/rename", { workspace_id: "x", label: "" }, "missing_label"],
+      ["/api/workspace/rename", { workspace_id: "x", label: "   " }, "missing_label"],
+      ["/api/workspace/rename", { workspace_id: "x", label: "W".repeat(81) }, "label_too_long"],
+      ["/api/worktree/create", { workspace_id: "x", branch: "b", label: "W".repeat(81) }, "label_too_long"],
+      ["/api/worktree/open", { workspace_id: "x", path: "/tmp", label: "W".repeat(81) }, "label_too_long"],
       ["/api/workspace/move", { workspace_id: "x", insert_index: -1 }, "invalid_index"],
       ["/api/workspace/close", {}, "missing_workspace_id"],
       ["/api/pane/rename", {}, "missing_pane_id"],
@@ -1633,12 +1689,57 @@ describe("POST /api/pane/image", () => {
     expect(basename(bare.path)).toMatch(/^file-.*\.bin$/);
   });
 
-  it("rejects an image above the size ceiling with 413", async () => {
-    const oversized = Buffer.alloc(9 * 1024 * 1024, 1).toString("base64");
+  it("stores a 20 MiB file whole (regression: 413 while the ceiling was 8 MiB)", async () => {
+    const bytes = Buffer.alloc(20 * 1024 * 1024, 7);
+    const res = await post({ pane_id: qaPaneId, content_type: "application/zip", data_base64: bytes.toString("base64"), name: "big.zip" });
+    expect(res.status).toBe(200);
+    const { path } = (await res.json()) as { path: string };
+    expect(statSync(path).size).toBe(bytes.byteLength);
+  });
+
+  it("rejects a 40 MiB file (a 55.9 MB body, under Bun's 64 MiB cap) with 413 and the JSON reason (control)", async () => {
+    const oversized = Buffer.alloc(40 * 1024 * 1024, 1).toString("base64");
     const res = await post({ pane_id: qaPaneId, content_type: "image/png", data_base64: oversized });
     expect(res.status).toBe(413);
-    const body = (await res.json()) as { error: { code: string } };
+    const body = (await res.json()) as { error: { code: string; message: string } };
     expect(body.error.code).toBe("image_too_large");
+    expect(body.error.message.length).toBeGreaterThan(0);
+  });
+
+  it("counts a streamed body that announces no length and refuses it past the bound (regression: invalid_json on main)", async () => {
+    const chunk = new TextEncoder().encode("A".repeat(1024 * 1024));
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent === 0) controller.enqueue(new TextEncoder().encode(`{"pane_id":"${qaPaneId}","content_type":"application/zip","data_base64":"`));
+        if (sent++ < 60) controller.enqueue(chunk);
+        else controller.close();
+      },
+    });
+    const res = await fetch(`${base()}/api/pane/image`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("image_too_large");
+  });
+
+  it("passes a 20 MiB upload through a PC proxy route (regression: the remote refused it above 8 MiB)", async () => {
+    const manager = {
+      endpoint: () => ({ url: base(), token: "" }),
+      trackTerminal: () => () => undefined,
+    } as unknown as MachineManager;
+    const bytes = Buffer.alloc(20 * 1024 * 1024, 9);
+    const res = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/pc1/pane/image", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-herdr-machine": "1" },
+      body: JSON.stringify({ pane_id: qaPaneId, content_type: "application/zip", data_base64: bytes.toString("base64"), name: "remote.zip" }),
+    }), manager);
+    expect(res.status).toBe(200);
+    const { path } = (await res.json()) as { path: string };
+    expect(statSync(path).size).toBe(bytes.byteLength);
   });
 
   it("rejects empty image data with 400", async () => {
@@ -1925,17 +2026,228 @@ describe("WebSocket roles and status push", () => {
       // the terminal lens's grid is the pty's, not the pane's own one the covered attach left it at
       expect(await phone.waitFor((m) => m.type === "pane-geometry" && m.pane_id === paneId && m.cols === 91, "the resize applied after creation", 15_000)).toMatchObject({ cols: 91, rows: 27 });
       await phone.waitFor((m) => m.type === "input-ready" && m.pane_id === paneId, "attach took", 15_000);
-      // one word, "27x91": herdr may draw a space as a cursor move, and "size=27 91" then never arrives as such
-      const from = phone.seen.length;
+      // regression (fails on main): inspect the rendered screen, not diff-rendered PTY bytes
       phone.send({ type: "input", pane_id: paneId, text: "clear; echo size=$(stty size | tr ' ' x)\r" });
-      // over every frame since the command: a read may end in the middle of the word
-      const output = () => phone.seen.slice(from).filter((m) => m.type === "pty-data" && m.pane_id === paneId).map((m) => String(m.data)).join("");
-      await phone.waitFor((m) => m.type === "pty-data" && m.pane_id === paneId && output().includes("size=27x91"), "the shell sees the terminal lens's grid", 15_000);
+      const deadline = Date.now() + 15_000;
+      let screen = "";
+      let lastError: unknown;
+      while (Date.now() <= deadline) {
+        // one read that times out is not the verdict: keep polling until the deadline
+        try {
+          screen = (await paneRead({ paneId, source: "visible", format: "text", timeoutMs: 1_000 })).text;
+        } catch (error) {
+          lastError = error;
+          continue;
+        }
+        if (screen.includes("size=27x91")) break;
+      }
+      expect(screen, `the shell sees the terminal lens's grid (last pane.read error: ${String(lastError)})`).toContain("size=27x91");
     } finally {
       phone.close();
       await workspaceClose(created.workspace.workspace_id).catch(() => undefined);
     }
   }, 60_000);
+
+  // #472: a device that goes back to its chat lens gives the shared pty back to a terminal still
+  // showing, without waiting for that terminal's own resize, focus or click
+  describe("release-size", () => {
+    const ws = () => RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
+    // the shell's `stty size` goes to a file of its own per ask: herdr redraws the pane's screen as
+    // cell updates, so the same answer twice never reads back from the stream. Asked again until the
+    // deadline: herdr applies a pty resize to the pane a moment after it.
+    let asks = 0;
+    const shellSees = async (socket: RecordingSocket, paneId: string, size: string) => {
+      const want = size.replace("x", " ");
+      let last = "";
+      for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
+        const file = join(tmpdir(), `herdr-web-ui-release-size-${process.pid}-${++asks}`);
+        socket.send({ type: "input", pane_id: paneId, text: `stty size > ${file}.part && mv ${file}.part ${file}\r` });
+        for (const answered = Date.now() + 1000; Date.now() < answered && !existsSync(file);) await Bun.sleep(25);
+        if (!existsSync(file)) continue;
+        last = readFileSync(file, "utf8").trim();
+        rmSync(file, { force: true });
+        if (last === want) return;
+      }
+      throw new Error(`the shell saw "${last}", not "${want}"`);
+    };
+    const attach = async (socket: RecordingSocket, paneId: string, cols: number, rows: number) => {
+      socket.send({ type: "attach", pane_id: paneId, cols, rows });
+      await socket.waitFor((m) => m.type === "input-ready" && m.pane_id === paneId, "attach took", 15_000);
+    };
+
+    it("returns the pty to the desktop's grid when the phone leaves the terminal lens", async () => {
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size" });
+      const paneId = created.root_pane.pane_id;
+      const desktop = await ws();
+      const phone = await ws();
+      try {
+        await attach(desktop, paneId, 120, 40);
+        // the phone opens the terminal lens: its viewport takes the shared grid
+        await attach(phone, paneId, 53, 33);
+        await desktop.waitFor((m) => m.type === "pane-geometry" && m.pane_id === paneId && m.cols === 53, "the phone took the grid", 5000);
+        await shellSees(desktop, paneId, "33x53");
+
+        desktop.seen.length = 0;
+        phone.send({ type: "release-size", pane_id: paneId });
+        // regression (fails on main): the desktop's grid comes back within 1 s, with no desktop frame sent
+        expect(await desktop.waitFor((m) => m.type === "pane-geometry" && m.pane_id === paneId, "the grid given back", 5000)).toMatchObject({ cols: 120, rows: 40 });
+        // regression (fails on main): the shell in the pane sees the desktop's grid
+        await shellSees(desktop, paneId, "40x120");
+        // control: one server resize for the release, no ping-pong after it
+        expect(desktop.seen.filter((m) => m.type === "pane-geometry" && m.pane_id === paneId)).toHaveLength(1);
+      } finally {
+        desktop.close();
+        phone.close();
+        await workspaceClose(created.workspace.workspace_id).catch(() => undefined);
+      }
+    }, 60_000);
+
+    it("skips a hidden client's grid when another client releases, leaving the size if nobody shows a terminal", async () => {
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-hidden" });
+      const paneId = created.root_pane.pane_id;
+      const desktop = await ws();
+      const phone = await ws();
+      // Use the actual browser client for keepSize, not a hand-written release frame: the bug is
+      // that a mounted but hidden terminal used to leave its grid on the server.
+      const globals = globalThis as unknown as { window?: unknown };
+      const beforeWindow = globals.window;
+      globals.window = globalThis;
+      const hidden = new HerdrSocket(`ws://localhost:${server.port}/ws`);
+      const nextHidden = (matches: (message: import("../shared/protocol.ts").ServerMessage) => boolean) =>
+        new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => { off(); reject(new Error("hidden client did not answer")); }, 15_000);
+          const off = hidden.on((message) => {
+            const ack = message.type === "pty-data" ? hidden.outputAcknowledgement(message) : undefined;
+            ack?.();
+            if (matches(message)) { clearTimeout(timeout); off(); resolve(); }
+          });
+        });
+      try {
+        await attach(desktop, paneId, 120, 40);
+        const ready = nextHidden((m) => m.type === "input-ready" && m.pane_id === paneId);
+        hidden.attach(paneId, 100, 30);
+        hidden.connect();
+        await ready;
+        await desktop.waitFor((m) => m.type === "pane-geometry" && m.cols === 100, "hidden client's initial grid", 5000);
+        await attach(phone, paneId, 53, 33);
+        await desktop.waitFor((m) => m.type === "pane-geometry" && m.cols === 53, "phone's grid", 5000);
+        await shellSees(desktop, paneId, "33x53");
+
+        // An in-band response on the same connection orders keepSize before the phone releases.
+        // A nonexistent pending ID changes nothing and sends no terminal input.
+        hidden.keepSize(paneId);
+        expect(await hidden.pendingAction(paneId, "nonexistent-472", "discard")).toMatchObject({ ok: false });
+        desktop.seen.length = 0;
+        phone.send({ type: "release-size", pane_id: paneId });
+        // regression (fails on main): the hidden 100x30 candidate must not win.
+        expect(await desktop.waitFor((m) => m.type === "pane-geometry" && m.pane_id === paneId, "remaining terminal's grid", 5000))
+          .toMatchObject({ cols: 120, rows: 40 });
+        await shellSees(desktop, paneId, "40x120");
+        expect(desktop.seen.filter((m) => m.type === "pane-geometry")).toHaveLength(1);
+
+        desktop.seen.length = 0;
+        desktop.send({ type: "release-size", pane_id: paneId });
+        desktop.send({ type: "ping", id: 47221 });
+        await desktop.waitFor((m) => m.type === "pong" && m.id === 47221, "last terminal released", 5000);
+        // control: no terminal viewers remain; do not resize to a hidden or Chat grid.
+        expect(desktop.seen.filter((m) => m.type === "pane-geometry")).toEqual([]);
+        await shellSees(desktop, paneId, "40x120");
+      } finally {
+        hidden.close();
+        globals.window = beforeWindow;
+        desktop.close();
+        phone.close();
+        await workspaceClose(created.workspace.workspace_id);
+      }
+    }, 60_000);
+
+    it("keeps a grid released during attach creation out of the fallback candidates", async () => {
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-creating" });
+      const paneId = created.root_pane.pane_id;
+      const hidden = await ws();
+      const phone = await ws();
+      try {
+        // Back-to-back on the same connection: release lands during the initial terminal lookup.
+        hidden.send({ type: "attach", pane_id: paneId, cols: 100, rows: 30 });
+        hidden.send({ type: "release-size", pane_id: paneId });
+        hidden.send({ type: "ping", id: 47222 });
+        await hidden.waitFor((m) => m.type === "pong" && m.id === 47222, "release processed during creation", 5000);
+        await hidden.waitFor((m) => m.type === "input-ready", "hidden attach completed", 15_000);
+        await attach(phone, paneId, 53, 33);
+        await hidden.waitFor((m) => m.type === "pane-geometry" && m.cols === 53, "phone grid", 5000);
+        await shellSees(phone, paneId, "33x53");
+        hidden.seen.length = 0;
+        phone.send({ type: "release-size", pane_id: paneId });
+        phone.send({ type: "ping", id: 47223 });
+        await phone.waitFor((m) => m.type === "pong" && m.id === 47223, "phone release processed", 5000);
+        // regression (fails on main): the completed attach must not revive a released grid.
+        expect(hidden.seen.filter((m) => m.type === "pane-geometry")).toEqual([]);
+        await shellSees(phone, paneId, "33x53");
+      } finally {
+        hidden.close();
+        phone.close();
+        await workspaceClose(created.workspace.workspace_id);
+      }
+    }, 60_000);
+
+    it("never overwrites a resize another client sends after the release", async () => {
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-race" });
+      const paneId = created.root_pane.pane_id;
+      const desktop = await ws();
+      const phone = await ws();
+      const third = await ws();
+      try {
+        await attach(desktop, paneId, 120, 40);
+        await attach(phone, paneId, 53, 33);
+        // the third client watches from the chat lens until it resizes
+        third.send({ type: "attach", pane_id: paneId, cols: 30, rows: 10, keep_size: true });
+        await third.waitFor((m) => m.type === "input-ready" && m.pane_id === paneId, "third attach took", 15_000);
+        await desktop.waitFor((m) => m.type === "pane-geometry" && m.pane_id === paneId && m.cols === 53, "the phone took the grid", 5000);
+
+        desktop.seen.length = 0;
+        phone.send({ type: "release-size", pane_id: paneId });
+        third.send({ type: "resize", pane_id: paneId, cols: 100, rows: 30 });
+        await desktop.waitFor((m) => m.type === "pane-geometry" && m.pane_id === paneId && m.cols === 100, "the third client's resize", 5000);
+        // control: the pty ends at the later resize, whichever of the two frames the server read first
+        await shellSees(third, paneId, "30x100");
+        // control: at most the release's own resize before the third client's, nothing after it
+        const grids = desktop.seen.filter((m) => m.type === "pane-geometry" && m.pane_id === paneId);
+        expect(grids.length).toBeLessThanOrEqual(2);
+        expect(grids.at(-1)).toMatchObject({ cols: 100, rows: 30 });
+      } finally {
+        for (const socket of [desktop, phone, third]) socket.close();
+        await workspaceClose(created.workspace.workspace_id).catch(() => undefined);
+      }
+    }, 60_000);
+
+    it("ignores a release from a client that never drove the grid, as an older server ignores the frame", async () => {
+      const created = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-release-size-noop" });
+      const paneId = created.root_pane.pane_id;
+      const desktop = await ws();
+      const chat = await ws();
+      try {
+        await attach(desktop, paneId, 120, 40);
+        chat.send({ type: "attach", pane_id: paneId, cols: 53, rows: 33, keep_size: true });
+        await chat.waitFor((m) => m.type === "input-ready" && m.pane_id === paneId, "chat attach took", 15_000);
+        desktop.seen.length = 0;
+        chat.seen.length = 0;
+        chat.send({ type: "release-size", pane_id: paneId });
+        // also for a pane this connection never attached
+        chat.send({ type: "release-size", pane_id: "w-nonexistent:p1" });
+        chat.send({ type: "ping", id: 472 });
+        // control (passes on main): the connection stays open and answers, with no error frame
+        await chat.waitFor((m) => m.type === "pong" && m.id === 472, "pong after release-size", 5000);
+        expect(chat.seen.filter((m) => m.type === "error")).toEqual([]);
+        // control (passes on main): the grid stays the desktop's
+        await shellSees(desktop, paneId, "40x120");
+        expect(desktop.seen.filter((m) => m.type === "pane-geometry")).toEqual([]);
+      } finally {
+        desktop.close();
+        chat.close();
+        await workspaceClose(created.workspace.workspace_id).catch(() => undefined);
+      }
+    }, 60_000);
+  });
 
   it("rejects an unknown role mode with an in-band error", async () => {
     const client = await RecordingSocket.connect(`ws://localhost:${server.port}/ws`);
@@ -2254,6 +2566,30 @@ describe("web push", () => {
     expect(((await gone.json()) as ApiError).error.code).toBe("subscription_not_found");
   });
 
+  // regression (fails on main): an endpoint the push service retired is refused, never-known stays not found (#1038)
+  it.each([404, 410])("answers subscription_gone on the first test when the push service returns %i", async (status) => {
+    const retiring = await startFakePushService();
+    try {
+      expect((await postJson("/api/push/subscribe", { subscription: retiring.subscription })).status).toBe(204);
+      retiring.answerWith(status);
+      const first = await postJson("/api/push/test", { endpoint: retiring.subscription.endpoint });
+      expect(first.status).toBe(410);
+      expect(((await first.json()) as ApiError).error.code).toBe("subscription_gone");
+      const again = await postJson("/api/push/subscribe", { subscription: retiring.subscription });
+      expect(again.status).toBe(410);
+      expect(((await again.json()) as ApiError).error.code).toBe("subscription_gone");
+      const tested = await postJson("/api/push/test", { endpoint: retiring.subscription.endpoint });
+      expect(tested.status).toBe(410);
+      expect(((await tested.json()) as ApiError).error.code).toBe("subscription_gone");
+      // control
+      const unknown = await postJson("/api/push/test", { endpoint: "https://push.example/never-known" });
+      expect(unknown.status).toBe(404);
+      expect(((await unknown.json()) as ApiError).error.code).toBe("subscription_not_found");
+    } finally {
+      retiring.stop();
+    }
+  });
+
   it("pushes a live pane's status change to a subscribed device", async () => {
     const paneId = pushPaneId!;
     expect((await postJson("/api/push/subscribe", { subscription: fake.subscription })).status).toBe(204);
@@ -2541,6 +2877,18 @@ describe("pairing and identity", () => {
     expect(((await refused.json()) as ApiError).error.code).toBe("other_user");
   });
 
+  it("regression: refuses identity headers without a single tailnet forwarded address", async () => {
+    for (const forwardedFor of [null, "127.0.0.1", "203.0.113.50", "100.64.0.9, 100.64.0.10"]) {
+      const headers = { "tailscale-user-login": OWNER, ...(forwardedFor === null ? {} : { "x-forwarded-for": forwardedFor }) };
+      const response = await fetch(`${base()}/api/devices`, { headers });
+      expect(response.status).toBe(401);
+      expect(((await response.json()) as ApiError).error.code).toBe("unauthorized");
+      expect(await auth(headers)).toMatchObject({ authenticated: false, reason: "pairing_required" });
+    }
+    // control: Serve may forward either tailnet address family.
+    expect((await fetch(`${base()}/api/devices`, { headers: proxied(OWNER, { "x-forwarded-for": "fd7a:115c:a1e0::1" }) })).status).toBe(200);
+  });
+
   it("lets the owner's own device in with no login header, where serve is the only ingress and one login owns the tailnet", async () => {
     const state = mkdtempSync(join(tmpdir(), "herdr-sole-user-"));
     const savedOwner = process.env["HERDR_WEB_TAILSCALE_OWNER"];
@@ -2572,6 +2920,8 @@ describe("pairing and identity", () => {
       expect(await at(sole.port, { ...phone, "tailscale-user-login": "someone@example.com" })).toMatchObject({ authenticated: false, reason: "other_user" });
       expect(await at(sole.port, { ...phone, "tailscale-funnel-request": "?1" })).toMatchObject({ authenticated: false, reason: "pairing_required" });
       expect(await at(sole.port, { ...phone, "tailscale-user-login": OWNER })).toMatchObject({ authenticated: true, via: "tailscale" });
+      // regression: a rejected identity is not an absent identity, even at this PC's Host.
+      expect(await at(sole.port, { ...phone, "tailscale-user-login": OWNER, "x-forwarded-for": "127.0.0.1" })).toMatchObject({ authenticated: false, reason: "pairing_required" });
       // where the operator did not declare serve the only ingress, the same request pairs, with or without the tailnet's name as Host
       expect(await at(off.port, proxied())).toMatchObject({ authenticated: false, reason: "pairing_required" });
       expect(await at(off.port, phone)).toMatchObject({ authenticated: false, reason: "pairing_required" });
@@ -2809,6 +3159,9 @@ describe("token auth", () => {
       const { code } = (await (await fetch(`http://127.0.0.1:${open.port}/api/devices/pair/start`, { method: "POST", headers: guard })).json()) as { code: string };
       const paired = await fetch(`http://127.0.0.1:${open.port}/api/devices/pair`, { method: "POST", headers: { ...guard, "x-forwarded-for": "100.64.0.9" }, body: JSON.stringify({ code, label: "Phone" }) });
       expect(paired.status).toBe(204);
+      expect((await health(open.port)).lan_exposure).toEqual({ host: "0.0.0.0" });
+      const cookie = paired.headers.get("set-cookie")!.split(";")[0]!;
+      expect((await health(open.port, { cookie })).auth).toMatchObject({ authenticated: true, via: "device" });
       expect((await health(open.port)).auth).toMatchObject({ authenticated: true, via: "local" });
       expect((await health(open.port)).lan_exposure).toBeUndefined();
     } finally {
@@ -3037,4 +3390,59 @@ it("refuses cross-origin changes while allowing same-origin and CLI requests", a
       expect(response.status).toBe(200);
     }
   } finally { instance.stop(); await workspaceClose(created.workspace.workspace_id); rmSync(root, { recursive: true, force: true }); }
+});
+
+describe("repository diff of a pane's folder", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-web-ui-test-repo-diff-")));
+  let workspaceId: string | null = null;
+  afterAll(async () => {
+    if (workspaceId) await workspaceClose(workspaceId).catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reads the repository the pane sits in, a folder named from it, and a named folder once the pane is gone", async () => {
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "-C", root, ...args], { stdout: "ignore", stderr: "pipe" });
+      if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
+    };
+    git("init", "-q", "-b", "main");
+    mkdirSync(join(root, "sub"));
+    writeFileSync(join(root, "a.txt"), "one\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "first");
+    writeFileSync(join(root, "a.txt"), "two\n");
+    // the pane sits below the repository's top, and in no repository of its own
+    const created = await workspaceCreate({ cwd: join(root, "sub"), label: "herdr-web-ui-test-repo-diff" });
+    workspaceId = created.workspace.workspace_id;
+    const pane = `pane_id=${encodeURIComponent(created.root_pane.pane_id)}`;
+    const expected: RepoDiffFileList["files"] = [{ path: "a.txt", old_path: null, status: "modified", additions: 1, deletions: 1, binary: false }];
+    for (const url of [
+      `${base()}/api/workspace/diff/files?${pane}`,
+      `${base()}/api/machines/local/workspace/diff/files?${pane}`,
+      `${base()}/api/workspace/diff/files?${pane}&directory=..`,
+      `${base()}/api/workspace/diff/files?pane_id=no-such-pane&directory=${encodeURIComponent(root)}`,
+    ]) {
+      const response = await fetch(url);
+      expect([url, response.status]).toEqual([url, 200]);
+      const list = (await response.json()) as RepoDiffFileList;
+      expect(list.repository).toMatchObject({ root, branch: "main", detached: false, unborn: false });
+      expect(list.files).toEqual(expected);
+    }
+    const file = await fetch(`${base()}/api/workspace/diff/file?${pane}&path=a.txt`);
+    expect(file.status).toBe(200);
+    const answer = (await file.json()) as RepoDiffFilePatch;
+    expect(answer).toMatchObject({ file: expected[0], unavailable: null, truncated: false });
+    expect(answer.patch).toStartWith("diff --git a/a.txt b/a.txt\n");
+    expect(answer.patch).toEndWith("-one\n+two\n");
+
+    const gone = await fetch(`${base()}/api/workspace/diff/files?pane_id=no-such-pane`);
+    expect(gone.status).toBe(404);
+    expect(typeof ((await gone.json()) as ApiError).error.code).toBe("string");
+    const relative = await fetch(`${base()}/api/workspace/diff/files?pane_id=no-such-pane&directory=sub`);
+    expect(relative.status).toBe(400);
+    expect(((await relative.json()) as ApiError).error.code).toBe("invalid_cwd");
+    const posted = await fetch(`${base()}/api/workspace/diff/files?${pane}`, { method: "POST", headers: { "x-herdr-machine": "1" } });
+    expect(posted.status).toBe(400);
+    expect(((await posted.json()) as ApiError).error.code).toBe("method_not_allowed");
+  });
 });

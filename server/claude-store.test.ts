@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
-import { AmbiguousClaudeStore, claudeProcessSession, claudeStoreKey, claudeProjectDir, claudeTranscriptFile, configDirInPsLine, forgetClaudeSessions, isClaudeProcess, processClaudeConfigDir } from "./claude-store.ts";
+import { AmbiguousClaudeStore, claudeProcessSession, claudeSessionTempDir, claudeStoreKey, claudeProjectDir, claudeTranscriptFile, configDirInPsLine, forgetClaudeSessions, isClaudeProcess, processClaudeConfigDir } from "./claude-store.ts";
 import type { ProcessRow } from "./windows-processes.ts";
 
 const NATIVE = process.platform === "linux" || process.platform === "darwin";
@@ -208,6 +208,70 @@ describe("claudeTranscriptFile", () => {
     expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(original);
     writeFileSync(original, JSON.stringify({ type: "continued-in", sessionId: SESSION, continuedInSessionId: missing }));
     expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(original);
+  });
+
+  describe("a /resume of a background session", () => {
+    const PARKED = "e4159264-2222-4222-8222-222222222222";
+    const BG = "8b80137e-f8fe-4aaa-8bbb-cccccccccccc";
+    const resumed = (folder: string, jobId = "8b80137e") => {
+      const original = join(folder, `${SESSION}.jsonl`);
+      writeFileSync(original, [
+        { type: "user", message: { content: "/resume" } },
+        { type: "user", message: { content: `<local-command-stdout>Opening \"title\", running in the background (${jobId})</local-command-stdout>` } },
+        { type: "continued-in", sessionId: SESSION, continuedInSessionId: PARKED },
+      ].map((entry) => JSON.stringify(entry)).join("\n"));
+      return original;
+    };
+
+    it("follows the output's job id to that job's transcript (regression: fails on main)", async () => {
+      const { home: dir, projects } = home();
+      const folder = join(projects, claudeProjectDir("/w/project"));
+      mkdirSync(folder, { recursive: true });
+      resumed(folder);
+      const job = join(folder, `${BG}.jsonl`);
+      writeFileSync(job, JSON.stringify({ type: "user", message: { content: "real conversation prompt" } }));
+      expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(job);
+    });
+
+    it("keeps the named transcript when no file, or more than one, matches the job id (control)", async () => {
+      const { home: dir, projects } = home();
+      const folder = join(projects, claudeProjectDir("/w/project"));
+      mkdirSync(folder, { recursive: true });
+      const original = resumed(folder);
+      expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(original);
+      writeFileSync(join(folder, `${BG}.jsonl`), "{}");
+      writeFileSync(join(folder, "8b80137e-0000-4000-8000-000000000000.jsonl"), "{}");
+      expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(original);
+    });
+
+    it("ignores an earlier /resume's job id when the active continuation has no job output (regression)", async () => {
+      const { home: dir, projects } = home();
+      const folder = join(projects, claudeProjectDir("/w/project"));
+      mkdirSync(folder, { recursive: true });
+      const original = join(folder, `${SESSION}.jsonl`);
+      writeFileSync(original, [
+        { type: "user", message: { content: "<local-command-stdout>Opening, running in the background (8b80137e)</local-command-stdout>" } },
+        { type: "continued-in", sessionId: SESSION, continuedInSessionId: PARKED },
+        { type: "continued-in", sessionId: SESSION, continuedInSessionId: PARKED },
+      ].map((entry) => JSON.stringify(entry)).join("\n"));
+      writeFileSync(join(folder, `${BG}.jsonl`), JSON.stringify({ type: "user", message: { content: "earlier job" } }));
+      expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(original);
+    });
+
+    it("checks the job's state.json when it names a transcript (regression: fails on main; mismatch is a control)", async () => {
+      const { home: dir, projects } = home();
+      const folder = join(projects, claudeProjectDir("/w/project"));
+      mkdirSync(folder, { recursive: true });
+      const original = resumed(folder);
+      const job = join(folder, `${BG}.jsonl`);
+      writeFileSync(job, "{}");
+      const state = join(dir, ".claude", "jobs", "8b80137e");
+      mkdirSync(state, { recursive: true });
+      writeFileSync(join(state, "state.json"), JSON.stringify({ linkScanPath: join(folder, "other.jsonl") }));
+      expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(original);
+      writeFileSync(join(state, "state.json"), JSON.stringify({ linkScanPath: job }));
+      expect(await claudeTranscriptFile(dir, SESSION, ["/w/project"])).toBe(job);
+    });
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("returns an unreadable transcript for its reader to report", async () => {
@@ -434,5 +498,29 @@ describe("a Windows Claude's store", () => {
     expect(await storeOf(dir)).toBeNull();
     record(join(dir, ".claude-second"));
     expect(await storeOf(dir)).toBe(join(dir, ".claude-second"));
+  });
+});
+
+describe("claudeSessionTempDir", () => {
+  const session = "6b93e6b7-7279-449a-b4ab-66e91f7a21d9";
+  const transcript = `/home/u/.claude/projects/-home-u-project/${session}.jsonl`;
+  const uid = process.getuid?.();
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "claude-temp-")); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  it.skipIf(uid === undefined)("finds the session's folder under the transcript's project", async () => {
+    const dir = join(root, `claude-${uid}`, "-home-u-project", session);
+    mkdirSync(join(dir, "scratchpad"), { recursive: true });
+    expect(await claudeSessionTempDir(transcript, [join(root, "missing"), root], uid)).toBe(dir);
+  });
+
+  it.skipIf(uid === undefined)("is null without the folder, for another user's base, or for a name that is not a session", async () => {
+    expect(await claudeSessionTempDir(transcript, [root], uid)).toBeNull();
+    mkdirSync(join(root, `claude-${uid! + 1}`, "-home-u-project", session), { recursive: true });
+    // the base exists but under another uid's name; and a base this user owns is not that uid's
+    expect(await claudeSessionTempDir(transcript, [root], uid! + 1)).toBeNull();
+    expect(await claudeSessionTempDir("/home/u/.claude/projects/-home-u-project/notes.jsonl", [root], uid)).toBeNull();
+    expect(await claudeSessionTempDir(transcript, [root], undefined)).toBeNull();
   });
 });

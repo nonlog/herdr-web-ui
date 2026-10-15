@@ -8,6 +8,7 @@ import { chromium, type Page } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { herdrRpc, sessionSnapshot, paneRead, paneScrollInfo, paneSendKeys, paneSendText, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
 import { PtySession } from "../server/pty/session.ts";
+import { chromePath } from "./chrome-path.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-winlens-"));
 const evidence = process.env["UI_EVIDENCE_DIR"];
@@ -91,7 +92,9 @@ try {
   const beforeBrowser = await nativeRect();
   const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false }); servers.push(server);
   const origin = `http://127.0.0.1:${server.port}`;
-  browser = await chromium.launch({ executablePath: process.env["CHROME_PATH"] ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+  const health = await (await fetch(`${origin}/api/health`)).json() as { herdr: { terminal_attach?: boolean; terminal_mirror?: boolean; terminal_control?: boolean } };
+  assert.equal(health.herdr.terminal_attach, false, "native Windows uses the control stream rather than node-pty");
+  browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   const desktopContext = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
   const desktop = await desktopContext.newPage(); const desktopWire = record(desktop);
   await desktop.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`); await desktopWire.ready(paneId);

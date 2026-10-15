@@ -22,7 +22,7 @@ let mockedProcesses: { argv?: unknown }[] = [];
 describe("Devin pane identity", () => {
   const restores: Array<() => void> = [];
   beforeEach(() => {
-    const rpc = spyOn(herdr, "herdrRpc").mockImplementation(async (method) => {
+    const rpc = spyOn(herdr, "herdrRpc").mockImplementation(async (method: string) => {
       if (method !== "pane.process_info") throw new Error(`unexpected conversation fixture RPC: ${method}`);
       return { process_info: { foreground_processes: mockedProcesses } } as never;
     });
@@ -207,7 +207,8 @@ describe("parseClaudeTranscript", () => {
       { role: "user", ts: "2026-09-19T08:00:00.000Z", parts: [{ kind: "text", text: "리팩터링 시작해줘" }] },
       { role: "assistant", ts: "2026-09-19T08:00:02.000Z", end_ts: "2026-09-19T08:00:05.000Z", parts: [
         { kind: "text", text: "먼저 상태를 확인하겠습니다." },
-        { kind: "tool", name: "Bash", summary: "git status --short", input: expect.stringContaining("git status"), output: "M src/app.ts" },
+        // the row says what the agent said the command is for; the command stays in the input
+        { kind: "tool", name: "Bash", summary: "check tree", input: expect.stringContaining("git status"), output: "M src/app.ts" },
         { kind: "thinking", text: "internal reasoning stays private" },
         { kind: "text", text: "변경된 파일이 하나입니다." },
       ] },
@@ -427,6 +428,22 @@ describe("parseClaudeTranscript", () => {
   it("keeps thinking blocks in transcript order", () => {
     const assistant = parseClaudeTranscript(lines)[1];
     expect(assistant?.parts.map((part) => part.kind)).toEqual(["text", "tool", "thinking", "text"]);
+  });
+
+  it("reads thinking that Claude Code displays as updates as narration in the work", () => {
+    // the shape a recent Claude Code writes: one entry per block, the visible update as thinking
+    const entry = (thinkingDisplay: string | undefined, block: object) => JSON.stringify({ type: "assistant", timestamp: "2026-10-14T07:00:00.000Z", ...(thinkingDisplay ? { thinkingDisplay } : {}), message: { role: "assistant", stop_reason: null, content: [block] } });
+    const turns = parseClaudeTranscript([
+      JSON.stringify({ type: "user", message: { role: "user", content: "measure the padding" } }),
+      entry("updates", { type: "thinking", thinking: "", signature: "s" }),
+      entry("updates", { type: "thinking", thinking: "The padding stays; measuring it next.", signature: "s" }),
+      entry("updates", { type: "tool_use", id: "t", name: "Bash", input: { command: "true" } }),
+      entry(undefined, { type: "thinking", thinking: "private reasoning", signature: "s" }),
+    ].join("\n"));
+    expect(turns[1]?.parts.filter((part) => part.kind !== "tool")).toEqual([
+      { kind: "text", text: "The padding stays; measuring it next.", phase: "commentary" },
+      { kind: "thinking", text: "private reasoning" },
+    ]);
   });
 
   it("survives a torn tail line while Claude is mid-append", () => {

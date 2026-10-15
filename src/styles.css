@@ -6,9 +6,9 @@
  * `[data-theme="light"]` overrides the color group only (src/lib/settings.ts sets
  * the attribute); `[data-density="compact"]` overrides the type scale and row
  * heights. The base blocks are the amber palette, the default and the look before
- * settings load; `[data-palette]` blocks override them for the opt-in report,
- * charcoal, catppuccin, lilac and forest palettes. xterm cannot read CSS custom properties, so the --term-* group
- * is mirrored in settings.ts `terminalTheme()`.
+ * settings load; `[data-palette]` blocks override them for the opt-in
+ * charcoal and catppuccin palettes. xterm cannot read CSS custom
+ * properties, so the --term-* group is mirrored in settings.ts `terminalTheme()`.
  * Component-scoped rules live beside their component (Sidebar.css,
  * PaneTerminal.css, ...); this file owns the app shell, the header and the
  * primitives (.icon-button, .btn, .pill, .badge, .segmented, .modal, .menu, .kbd)
@@ -27,7 +27,7 @@
   --border: #2d2924;
   --border-strong: #3e3830;
   /* the chat's user bubble: no edge where --bg-elevated alone parts it from --bg (the dark
-     amber, report and charcoal palettes), --border where the two surfaces sit close */
+     amber and charcoal palettes), --border where the two surfaces sit close */
   --bubble-border: transparent;
 
   /* text */
@@ -52,6 +52,12 @@
   --status-done-tint: rgba(147, 195, 107, 0.14);
   --danger-tint: rgba(255, 123, 112, 0.12);
   --danger-text: #ffd9d4;
+  /* herdr's TUI state colors, from its default theme (Catppuccin Mocha; Latte in light) */
+  --indicator-working: #f9e2af;
+  --indicator-blocked: #f38ba8;
+  --indicator-done: #94e2d5;
+  --indicator-idle: #a6e3a1;
+  --indicator-unknown: #6c7086;
   /* a note that the view is partial (a file cut short, code left plain): warning yellow */
   --notice: #e8c55c;
 
@@ -97,16 +103,20 @@
   /* "JetBrains Mono Web" is the bundled face (fonts/fonts.css): after the icon font, which draws
      the private use area alone, and never in the terminal's own stack (lib/fontFamily.ts) */
   --font-mono: "Symbols Nerd Font Mono", "JetBrains Mono Web", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "D2Coding", monospace;
-  --fs-2xs: 11px;
-  --fs-xs: 12px;
-  --fs-sm: 13px;
-  --fs-md: 14px;
-  --fs-chat: 15px; /* text that is read at length: chat prose, the user's bubble, the message box with a mouse */
-  --fs-lg: 16px;
-  --fs-xl: 18px;
-  --fs-display: 22px;
+  /* Settings → Appearance → Interface font size: the chosen body size over the density's (lib/settings.ts
+     writes it on <html>). Every size below is the scale at 1, except --fs-input: the floor under which
+     iOS Safari zooms a focused field stays a floor */
+  --ui-scale: 1;
+  --fs-2xs: calc(11px * var(--ui-scale));
+  --fs-xs: calc(12px * var(--ui-scale));
+  --fs-sm: calc(13px * var(--ui-scale));
+  --fs-md: calc(14px * var(--ui-scale));
+  --fs-chat: calc(15px * var(--ui-scale)); /* text that is read at length: chat prose, the user's bubble, the message box with a mouse */
+  --fs-lg: calc(16px * var(--ui-scale));
+  --fs-xl: calc(18px * var(--ui-scale));
+  --fs-display: calc(22px * var(--ui-scale));
   /* the pairing code: a size of its own, still on the density scale (compact overrides it) */
-  --fs-pairing: 32px;
+  --fs-pairing: calc(32px * var(--ui-scale));
   --fs-input: 16px; /* the one size iOS Safari does not zoom on focus */
   --lh-tight: 1.2;
   --lh-base: 1.5;
@@ -161,6 +171,9 @@
      pane not measured yet. Never a percentage here: each column would resolve it against its
      own box and the columns would differ by their gutters */
   --chat-w: var(--content-w);
+  /* a long user message folds to this many lines of its prose (ChatView.css caps the bubble's body
+     at the count; lib/userMessageFold.ts folds a message past it) */
+  --chat-fold-lines: 12;
   --pending-max-h: min(20dvh, 12rem);
   --palette-w: 640px;
   --palette-top: 12vh;
@@ -236,6 +249,11 @@
   --status-blocked-tint: rgba(168, 35, 35, 0.12);
   --status-done-tint: rgba(47, 99, 23, 0.12);
   --danger-tint: rgba(168, 35, 35, 0.1);
+  --indicator-working: #df8e1d;
+  --indicator-blocked: #d20f39;
+  --indicator-done: #179299;
+  --indicator-idle: #40a02b;
+  --indicator-unknown: #9ca0b0;
   --danger-text: #8f1d1d;
   --notice: #7a5a00;
   --scrim: rgba(40, 32, 22, 0.35);
@@ -254,64 +272,8 @@
   --syntax-meta: #5d4791;
 }
 
-/* Dark report palette (Settings → Appearance → Colors): a near-black blue-grey canvas
-   with 1px hairlines and near-square panels. The user's own action (Send, primary
-   buttons) is white on the canvas; electric blue is kept for small marks only - the
-   selected row's rail, focus, links, the cursor. Agent states carry the report's
-   meaning colors: amber working, red input, green done, none of them blue. */
-[data-palette="report"] {
-  --radius-sm: 2px;
-  --radius-md: 3px;
-  --radius-lg: 3px;
-  --radius-xl: 4px;
-  --radius-2xl: 6px;
-}
-
-[data-theme="dark"][data-palette="report"] {
-  --notice: #f5b544;
-  --bg: #0a0d12;
-  --bg-panel: #0f1319;
-  --bg-elevated: #141922;
-  --bg-hover: #1a212c;
-  --bg-input: #0c1016;
-  --border: #1e2530;
-  --border-strong: #2a3340;
-  --text: #b4bdc9;
-  --text-dim: #8792a3;
-  --text-strong: #e8ecf2;
-  --accent: #4c9aff;
-  --accent-tint: rgba(76, 154, 255, 0.12);
-  --primary: #e8ecf2;
-  --primary-hover: #ffffff;
-  --primary-text: #0a0d12;
-  --primary-tint: rgba(232, 236, 242, 0.1);
-  --status-idle: #8792a3;
-  --status-working: #f5b544;
-  --status-blocked: #ff6b7a;
-  --status-done: #3ddc97;
-  --status-working-tint: rgba(245, 181, 68, 0.14);
-  --status-blocked-tint: rgba(255, 107, 122, 0.14);
-  --status-done-tint: rgba(61, 220, 151, 0.14);
-  --danger-tint: rgba(255, 107, 122, 0.12);
-  --danger-text: #ffd6db;
-  --scrim: rgba(4, 6, 10, 0.6);
-  /* resting surfaces carry no shadow: the one card, the composer's box, is a hairline */
-  --shadow-card: none;
-  --term-bg: #0f1319;
-  --term-fg: #c9d1dc;
-  --term-cursor: #4c9aff;
-  --term-selection: #1f3a66;
-  --syntax-keyword: #f78c6c;
-  --syntax-string: #3ddc97;
-  --syntax-number: #f5b544;
-  --syntax-type: #7fd4ff;
-  --syntax-variable: #c9d1dc;
-  --syntax-meta: #b392f0;
-}
-
-/* Report and charcoal share plain paper in light; charcoal's own light block below
-   swaps the blue for ink */
-[data-theme="light"]:is([data-palette="report"], [data-palette="charcoal"]) {
+/* Charcoal in light: plain paper with ink for the accent and the cursor */
+[data-theme="light"][data-palette="charcoal"] {
   --notice: #8a5300;
   --bg: #f2f2f0;
   --bg-panel: #fafaf9;
@@ -323,8 +285,8 @@
   --text: #242424;
   --text-dim: #5f5b56;
   --text-strong: #111111;
-  --accent: #1f5fcc;
-  --accent-tint: rgba(31, 95, 204, 0.1);
+  --accent: #242424;
+  --accent-tint: rgba(36, 36, 36, 0.08);
   --primary: #242424;
   --primary-hover: #3a3a3a;
   --primary-text: #fafaf9;
@@ -335,8 +297,8 @@
   --shadow-card: 0 4px 16px rgba(20, 20, 20, 0.06);
   --term-bg: #fafaf9;
   --term-fg: #242424;
-  --term-cursor: #1f5fcc;
-  --term-selection: #cfe0fb;
+  --term-cursor: #242424;
+  --term-selection: #dedad3;
   --syntax-keyword: #b3261e;
   --syntax-string: #22743a;
   --syntax-number: #8a5300;
@@ -347,7 +309,7 @@
 
 /* Charcoal: neutral charcoal, a Ghostty-style terminal (the panel is its #171717), no
    chrome hue - selection, focus, cursor and the user's action are near-white; agent
-   states are muted as in the terminal palette. Light keeps the base paper with ink. */
+   states are muted as in the terminal palette. Light is the paper block above. */
 [data-theme="dark"][data-palette="charcoal"] {
   --notice: #d9b26a;
   --bg: #0f0f0f;
@@ -387,13 +349,6 @@
   --syntax-type: #9fb4c2;
   --syntax-variable: #dcd8d0;
   --syntax-meta: #b8a5c9;
-}
-
-[data-theme="light"][data-palette="charcoal"] {
-  --accent: #242424;
-  --accent-tint: rgba(36, 36, 36, 0.08);
-  --term-cursor: #242424;
-  --term-selection: #dedad3;
 }
 
 /* Catppuccin (catppuccin.com/palette): Mocha in dark, Latte in light, mapped by the
@@ -498,164 +453,6 @@
   --syntax-function: #0b59f4;
 }
 
-/* Lilac: one quiet lavender. Light is the look it was drawn for: a lavender canvas (`--bg`)
-   under paler lavender chrome (`--bg-panel`: sidebar, header, tabs), indigo ink, and an indigo
-   accent for the user's own action. Dark is the same hue at night: an indigo-black canvas, violet
-   chrome and a pale lilac accent. No gradient and no translucency: every surface is flat. */
-[data-theme="dark"][data-palette="lilac"] {
-  --bg: #16152b;
-  --bg-panel: #1c1b34;
-  --bg-elevated: #23223f;
-  --bg-hover: #2c2a4f;
-  --bg-input: #13122a;
-  --border: #2f2d52;
-  --border-strong: #423f6e;
-  --text: #dcdaf4;
-  --text-dim: #a5a2cc;
-  --text-strong: #f2f1ff;
-  --accent: #b3abff;
-  --accent-tint: rgba(179, 171, 255, 0.13);
-  --primary: #b3abff;
-  --primary-hover: #c5bfff;
-  --primary-text: #17163a;
-  --primary-tint: rgba(179, 171, 255, 0.16);
-  --status-idle: #a5a2cc;
-  --status-working: #85b8ff;
-  --status-blocked: #ff94ad;
-  --status-done: #92d9ab;
-  --status-working-tint: rgba(133, 184, 255, 0.14);
-  --status-blocked-tint: rgba(255, 148, 173, 0.14);
-  --status-done-tint: rgba(146, 217, 171, 0.14);
-  --danger-tint: rgba(255, 148, 173, 0.12);
-  --danger-text: #ffd6df;
-  --scrim: rgba(9, 8, 22, 0.6);
-  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.35);
-  --term-bg: #18172f;
-  --term-fg: #dcdaf4;
-  --term-cursor: #b3abff;
-  --term-selection: #3a3768;
-}
-
-[data-theme="light"][data-palette="lilac"] {
-  --bg: #f0eefc;
-  --bg-panel: #f6f5fe;
-  --bg-elevated: #fbfaff;
-  --bg-hover: #e8e5f8;
-  --bg-input: #fdfcff;
-  --border: #e0dcf4;
-  --border-strong: #c8c2ea;
-  --text: #2b2d4d;
-  --text-dim: #545779;
-  --text-strong: #17193a;
-  --accent: #4a42c2;
-  --accent-tint: rgba(74, 66, 194, 0.12);
-  --primary: #4a42c2;
-  --primary-hover: #5951d0;
-  --primary-text: #ffffff;
-  --primary-tint: rgba(74, 66, 194, 0.14);
-  --status-idle: #545779;
-  --status-working: #1f4aa6;
-  --status-blocked: #9c2044;
-  --status-done: #1f5c39;
-  --status-working-tint: rgba(31, 74, 166, 0.12);
-  --status-blocked-tint: rgba(156, 32, 68, 0.12);
-  --status-done-tint: rgba(31, 92, 57, 0.12);
-  --danger-tint: rgba(156, 32, 68, 0.1);
-  --danger-text: #8c1f3a;
-  --scrim: rgba(43, 35, 100, 0.32);
-  --shadow-drawer: 0 0 40px rgba(60, 50, 130, 0.22);
-  --shadow-pop: 0 16px 48px rgba(60, 50, 130, 0.16), 0 0 0 1px var(--border);
-  --shadow-card: 0 4px 16px rgba(60, 50, 130, 0.08);
-  --term-bg: #f8f7fe;
-  --term-fg: #2b2d4d;
-  --term-cursor: #4a42c2;
-  --term-selection: #dcd7f8;
-}
-
-/* Forest: low-saturation green-grey surfaces for long sessions. The accent stays green, while
-   working, blocked and done keep separate status hues. */
-[data-theme="dark"][data-palette="forest"] {
-  --bg: #101a16;
-  --bg-panel: #16231d;
-  --bg-elevated: #1d2d25;
-  --bg-hover: #263b30;
-  --bg-input: #132019;
-  --border: #2d4437;
-  --border-strong: #3d5b49;
-  --text: #d4e5d8;
-  --text-dim: #9ab9a3;
-  --text-strong: #edf7ef;
-  --accent: #8fd3a2;
-  --accent-tint: rgba(143, 211, 162, 0.14);
-  --primary: #8fd3a2;
-  --primary-hover: #a7dfb5;
-  --primary-text: #102016;
-  --primary-tint: rgba(143, 211, 162, 0.16);
-  --status-idle: #9ab9a3;
-  --status-working: #79c7d4;
-  --status-blocked: #ffa294;
-  --status-done: #91d69a;
-  --status-working-tint: rgba(121, 199, 212, 0.14);
-  --status-blocked-tint: rgba(255, 162, 148, 0.14);
-  --status-done-tint: rgba(145, 214, 154, 0.14);
-  --danger-tint: rgba(255, 162, 148, 0.12);
-  --danger-text: #ffd7d0;
-  --scrim: rgba(6, 14, 10, 0.6);
-  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.35);
-  --term-bg: #16231d;
-  --term-fg: #d4e5d8;
-  --term-cursor: #8fd3a2;
-  --term-selection: #31513e;
-  --syntax-keyword: #e6a96d;
-  --syntax-string: #91d69a;
-  --syntax-number: #d2b18a;
-  --syntax-type: #79c7d4;
-  --syntax-variable: #d4e5d8;
-  --syntax-meta: #c2a0d8;
-}
-
-[data-theme="light"][data-palette="forest"] {
-  --bg: #eaf2ed;
-  --bg-panel: #f7fbf8;
-  --bg-elevated: #edf5ef;
-  --bg-hover: #e1eee5;
-  --bg-input: #ffffff;
-  --border: #c9ddd0;
-  --border-strong: #a7c3b2;
-  --text: #20352a;
-  --text-dim: #4f6d5a;
-  --text-strong: #15291e;
-  --accent: #2c7648;
-  --accent-tint: rgba(44, 118, 72, 0.1);
-  --primary: #397f50;
-  --primary-hover: #2f6e44;
-  --primary-text: #ffffff;
-  --primary-tint: rgba(57, 127, 80, 0.12);
-  --status-idle: #4f6d5a;
-  --status-working: #166578;
-  --status-blocked: #a02b20;
-  --status-done: #225f32;
-  --status-working-tint: rgba(22, 101, 120, 0.12);
-  --status-blocked-tint: rgba(160, 43, 32, 0.1);
-  --status-done-tint: rgba(34, 95, 50, 0.12);
-  --danger-tint: rgba(160, 43, 32, 0.1);
-  --danger-text: #9d3022;
-  --scrim: rgba(24, 52, 35, 0.35);
-  --shadow-drawer: 0 0 40px rgba(24, 52, 35, 0.22);
-  --shadow-pop: 0 16px 48px rgba(24, 52, 35, 0.16), 0 0 0 1px var(--border);
-  --shadow-card: 0 4px 16px rgba(24, 52, 35, 0.07);
-  --term-bg: #f7fbf8;
-  --term-fg: #20352a;
-  --term-cursor: #2c7648;
-  --term-selection: #cfe5d5;
-  --syntax-keyword: #9c4f15;
-  --syntax-string: #225f32;
-  --syntax-number: #865d13;
-  --syntax-type: #166578;
-  --syntax-variable: #20352a;
-  --syntax-meta: #68489c;
-}
-
 [data-chat-width="narrow"] {
   --chat-w: var(--content-w);
 }
@@ -670,15 +467,15 @@
 }
 
 [data-density="compact"] {
-  --fs-2xs: 10px;
-  --fs-xs: 11px;
-  --fs-sm: 12px;
-  --fs-md: 13px;
-  --fs-chat: 14px;
-  --fs-lg: 15px;
-  --fs-xl: 17px;
-  --fs-display: 21px;
-  --fs-pairing: 26px;
+  --fs-2xs: calc(10px * var(--ui-scale));
+  --fs-xs: calc(11px * var(--ui-scale));
+  --fs-sm: calc(12px * var(--ui-scale));
+  --fs-md: calc(13px * var(--ui-scale));
+  --fs-chat: calc(14px * var(--ui-scale));
+  --fs-lg: calc(15px * var(--ui-scale));
+  --fs-xl: calc(17px * var(--ui-scale));
+  --fs-display: calc(21px * var(--ui-scale));
+  --fs-pairing: calc(26px * var(--ui-scale));
   --lh-base: 1.45;
   --header-h: 46px;
   --sidebar-w: 300px;
@@ -707,6 +504,14 @@ body,
 #root {
   height: 100%;
   margin: 0;
+}
+
+/* No pull-to-refresh: a reload drops held drafts and the terminal client. Chrome before 144
+   ignores a container's overscroll-behavior when it has nothing to scroll (a short chat), so the
+   drag chains to the page; there it takes both html and body, html alone still reloads (#427). */
+html,
+body {
+  overscroll-behavior-y: contain;
 }
 
 body {
@@ -1100,11 +905,6 @@ button {
 .header-more {
   position: relative;
   display: inline-flex;
-}
-
-/* nothing to offer but the palette, which has its own button above phone width */
-.header-more.is-phone-only {
-  display: none;
 }
 
 /* alerts are off on this device: the one state of the menu worth a glance. The button's name
@@ -1762,9 +1562,8 @@ button {
     display: inline-flex;
   }
 
-  /* drawer mode: the collapse toggle has nothing to collapse, and sign out is in the palette */
-  .sidebar-toggle,
-  .lock-button {
+  /* drawer mode: the collapse toggle has nothing to collapse */
+  .sidebar-toggle {
     display: none;
   }
 
@@ -1814,7 +1613,8 @@ button {
   }
 }
 
-/* the key bar (KeyBar.css) shows under the same query and carries env(safe-area-inset-bottom) itself */
+/* the key bar (KeyBar.css) shows under the same query and carries env(safe-area-inset-bottom) itself,
+   the one bar that reaches the bottom of the screen (KeyBar.tsx) */
 @media (pointer: coarse), (max-width: 768px) {
   .terminal-host:has(.key-bar) {
     padding-bottom: 0; /* no pane = no bar, and the host keeps the inset */
@@ -1836,10 +1636,6 @@ button {
   .palette-button,
   .header-desktop-only {
     display: none;
-  }
-
-  .header-more.is-phone-only {
-    display: inline-flex;
   }
 }
 

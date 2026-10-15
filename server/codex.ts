@@ -11,7 +11,7 @@ import { processStartedAt } from "./process-start.ts";
 import { codexImageParts } from "./codex-images.ts";
 import { codexReadCall, codexReadSkills, selectedSkill } from "./skill-activity.ts";
 import { trimOutput } from "./tool-output.ts";
-import { herdrRpc, paneRead, sessionSnapshot } from "./herdr/client.ts";
+import { agentGet, paneProcessInfo, paneRead, sessionSnapshot } from "./herdr/client.ts";
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {};
@@ -967,6 +967,7 @@ function displayedFirstExchange(screen: string): CodexExchange | null {
   let promptAt = -1;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index] ?? "";
+    if (/^• (?:Model changed|Unrecognized command|Working directory changed)(?:[ \t]|$)/.test(line)) continue;
     if (/^•(?:[ \t]|$)/.test(line)) return null;
     if (/^›[ \t]+/.test(line)) { promptAt = index; break; }
   }
@@ -985,12 +986,12 @@ function displayedFirstExchange(screen: string): CodexExchange | null {
   return { user, assistant: response };
 }
 
-function matchingCodexExchanges(screen: string, candidates: readonly CodexFirstExchangeCandidate[]): { candidate: CodexFirstExchangeCandidate; index: number }[] {
+function matchingCodexExchanges(screen: string, candidates: readonly CodexFirstExchangeCandidate[], answerFloor: number): { candidate: CodexFirstExchangeCandidate; index: number }[] {
   const shown = displayedFirstExchange(screen);
   if (shown === null) return [];
   const prompt = normalizePrompt(shown.user);
   const answer = normalizePrompt(shown.assistant);
-  if (normalizeDisplay(prompt).length < 8 || normalizeDisplay(answer).length < 16) return [];
+  if (normalizeDisplay(prompt).length < 8 || normalizeDisplay(answer).length < answerFloor) return [];
   const matches: { candidate: CodexFirstExchangeCandidate; index: number }[] = [];
   for (const candidate of candidates) {
     for (const [index, exchange] of codexExchanges(candidate.text).entries()) {
@@ -1014,7 +1015,7 @@ export function matchCodexFirstExchange(
   if (!Number.isFinite(startedAtMs)) return null;
   if (candidates.filter((candidate) => typeof candidate.createdAtMs === "number"
     && candidate.createdAtMs >= startedAtMs).length !== 1) return null;
-  const matches = matchingCodexExchanges(screen, candidates);
+  const matches = matchingCodexExchanges(screen, candidates, 1);
   if (matches.length !== 1) return null;
   const match = matches[0]!;
   const first = codexExchanges(match.candidate.text)[0];
@@ -1103,10 +1104,10 @@ const VALUELESS_OPTIONS = new Set([
 
 /** A pane's Codex executables (or interpreter scripts), and their pids as one key. */
 async function codexProcessesOf(paneId: string): Promise<{ list: { pid: number; argv?: string[] }[]; key: string }> {
-  const processInfo = await herdrRpc<{ process_info?: { foreground_processes?: { pid: number; argv?: string[] }[] } }>(
-    "pane.process_info", { pane_id: paneId },
-  );
-  const list = (processInfo.process_info?.foreground_processes ?? [])
+  const processInfo = await paneProcessInfo(paneId);
+  // herdr's schema allows `argv: null`; this reader has always read argv as absent or a list
+  // (the cast is the inline result type herdrRpc was given before the typed seam)
+  const list = ((processInfo?.foreground_processes ?? []) as { pid: number; argv?: string[] }[])
     .map((foreground) => {
       if (foreground.argv?.length || process.platform !== "linux") return foreground;
       // herdr can report only pid/name. Read this process, never infer argv from
@@ -1340,8 +1341,7 @@ async function openRollouts(paneId: string, home: string): Promise<{ codexProces
  * matches the pane again.
  */
 export async function codexOpenRollout(paneId: string, cwd: string | null | undefined, home = defaultCodexHome()): Promise<string | null> {
-  const info = await herdrRpc<{ agent: { agent_session?: { kind?: string; value?: string } } }>("agent.get", { target: paneId });
-  const session = info.agent.agent_session;
+  const session = (await agentGet(paneId)).agent_session;
   if (session?.kind === "path" && session.value) return codexRolloutPath(session.value, home);
   const { processes, open } = await openRollouts(paneId, home);
   if (open.size === 1) return [...open][0]!;
@@ -1374,8 +1374,7 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
     const open = new Set(panes.map((pane) => pane.pane_id));
     for (const pane of [...boundRollouts.keys()]) if (!open.has(pane)) boundRollouts.delete(pane);
   }
-  const info = await herdrRpc<{ agent: { agent_session?: { kind?: string; value?: string } } }>("agent.get", { target: paneId });
-  const session = info.agent.agent_session;
+  const session = (await agentGet(paneId)).agent_session;
   if (session?.kind === "path" && session.value) return codexRolloutPath(session.value, home);
 
   const { codexProcesses, processes, open } = await openRollouts(paneId, home);

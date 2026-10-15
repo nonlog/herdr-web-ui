@@ -41,6 +41,7 @@ export { readOmoLines as readLines, type OmoLine } from "./omo-records.ts";
 import type { AgentStatus, HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
 import { omoAsksAfter, type OmoAsks } from "./omo-ask.ts";
 import type { OmoRest } from "./completion.ts";
+import { OMO_RUNNING, omoStateDir, type OmoStateOptions } from "./omo-state-dir.ts";
 
 /** runtime messages that start a turn nobody typed; one not named here shows as RUN from its first answer on */
 const TURN_STARTS = new Set([
@@ -113,19 +114,21 @@ export function omoSessionId(path: string): string | null {
 
 /**
  * How many background tasks each session of a folder has running: OmO keeps one record per
- * `task` child in `<cwd>/.omo/senpi-task/tasks/`, with the session that started it. A record
- * left `running` by a host process that is gone is not counted.
+ * `task` child in the resolved senpi-task state's `tasks/`, with the session that started it.
+ * Populated legacy project stores still win over the agent directory's `projects/<key>` store.
+ * Pending and running records whose host process is gone are not counted.
  */
-export function omoBackgroundTasks(cwd: string, alive: (pid: number) => boolean = processAlive): Map<string, number> {
+export function omoBackgroundTasks(cwd: string, alive: (pid: number) => boolean = processAlive, options: OmoStateOptions = {}): Map<string, number> {
   const running = new Map<string, number>();
-  const dir = join(cwd, ".omo", "senpi-task", "tasks");
+  let dir: string;
   let names: string[];
-  try { names = readdirSync(dir); } catch { return running; }
+  // a folder that cannot be resolved (permissions) counts nothing, and picks no other store
+  try { dir = join(omoStateDir(cwd, options), "tasks"); names = readdirSync(dir); } catch { return running; }
   for (const name of names.slice(0, 2048)) {
     if (!name.startsWith("st_") || !name.endsWith(".json")) continue;
     try {
       const record = JSON.parse(readFileSync(join(dir, name), "utf8")) as { status?: unknown; parent_session_id?: unknown; host_pid?: unknown };
-      if (record.status !== "running" || typeof record.parent_session_id !== "string") continue;
+      if (typeof record.status !== "string" || !OMO_RUNNING.has(record.status) || typeof record.parent_session_id !== "string") continue;
       if (typeof record.host_pid === "number" && !alive(record.host_pid)) continue;
       running.set(record.parent_session_id, (running.get(record.parent_session_id) ?? 0) + 1);
     } catch { /* being written, or not a record */ }
@@ -157,7 +160,22 @@ export interface OmoStatusDeps {
    */
   onChange: (paneId: string, status: AgentStatus, background: number, turn: boolean, rest?: OmoRest) => void;
   /** a pane was found to run OmO: what herdr called it until now is the same agent */
-  onFound?: (paneId: string) => void;
+  onFound?: (paneId: string, again: boolean) => void;
+  /** the identity the panes' status is reported under (`omo`), and the names herdr gave the agent before */
+  agent?: string;
+  aliases?: readonly string[];
+  /** a session record applied to the turn so far (`omoTurnAfter`): another agent's records have their own */
+  turnAfter?: (turn: OmoTurn, line: OmoLine) => OmoTurn;
+  /**
+   * Whether the pane's own status may replace herdr's (default: always, once the session file
+   * is known). GJC withholds it until a turn record was read and the read is current:
+   * `available` says the file could be opened at the last poll, `complete` that everything it
+   * held was read to a record's end. An empty, gone or half-written transcript is nobody's
+   * rest, and an idle that cannot be shown is not the pane's.
+   */
+  ready?: (tracked: { status: OmoPaneStatus; turn: OmoTurn; available: boolean; complete: boolean }) => boolean;
+  /** a turn the process holding the file now could not have run is an interruption told as a failed rest (GJC); default: a plain rest (OmO) */
+  staleIsFailure?: boolean;
   file?: OmoFile;
   background?: (cwd: string) => Map<string, number>;
   /** how often the session files are looked at, and the panes found anew */
@@ -166,7 +184,7 @@ export interface OmoStatusDeps {
   now?: () => number;
 }
 
-interface Tracked extends OmoPane { cwd: string; offset: number; size: number; id: string; /** found again after a while herdr's status stood for it: a turn still running is told anew */ retell: boolean; turn: OmoTurn; status: OmoPaneStatus; /** at rest after an error, and when that error was written */ failed: boolean; failedAt: number | null; /** what is read now is the file's history, found anew: not written since it was being read */ history: boolean; background: number }
+interface Tracked extends OmoPane { cwd: string; sessionCwd?: string; offset: number; size: number; id: string; /** found again after a while herdr's status stood for it: a turn still running is told anew */ retell: boolean; turn: OmoTurn; status: OmoPaneStatus; /** at rest after an error, and when that error was written */ failed: boolean; failedAt: number | null; /** what is read now is the file's history, found anew: not written since it was being read */ history: boolean; background: number; /** the file could be opened at the last poll, and all it held was read to a record's end */ available: boolean; complete: boolean; /** a poll has considered this pane: a baseline it then read is nobody's news */ polled: boolean; /** the pane's own status stood for it at the last poll */ authoritative: boolean }
 
 const FILES: OmoFile = {
   stat: (path) => { try { const fd = openSync(path, "r"); try { const stat = fstatSync(fd); return { size: stat.size, id: `${stat.dev}:${stat.ino}` }; } finally { closeSync(fd); } } catch { return null; } },
@@ -196,12 +214,22 @@ export class OmoStatus {
   private readonly background: NonNullable<OmoStatusDeps["background"]>;
   private readonly now: () => number;
   private readonly refreshMs: number;
+  private readonly agent: string;
+  private readonly aliases: readonly string[];
+  private readonly turnAfter: NonNullable<OmoStatusDeps["turnAfter"]>;
+  private readonly ready: NonNullable<OmoStatusDeps["ready"]>;
+  private readonly staleIsFailure: boolean;
 
   constructor(private readonly deps: OmoStatusDeps) {
     this.file = deps.file ?? FILES;
     this.background = deps.background ?? omoBackgroundTasks;
     this.now = deps.now ?? Date.now;
     this.refreshMs = deps.refreshMs ?? 5000;
+    this.agent = deps.agent ?? "omo";
+    this.aliases = deps.aliases ?? OMO_ALIASES;
+    this.turnAfter = deps.turnAfter ?? omoTurnAfter;
+    this.ready = deps.ready ?? (() => true);
+    this.staleIsFailure = deps.staleIsFailure ?? false;
   }
 
   /** Watches with no browser connected too: web push depends on it. */
@@ -221,9 +249,15 @@ export class OmoStatus {
     this.timer = null;
   }
 
+  /** the pane's own status may replace herdr's only while it is allowed to (omo: once the session is known) */
+  private authoritative(tracked: Tracked): boolean {
+    return tracked.path !== null && this.ready(tracked);
+  }
+
   /** herdr's status for this pane is replaced: its events say nothing true. */
   tracks(paneId: string): boolean {
-    return this.panes.get(paneId)?.path != null;
+    const tracked = this.panes.get(paneId);
+    return tracked !== undefined && this.authoritative(tracked);
   }
 
   /** The pane runs OmO, its session known or not: its identity is `omo` whatever herdr calls it. */
@@ -239,7 +273,8 @@ export class OmoStatus {
   sessionOf(paneId: string): { cwd: string; sessionId: string } | null {
     const tracked = this.panes.get(paneId);
     const sessionId = tracked?.path == null ? null : omoSessionId(tracked.path);
-    return tracked && sessionId !== null && tracked.cwd !== "" ? { cwd: tracked.cwd, sessionId } : null;
+    const cwd = tracked?.sessionCwd ?? tracked?.cwd;
+    return cwd && sessionId !== null ? { cwd, sessionId } : null;
   }
 
   /**
@@ -263,7 +298,8 @@ export class OmoStatus {
       for (const paneId of [...this.last.keys()]) if (!cwds.has(paneId)) this.last.delete(paneId);
       for (const [paneId, pane] of found) {
         const before = this.panes.get(paneId);
-        if (!before) this.deps.onFound?.(paneId);
+        // `again`: OmO held it when last looked at, and goes on from what it read then
+        if (!before) this.deps.onFound?.(paneId, this.last.has(paneId));
         // the same session goes on being read from where it was: what happened meanwhile is told.
         // A start that cannot be read this time is the one read before
         if (before && before.path === pane.path) before.startedAt = pane.startedAt ?? before.startedAt;
@@ -276,7 +312,7 @@ export class OmoStatus {
           const startedAt = pane.startedAt ?? before?.startedAt ?? (prior?.path === pane.path ? prior.startedAt : null);
           // an error the pane rested on is the same session's alone: another one's answers finish nothing of it
           const same = prior !== undefined && prior.path === pane.path;
-          this.panes.set(paneId, { ...pane, startedAt, cwd: cwds.get(paneId) ?? "", offset: -1, size: -1, id: "", retell: prior !== undefined, turn: noTurn(), status: prior?.status ?? "idle", failed: same && prior.failed, failedAt: same ? prior.failedAt : null, history: false, background: prior?.background ?? 0 });
+          this.panes.set(paneId, { ...pane, startedAt, cwd: cwds.get(paneId) ?? "", offset: -1, size: -1, id: "", retell: prior !== undefined, turn: noTurn(), status: prior?.status ?? "idle", failed: same && prior.failed, failedAt: same ? prior.failedAt : null, history: false, background: prior?.background ?? 0, available: false, complete: false, polled: this.deps.ready !== undefined && (before?.polled === true || prior !== undefined), authoritative: false });
         }
         if (pane.path !== null) this.last.delete(paneId);
       }
@@ -298,7 +334,7 @@ export class OmoStatus {
    * OmO's until now: what OmO did there is then no part of the other agent's status.
    */
   named(paneId: string, agent: string | null): boolean {
-    if (agent === null || agent === "omo" || OMO_ALIASES.includes(agent)) return false;
+    if (agent === null || agent === this.agent || this.aliases.includes(agent)) return false;
     const held = this.panes.delete(paneId);
     const remembered = this.last.delete(paneId);
     if (!held && !remembered) return false;
@@ -314,23 +350,27 @@ export class OmoStatus {
   poll(): void {
     const counts = new Map<string, Map<string, number>>();
     for (const [paneId, tracked] of this.panes) {
-      if (tracked.path === null) continue;
+      if (tracked.path === null) { this.noteAuthority(tracked); continue; }
       const stat = this.file.stat(tracked.path);
-      if (stat === null) continue;
+      tracked.available = stat !== null;
+      if (stat === null) { tracked.complete = false; this.noteAuthority(tracked); continue; }
       const { size } = stat;
-      if (tracked.offset === -1 || size < tracked.offset || stat.id !== tracked.id) this.readFrom(tracked, tracked.path, size);
+      if (tracked.offset <= 0 || size < tracked.offset || stat.id !== tracked.id) this.readFrom(tracked, tracked.path, size);
       // also what a read that failed left unread
-      else if (size !== tracked.size || tracked.offset < size) tracked.offset = this.file.lines(tracked.path, tracked.offset, size, (line) => { tracked.turn = omoTurnAfter(tracked.turn, line); });
+      else if (size !== tracked.size || tracked.offset < size) tracked.offset = this.file.lines(tracked.path, tracked.offset, size, (line) => { tracked.turn = this.turnAfter(tracked.turn, line); });
       tracked.size = size;
       tracked.id = stat.id;
+      tracked.complete = tracked.offset >= size;
       // nothing could be read of it (a read that failed): what the pane read before stands until one succeeds
-      if (tracked.turn.status === null && tracked.offset < size) continue;
+      if (tracked.turn.status === null && tracked.offset < size) { this.noteAuthority(tracked); continue; }
       const stale = tracked.turn.status === "working" && tracked.turn.at !== null && tracked.startedAt !== null && tracked.turn.at < tracked.startedAt - STALE_TURN_MS;
+      if (this.staleIsFailure && stale && tracked.turn.asks.length > 0) tracked.turn = { ...tracked.turn, asks: [] };
       const status: OmoPaneStatus = tracked.turn.asks.length > 0 ? "blocked" : tracked.turn.status === "working" && !stale ? "working" : "idle";
       const sessionId = omoSessionId(tracked.path);
-      if (!counts.has(tracked.cwd)) counts.set(tracked.cwd, tracked.cwd ? this.background(tracked.cwd) : new Map());
-      const background = sessionId ? counts.get(tracked.cwd)!.get(sessionId) ?? 0 : 0;
-      const failed = status === "idle" && tracked.turn.failed === true;
+      const cwd = tracked.sessionCwd ?? tracked.cwd;
+      if (!counts.has(cwd)) counts.set(cwd, cwd ? this.background(cwd) : new Map());
+      const background = sessionId ? counts.get(cwd)!.get(sessionId) ?? 0 : 0;
+      const failed = status === "idle" && (tracked.turn.failed === true || (this.staleIsFailure && stale));
       // an answer written after the error that ended the turn (a retry's, or one to a new prompt):
       // the pane worked meanwhile, though it read READY, and this rest is the finish of that work.
       // Without the times to tell it newer, it is not taken for one: a finish missed, never made up
@@ -346,16 +386,42 @@ export class OmoStatus {
       tracked.failedAt = failed ? tracked.turn.at : null;
       tracked.history = false;
       tracked.background = background;
-      if (changed) this.deps.onChange(paneId, status, background, turn, rest);
+      // a pane whose file said nothing while it was polled had herdr's word stand for it:
+      // its own status, once it holds again, is told so that last word does not keep standing
+      const regained = this.noteAuthority(tracked);
+      if ((changed || regained) && this.ready(tracked)) this.deps.onChange(paneId, status, background, turn || regained, rest);
     }
+  }
+
+  /**
+   * What this poll found the pane's authority to be. True when it returns to a pane that was
+   * polled without it: its own status must then be told, though it did not change — the raw
+   * word that stood for the pane in between is the one a listener holds.
+   */
+  private noteAuthority(tracked: Tracked): boolean {
+    const authoritative = this.authoritative(tracked);
+    const regained = tracked.polled && authoritative && !tracked.authoritative;
+    tracked.authoritative = authoritative;
+    tracked.polled = true;
+    return regained;
   }
 
   /** Replay from the start once, then consume only appended complete records. */
   private readFrom(tracked: Tracked, path: string, size: number): void {
     tracked.turn = noTurn();
     tracked.history = true;
+    delete tracked.sessionCwd;
+    let first = true;
     tracked.offset = this.file.lines(path, 0, size, (line) => {
-      tracked.turn = omoTurnAfter(tracked.turn, line);
+      // The existing replay already reads the session header: no extra file read per poll.
+      if (first && "text" in line) {
+        try {
+          const header = JSON.parse(line.text) as { type?: unknown; cwd?: unknown };
+          if (header?.type === "session" && typeof header.cwd === "string" && header.cwd.trim()) tracked.sessionCwd = header.cwd;
+        } catch { /* a torn header leaves the pane cwd as the fallback */ }
+      }
+      first = false;
+      tracked.turn = this.turnAfter(tracked.turn, line);
     });
   }
 
@@ -368,7 +434,7 @@ export class OmoStatus {
     const own = <P extends { pane_id: string; agent_status: AgentStatus }>(entry: P): P => {
       const tracked = this.panes.get(entry.pane_id);
       if (!tracked) return entry;
-      return { ...entry, agent: "omo", ...(tracked.path !== null ? { agent_status: tracked.status } : {}) };
+      return { ...entry, agent: this.agent, ...(this.authoritative(tracked) ? { agent_status: tracked.status } : {}) };
     };
     return { ...snapshot, panes: snapshot.panes.map(own), ...(snapshot.agents ? { agents: snapshot.agents.map(own) } : {}) };
   }

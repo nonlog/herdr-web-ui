@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { chromium, type Browser } from "playwright-core";
 import { createServer } from "../server/index.ts";
 import { paneSendText, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
+import { chromePath } from "./chrome-path.ts";
 
 /** Only owned no-echo fixtures; assert delivery without storing the entered value. */
 export async function checkSecretInput(browser: Browser, origin: string): Promise<void> {
@@ -60,12 +61,18 @@ process.stdin.on("data", chunk => {
     await field.waitFor();
     assert.equal(await field.getAttribute("type"), "password");
     assert.equal(await page.locator(".terminal-input").count(), 0);
+    await page.locator(".pane-frame.is-current").focus();
+    await page.keyboard.press("ControlOrMeta+Shift+E");
+    assert.equal(await field.evaluate(node => node === document.activeElement), true, "focus prefers the mounted masked-input field");
+    assert.deepEqual(sent, [], "focusing masked input does not send a secret or terminal input");
     await field.fill("fixture-secret");
     assert.equal(await field.evaluate((element) => element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true, cancelable: true }))), false);
     assert.equal(await page.locator("body").innerText().then((text) => text.includes("fixture-secret")), false);
     assert.equal(await page.evaluate(() => JSON.stringify({ ...localStorage }).includes("fixture-secret")), false);
     await page.getByTitle("Chat transcript (⌘⇧J)", { exact: true }).click();
     await field.waitFor();
+    // the same field across the lens switch: a remount would have dropped what was typed
+    assert.equal(await field.inputValue(), "fixture-secret", "switching lenses keeps the masked input mounted");
     await page.getByText("Loading conversation…", { exact: true }).waitFor({ state: "hidden" });
     assert.equal(await page.getByRole("textbox", { name: "Message", exact: true }).count(), 0);
     if (process.env.UI_EVIDENCE_DIR) {
@@ -110,6 +117,83 @@ process.stdin.on("data", chunk => {
     await field.waitFor({ state: "detached" });
     assert.deepEqual(sent, ["secret", "secret", "input"]);
     assert.deepEqual(errors, []);
+    // On a desktop (no key bar, which a touch screen hides while the masked input is up) the masked
+    // input floats over the grid's last rows: its arrival leaves the grid's height, the shared pty's
+    // size, alone, whether the pane types straight into the grid or through the input line.
+    const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    try {
+      await desktop.addInitScript((pane) => {
+        localStorage.setItem(`herdr-web-ui:view:${pane}`, "terminal");
+        const Native = window.WebSocket;
+        const sockets = new Set<WebSocket>();
+        window.WebSocket = class extends Native {
+          constructor(url: string | URL, protocols?: string | string[]) { super(url, protocols); sockets.add(this); }
+        };
+        (window as any).dropTestSockets = () => { for (const socket of sockets) socket.close(); };
+      }, pane);
+      for (const mode of ["direct", "line"] as const) {
+        const view = await desktop.newPage();
+        view.setDefaultTimeout(10_000);
+        await view.addInitScript((mode) => { localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", terminalInputMode: mode })); }, mode);
+        await view.goto(`${origin}/?pane=${encodeURIComponent(pane)}`);
+        await view.locator(".pane-terminal .xterm-screen").waitFor();
+        if (mode === "line") await view.getByRole("textbox", { name: "Terminal input line", exact: true }).waitFor();
+        const frame = () => view.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        const gridHeight = () => view.locator(".pane-terminal").evaluate((element) => element.getBoundingClientRect().height);
+        await view.evaluate(() => {
+          (window as any).gridResized = 0;
+          let first = true;
+          new ResizeObserver(() => { if (first) first = false; else (window as any).gridResized += 1; }).observe(document.querySelector(".pane-terminal")!);
+        });
+        await frame();
+        const resting = await gridHeight();
+        await paneSendText(pane, "\u0010");
+        const masked = view.getByLabel("Password or PIN", { exact: true });
+        await masked.waitFor();
+        await frame();
+        assert.equal(await gridHeight(), resting, `the masked input keeps the grid's height (${mode} input)`);
+        assert.equal(await view.evaluate(() => (window as any).gridResized), 0, `the grid's observer never fired (${mode} input)`);
+        if (mode === "direct") {
+          // A desktop answers the prompt in the grid itself, as in any terminal (#1031): the keys go
+          // to the program while the masked input stands by. Regression: on a build that disables
+          // stdin for the prompt, the fixture never gets them.
+          await view.locator(".pane-terminal .xterm-screen").click();
+          await view.keyboard.type("typed-secret");
+          await view.keyboard.press("Enter");
+          const typedBy = Date.now() + 5000;
+          while (readFileSync(result, "utf8") !== String("typed-secret\r".length)) {
+            if (Date.now() > typedBy) throw new Error("regression: the grid did not take the typed secret while the masked input was up");
+            await Bun.sleep(25);
+          }
+          await masked.waitFor({ state: "detached" });
+          // control: typed into the pty only, never into a draft or the page
+          assert.equal(await view.evaluate(() => JSON.stringify({ ...localStorage }).includes("typed-secret")), false);
+          assert.equal(await view.locator("body").innerText().then((text) => text.includes("typed-secret")), false);
+          assert.equal(await view.locator(".terminal-banner-draft").count(), 0);
+          // Offline, a secret keystroke is refused with a note, never held for later like other
+          // typing (regression: the note; control: nothing held, nothing delivered afterwards).
+          await paneSendText(pane, "\u0010");
+          await masked.waitFor();
+          await desktop.setOffline(true);
+          await view.evaluate(() => (window as any).dropTestSockets());
+          await masked.waitFor({ state: "detached" });
+          await view.locator(".pane-terminal .xterm-screen").click();
+          await view.keyboard.type("offline-secret");
+          await view.keyboard.press("Enter");
+          await view.locator(".terminal-banner", { hasText: "Not sent: the terminal is not ready, and a password is never held for later." }).waitFor();
+          assert.equal(await view.evaluate(() => JSON.stringify({ ...localStorage }).includes("offline-secret")), false);
+          assert.equal(await view.locator(".terminal-banner-draft").count(), 0);
+          assert.equal(await view.locator(".draft-held").count(), 0);
+          await desktop.setOffline(false);
+          await masked.waitFor();
+          assert.equal(await view.locator(".terminal-banner-draft").count(), 0, "nothing typed offline is held for the reconnect");
+          assert.equal(readFileSync(result, "utf8"), String("typed-secret\r".length), "nothing typed offline reached the program");
+        }
+        await view.locator(".secret-input").getByRole("button", { name: "Cancel", exact: true }).click();
+        await masked.waitFor({ state: "detached" });
+        await view.close();
+      }
+    } finally { await desktop.close(); }
     console.log("PASS masked secret input: both lenses, no drafts/queue/echo, disconnect, background and cancel");
   } finally { await context.close(); await workspaceClose(created.workspace.workspace_id); rmSync(root, { recursive: true, force: true }); }
 }
@@ -117,7 +201,7 @@ process.stdin.on("data", chunk => {
 if (import.meta.main) {
   const root = mkdtempSync(join(tmpdir(), "herdr-secret-browser-"));
   const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: root });
-  const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/opt/google/chrome/chrome", headless: true, args: ["--no-sandbox"] });
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
   try { await checkSecretInput(browser, `http://127.0.0.1:${server.port}`); }
   finally { await browser.close(); server.stop(); rmSync(root, { recursive: true, force: true }); }
 }
