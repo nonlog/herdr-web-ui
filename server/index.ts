@@ -96,8 +96,6 @@ import { PaneWatch } from "./watch.ts";
 import { AttachOutputTail, AttachStartupProbes, isTakeoverExit } from "./attach-output.ts";
 import { attachableIdentity, sidecarAvailable } from "./pty/sidecar.ts";
 import { MirrorSession } from "./mirror.ts";
-import { TerminalControlSession } from "./terminal-control.ts";
-import { NativeGeometryFollower } from "./native-geometry.ts";
 import { mirrorInput } from "./mirror-input.ts";
 import { PendingInputs, PendingInputError, samePendingIdentity, type PendingIdentity, type PendingRecord } from "./pending-input.ts";
 import { processStartedAt } from "./process-start.ts";
@@ -226,7 +224,7 @@ const RESTORED_CLEAR_GAP_MS = 200;
 const RESTORED_CLEAR_SETTLE_MS = 300;
 /** what a send must still have of its deadline before the copy is cleared: the clear, the box read again, then the send */
 const RESTORED_CLEAR_RESERVE_MS = 2_000;
-const SERVER_FEATURES: ServerFeature[] = ["submit", "pending-input", "pending-hold", "secret-input", "input-ready", "take-over", "terminal-scroll", "watch", "conversation-watch", "ping"];
+const SERVER_FEATURES: ServerFeature[] = ["submit", "pending-input", "pending-hold", "secret-input", "input-ready", "take-over", "watch", "conversation-watch", "ping"];
 
 /** the sides herdr's pane.swap and pane.resize take; anything else is refused before the RPC, which would answer invalid_request */
 const isPaneDirection = (value: unknown): value is PaneDirection => value === "left" || value === "right" || value === "up" || value === "down";
@@ -380,18 +378,14 @@ const BUN_BODY_CEILING = 64 * 1024 * 1024;
 /**
  * One live PTY per pane, shared by every client watching that pane.
  *
- * Unix prefers `herdr terminal attach` through the PTY sidecar. Native Windows
- * uses herdr's newline-JSON `terminal session control`, which supplies the same
- * ANSI screen stream plus semantic input/resize/scroll without node-pty.
- * pane.read mirroring remains only the compatibility fallback.
+ * The terminal is a real `herdr terminal attach` on a PTY rather than repeated
+ * `pane.read` snapshots, so the browser receives an actual byte stream: xterm.js
+ * keeps screen state and selection, while herdr owns scrollback.
  */
 interface PaneAttachment {
   ready: boolean;
-  pty: PtySession | MirrorSession | TerminalControlSession;
-  /** portable herdr controller (native Windows / a runtime without the PTY sidecar) */
-  control?: TerminalControlSession;
-  unfollowGeometry?: () => void;
-  /** legacy fallback: repaints the pane's screen (server/mirror.ts), on the pane's own grid */
+  pty: PtySession | MirrorSession;
+  /** set when herdr cannot attach here: `pty` repaints the pane's screen (server/mirror.ts), on the pane's own grid */
   mirror?: MirrorSession;
   clients: Set<Client>;
   /** the pty's current grid: interact clients set it, observe clients adopt it */
@@ -504,40 +498,22 @@ export function createServer(
     attachRelookupForMs?: number;
     /** ATTACH_HOLD_MS; a test lengthens it so an attach's exit always comes before its hold ends */
     attachHoldMs?: number;
-    /** whether herdr can direct `terminal attach`; unset, ping + this runtime's PTY sidecar decide. */
+    /** whether herdr can `terminal attach`; unset, its ping says, and this runtime's PTY sidecar has to be runnable. Tests give a Windows herdr's answer, at once or as late as a ping's. */
     terminalAttach?: boolean | (() => Promise<boolean>);
-    /** force the portable `terminal session control` path in tests; production reads ping. */
-    terminalControl?: boolean;
-    /** whether this runtime can run the PTY sidecar; unset, server/pty/sidecar.ts says. */
+    /** whether this runtime can run the PTY sidecar; unset, server/pty/sidecar.ts says. Tests give a runtime without Node or node-pty, while herdr keeps its own answer. */
     sidecar?: boolean;
   } = {},
 ): ServerInstance {
   const attachments = new Map<string, PaneAttachment>();
-  const nativeGeometry = new NativeGeometryFollower(async () => {
-    const snapshot = await sessionSnapshot(undefined, 1000);
-    return new Map(snapshot.layouts.flatMap((layout) => layout.panes).map((pane) =>
-      [pane.pane_id, { cols: pane.rect.width, rows: pane.rect.height }]));
-  });
-  /** whether the sidecar can run, settled as the server starts so attach and identity agree */
+  /** whether this bridge can `terminal attach`: herdr is asked once, and the PTY sidecar has to be runnable here (server/pty/sidecar.ts) */
+  /** whether the sidecar can run, settled as the server starts so that attach, /api/health and /api/bridge tell one answer; a forced answer (tests) stands in for it */
   const sidecar = options.sidecar ?? (options.terminalAttach === undefined ? sidecarAvailable() : options.terminalAttach !== false);
   let terminalAttachKnown: boolean | null = typeof options.terminalAttach === "boolean" ? options.terminalAttach : null;
-  let terminalControlKnown: boolean | null = typeof options.terminalControl === "boolean" ? options.terminalControl : null;
-  let detectedTerminalIdentity: Awaited<ReturnType<typeof ping>> | null = null;
-  const terminalIdentity = async () => {
-    if (detectedTerminalIdentity === null) detectedTerminalIdentity = attachableIdentity(await ping(), sidecar);
-    return detectedTerminalIdentity;
-  };
   const terminalAttach = async (): Promise<boolean> => {
     if (terminalAttachKnown === null) {
-      terminalAttachKnown = typeof options.terminalAttach === "function"
-        ? await options.terminalAttach()
-        : (await terminalIdentity()).terminal_attach !== false;
+      terminalAttachKnown = typeof options.terminalAttach === "function" ? await options.terminalAttach() : attachableIdentity(await ping(), sidecar).terminal_attach !== false;
     }
     return terminalAttachKnown;
-  };
-  const terminalControl = async (): Promise<boolean> => {
-    if (terminalControlKnown === null) terminalControlKnown = (await terminalIdentity()).terminal_control === true;
-    return terminalControlKnown;
   };
   const retryFor = options.attachRetryForMs ?? ATTACH_RETRY_FOR_MS;
   const heldRetry = options.attachHeldRetryMs ?? ATTACH_HELD_RETRY_MS;
@@ -550,7 +526,7 @@ export function createServer(
   const clients = new Set<Client>();
   /** connections whose page is in use (`presence`), relayed ones included: while any is, no web push goes out */
   const present = new Set<Client>();
-  type PendingLease = { attachment: PaneAttachment; pty: PaneAttachment["pty"]; authority: object };
+  type PendingLease = { attachment: PaneAttachment; pty: PtySession | MirrorSession; authority: object };
   const pendingAuthorities = new WeakMap<Client, Map<string, object>>();
   type PendingItem = PendingRecord<Client, PendingLease>;
   const pending = new PendingInputs<Client, PendingLease>((owner, paneId, messages, removed) => {
@@ -1250,7 +1226,6 @@ export function createServer(
     if (!attachment) return;
     for (const member of attachment.clients) holdPending(member, paneId);
     attachments.delete(paneId);
-    attachment.unfollowGeometry?.();
     clearTimeout(attachment.retry);
     clearTimeout(attachment.relookup);
     // its members hold nothing on this pane any more (a pty that exited leaves them on
@@ -1291,16 +1266,12 @@ export function createServer(
 
   function resizePty(paneId: string, cols: number, rows: number): void {
     const attachment = attachments.get(paneId);
-    // Windows control locks the native PTY size in Herdr. Browser dimensions must
-    // never enter that lock, including from tabs opened before this fix.
-    if (!attachment || attachment.mirror || attachment.control || (attachment.cols === cols && attachment.rows === rows)) return;
+    // a mirrored pane's grid is herdr's own: no browser resizes it
+    if (!attachment || attachment.mirror || (attachment.cols === cols && attachment.rows === rows)) return;
     attachment.cols = cols;
     attachment.rows = rows;
     attachment.pty.resize(cols, rows);
-    broadcast(paneId, {
-      type: "pane-geometry", pane_id: paneId, cols, rows,
-      ...(attachment.control ? { control: true } : {}),
-    });
+    broadcast(paneId, { type: "pane-geometry", pane_id: paneId, cols, rows });
   }
 
   function ensureAttachment(paneId: string, cols: number, rows: number, forObserver: boolean): Promise<PaneAttachment> {
@@ -1319,18 +1290,16 @@ export function createServer(
 
   async function spawnAttachment(paneId: string, cols: number, rows: number, forObserver: boolean): Promise<PaneAttachment> {
     await retiringAttachments.get(paneId);
-    const direct = await terminalAttach();
-    const controlled = !direct && await terminalControl();
-    const mirrored = !direct && !controlled;
+    const mirrored = !(await terminalAttach());
     const { terminalId, rect } = await terminalInfoFor(paneId);
     if (stopped) throw new HerdrError("server_stopped", "the web bridge stopped during attachment creation");
     // an observer-first attachment spawns at the pane's own grid (fallback 80x24 when
     // the layout has no rect for it): the attach must not seed the shared pty with a
     // watching phone's viewport
-    const spawnCols = forObserver || mirrored || controlled ? (rect?.width ?? 80) : cols;
-    const spawnRows = forObserver || mirrored || controlled ? (rect?.height ?? 24) : rows;
+    const spawnCols = forObserver || mirrored ? (rect?.width ?? 80) : cols;
+    const spawnRows = forObserver || mirrored ? (rect?.height ?? 24) : rows;
     const attachment: PaneAttachment = {
-      ready: mirrored || controlled,
+      ready: mirrored,
       pty: undefined as unknown as PtySession,
       clients: new Set<Client>(),
       cols: spawnCols,
@@ -1371,154 +1340,6 @@ export function createServer(
       });
       attachment.pty = mirror;
       attachment.mirror = mirror;
-      return attachment;
-    }
-
-    if (controlled) {
-      // terminal session control uses the same exclusive server slot as direct attach. Its
-      // newline-JSON close record makes refusals easier to classify, but it still needs the
-      // same read-race retry, held-bridge wait and explicit takeover semantics.
-      attachment.ready = false;
-      let retries = 0;
-      let refusedSince: number | null = null;
-      let starting = false;
-      let takeoverWanted: Client | null = null;
-      let attachedTerminal = terminalId;
-      const wanted = (): boolean => attachment.clients.size > 0 || [...clients].some((client) => client.data.attached.has(paneId));
-      const mayTakeOver = (client: Client | null): client is Client =>
-        client !== null && attachment.clients.has(client) && client.data.mode === "interact" && !client.data.closing;
-      const finish = (code: number | null): void => {
-        if (attachments.get(paneId) !== attachment) return;
-        broadcast(paneId, { type: "pty-exit", pane_id: paneId, code });
-        closeAttachment(paneId);
-      };
-      const schedule = (delay: number, takeover: Client | null = null): void => {
-        clearTimeout(attachment.retry);
-        attachment.retry = setTimeout(() => start(takeover), delay);
-      };
-      const relookup = (code: number | null, deadline: number): void => {
-        if (attachments.get(paneId) !== attachment) return;
-        if (!wanted()) { closeAttachment(paneId); return; }
-        void terminalInfoFor(paneId, Math.min(1000, Math.max(1, deadline - Date.now()))).then(({ terminalId: now }) => {
-          if (attachments.get(paneId) !== attachment) return;
-          if (now !== attachedTerminal) {
-            attachedTerminal = now;
-            retries = 0;
-            refusedSince = null;
-            const takeover = mayTakeOver(takeoverWanted) ? takeoverWanted : null;
-            takeoverWanted = null;
-            start(takeover);
-            return;
-          }
-          if (Date.now() >= deadline) { finish(code); return; }
-          attachment.relookup = setTimeout(() => relookup(code, deadline), 100);
-        }, (error: unknown) => {
-          if (attachments.get(paneId) !== attachment) return;
-          if (error instanceof HerdrError && PANE_GONE_CODES.has(error.code)) { finish(code); return; }
-          if (Date.now() >= deadline) { finish(code); return; }
-          attachment.relookup = setTimeout(() => relookup(code, deadline), 100);
-        });
-      };
-      const start = (requestedTakeover: Client | null = null): void => {
-        if (attachments.get(paneId) !== attachment) return;
-        clearTimeout(attachment.retry);
-        attachment.retry = undefined;
-        if (!wanted()) { closeAttachment(paneId); return; }
-        const takingOver = mayTakeOver(requestedTakeover) ? requestedTakeover : null;
-        starting = true;
-        let seenFrame = false;
-        let session!: TerminalControlSession;
-        session = new TerminalControlSession({
-          command: process.env["HERDR_WEB_HERDR_BIN"] || "herdr",
-          target: paneId,
-          cols: attachment.cols,
-          rows: attachment.rows,
-          takeover: takingOver !== null,
-          env: { HERDR_SOCKET_PATH: herdrSocketPath() },
-          onFrame: (frame) => {
-            if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
-            const geometry = validGeometry(frame.width, frame.height);
-            if (geometry && (geometry.cols !== attachment.cols || geometry.rows !== attachment.rows)) {
-              attachment.cols = geometry.cols;
-              attachment.rows = geometry.rows;
-              broadcast(paneId, { type: "pane-geometry", pane_id: paneId, ...geometry, control: true });
-            }
-            // A full frame replaces the replay baseline. Replaying an older grid
-            // at the new size clips cells and can hide the bottom input row again.
-            if (frame.full) attachment.replay = new ReplayBuffer(MAX_REPLAY_BYTES);
-          },
-          onData: (data) => {
-            if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
-            if (!seenFrame) {
-              seenFrame = true;
-              starting = false;
-              retries = 0;
-              refusedSince = null;
-              takeoverWanted = null;
-              if (attachment.held) {
-                attachment.held = false;
-                broadcast(paneId, { type: "attach-resumed", pane_id: paneId });
-              }
-              attachment.ready = true;
-              broadcast(paneId, { type: "input-ready", pane_id: paneId });
-            }
-            if (!data) return;
-            attachment.replay.append(data);
-            for (const client of attachment.clients) sendOutput(client, paneId, data);
-            reconcileOutput(paneId);
-          },
-          onExit: (code, reason) => {
-            if (attachments.get(paneId) !== attachment || attachment.control !== session) return;
-            attachment.unfollowGeometry?.();
-            starting = false;
-            if (attachment.ready) broadcast(paneId, { type: "input-ready", pane_id: paneId, ready: false });
-            attachment.ready = false;
-            const now = Date.now();
-            const displaced = reason?.includes("terminal attach taken over") === true;
-            if (!displaced && reason && ATTACH_READ_RACE_RE.test(reason) && now - (refusedSince ??= now) < retryFor) {
-              retries += 1;
-              const takeover = mayTakeOver(takeoverWanted) ? takeoverWanted : takingOver;
-              takeoverWanted = null;
-              schedule(Math.min(ATTACH_RETRY_MS * 2 ** (retries - 1), ATTACH_RETRY_MAX_MS), takeover);
-              return;
-            }
-            if (displaced || (reason !== undefined && ATTACH_HELD_RE.test(reason))) {
-              refusedSince = null;
-              retries = 0;
-              if (!attachment.held) broadcast(paneId, { type: "error", code: "attach_held", message: ATTACH_HELD_MESSAGE, pane_id: paneId });
-              attachment.held = true;
-              const takeover = mayTakeOver(takeoverWanted) ? takeoverWanted : null;
-              takeoverWanted = null;
-              if (takeover) start(takeover);
-              else schedule(heldRetry);
-              return;
-            }
-            takeoverWanted = null;
-            relookup(code, now + relookupFor);
-          },
-        });
-        attachment.pty = session;
-        attachment.control = session;
-        attachment.unfollowGeometry?.();
-        attachment.unfollowGeometry = nativeGeometry.watch(paneId,
-          { cols: attachment.cols, rows: attachment.rows }, ({ cols, rows }) => {
-            if (attachments.get(paneId) === attachment && attachment.control === session) session.resize(cols, rows);
-          });
-      };
-      attachment.takeOver = (client) => {
-        if (attachments.get(paneId) !== attachment || !attachment.held || !mayTakeOver(client)) return;
-        if (starting) { takeoverWanted = client; return; }
-        start(client);
-      };
-      try {
-        // The creating client has already recorded paneId in SocketData.attached, so wanted()
-        // is true even before attach resumes and adds it to attachment.clients.
-        start();
-      } catch (error) {
-        attachments.delete(paneId);
-        spawnFailure(paneId, error);
-        throw error;
-      }
       return attachment;
     }
 
@@ -3183,16 +3004,9 @@ export function createServer(
               const alreadyAttached = attachment.clients.has(client);
               attachment.clients.add(client);
               if (!alreadyAttached && message.flow_control === "ack") client.data.output.set(message.pane_id, new OutputWindow());
-              // Adopting clients need the replay's grid first on every transport. Direct
-              // attach also replays an alternate-screen stream: parsing it at a phone's
-              // initial grid clips cells even if geometry follows a moment later.
-              if (attachment.mirror || attachment.control || client.data.mode === "observe" || message.keep_size === true) {
-                send(client, {
-                  type: "pane-geometry", pane_id: message.pane_id,
-                  cols: attachment.cols, rows: attachment.rows,
-                  ...(attachment.mirror ? { fixed: true } : attachment.control ? { control: true } : {}),
-                });
-              }
+              // a mirrored screen is drawn for the pane's own grid: the client takes that size
+              // before the screen, or the rows would wrap in a grid of another width
+              if (attachment.mirror) send(client, { type: "pane-geometry", pane_id: message.pane_id, cols: attachment.cols, rows: attachment.rows, fixed: true });
               // hand the newcomer the current screen it would otherwise have missed
               // (a mirror keeps its latest screen whole; a pty keeps a bounded tail of its stream)
               const replay = attachment.mirror ? attachment.mirror.current ?? "" : attachment.replay.text();
@@ -3206,12 +3020,7 @@ export function createServer(
               if (client.data.closing) break;
               if (attachment.ready && !attachment.held) send(client, { type: "input-ready", pane_id: message.pane_id });
               if (attachment.mirror) break;
-              if (attachment.control) {
-                // Native Windows terminal/session control always follows Herdr's
-                // own grid. No browser may claim resize ownership of that pane.
-                attachment.grids.delete(client);
-                send(client, { type: "pane-geometry", pane_id: message.pane_id, cols: attachment.cols, rows: attachment.rows, control: true });
-              } else if (client.data.mode === "interact" && !claim.keepSize) {
+              if (client.data.mode === "interact" && !claim.keepSize) {
                 // an operator's viewport owns the shared grid
                 drivePty(message.pane_id, client, geometry.cols, geometry.rows);
               } else {
@@ -3282,11 +3091,11 @@ export function createServer(
               const inputFailed = () => {
                 if (clients.has(client)) send(client, { type: "error", code: "input_failed", message: "Terminal input could not be confirmed. Check the terminal before typing again.", pane_id: message.pane_id });
               };
-              // A legacy mirror has no live attachment stream, so typing, the key bar's Enter,
+              // without a pty (Windows: no terminal, or a mirrored one) typing, the key bar's Enter,
               // Stop and arrows go through herdr itself, each in its turn behind a message in flight.
               // The turn is taken before herdr is asked what it can do: a message sent while
               // that answer is on its way must not overtake the typing.
-              if (attachment?.mirror || (terminalAttachKnown === false && !attachment) || (!attachment && terminalAttachKnown === null)) {
+              if (terminalAttachKnown === false || (!attachment && terminalAttachKnown === null)) {
                 // an attach this client is not a member of owns this pane's screen, and typing
                 // here would reach past it — the same refusal the pty branch below makes. A
                 // pane with no attachment at all is left as it was: that is the key bar, and
@@ -3415,33 +3224,6 @@ export function createServer(
               const next = [...attachment.grids].reverse().find(([other]) => other.data.mode === "interact"
                 && attachment.clients.has(other) && other.data.attached.get(message.pane_id)?.keepSize === false);
               if (next) drivePty(message.pane_id, next[0], next[1].cols, next[1].rows);
-              break;
-            }
-            case "scroll": {
-              if (client.data.mode === "observe") {
-                send(client, { type: "error", code: "read_only", message: "this connection is in observe mode" });
-                break;
-              }
-              const lines = message.lines;
-              const column = message.column;
-              const row = message.row;
-              const modifiers = message.modifiers ?? 0;
-              if ((message.direction !== "up" && message.direction !== "down")
-                || !Number.isInteger(lines) || lines < 1 || lines > 1000
-                || (column !== undefined && (!Number.isInteger(column) || column < 0 || column > 999))
-                || (row !== undefined && (!Number.isInteger(row) || row < 0 || row > 999))
-                || !Number.isInteger(modifiers) || modifiers < 0 || modifiers > 7) {
-                send(client, { type: "error", code: "invalid_scroll", message: "invalid terminal scroll event", pane_id: message.pane_id });
-                break;
-              }
-              const attachment = attachments.get(message.pane_id);
-              if (!attachment?.clients.has(client) || !attachment.ready || attachment.held || !attachment.control) {
-                send(client, { type: "error", code: "input_not_ready", message: "Terminal scroll is not ready.", pane_id: message.pane_id });
-                break;
-              }
-              if (!attachment.control.scroll(message.direction, lines, column, row, modifiers)) {
-                send(client, { type: "error", code: "input_failed", message: "Terminal scroll could not be sent.", pane_id: message.pane_id });
-              }
               break;
             }
             case "keys": {
@@ -3836,7 +3618,6 @@ export function createServer(
       settlePortalStartup({ ok: false, error: new Error("Server stopped before Portal startup cleanup completed") });
       conversations.stop();
       clearInterval(outputTimer);
-      nativeGeometry.stop();
       collector.stop();
       omo.stop();
       gjc.stop();

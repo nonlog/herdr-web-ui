@@ -135,9 +135,7 @@ async function setup(label: string, agent = "claude", screen = "› Message\n", 
     const drawn = async () => (await paneRead({ paneId: pane, source: "visible", format: "ansi" })).text;
     const before = await drawn();
     writeFileSync(screenFile, text);
-    // A concurrent CI browser lane can delay herdr recorder propagation; do
-    // not mistake a slow visible-screen read for a failed pending-input check.
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + 5_000;
     while (await drawn() === before || !(await paneRead({ paneId: pane, source: "visible", format: "text" })).text.trimEnd().endsWith(ending.trimEnd())) {
       if (Date.now() >= deadline) throw new Error("recorder screen did not update");
       await Bun.sleep(25);

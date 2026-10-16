@@ -14,7 +14,6 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     if (!localStorage.getItem("herdr-web-ui:settings")) localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", terminalInputMode: "line" }));
   });
   const sent: any[] = [];
-  const sentKeys: any[] = [];
   const resizes: any[] = [];
   let acknowledge: (() => void) | undefined;
   let refuse: (() => void) | undefined;
@@ -49,7 +48,6 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
         acknowledge = () => socket.send(JSON.stringify({ type: "submit-result", id: frame.id, pane_id: frame.pane_id, ok: true }));
         refuse = () => socket.send(JSON.stringify({ type: "submit-result", id: frame.id, pane_id: frame.pane_id, ok: false, code: "agent_blocked", message: "" }));
       } else if (frame.type === "input") sent.push(frame);
-      else if (frame.type === "keys") { sentKeys.push(frame); server.send(raw); }
       else if (frame.type === "ping" && holdPings) heldPings.push(String(raw));
       else {
         if (frame.type === "resize") resizes.push(frame);
@@ -432,10 +430,6 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     assert.equal(await heldNotice.count(), 1);
     await until(() => !!ready);
     ready!();
-    // The simulated readiness delay applies only to this first, intentional
-    // attach. Later line/direct mode changes must receive fresh input-ready
-    // frames as a real bridge would; otherwise Send incorrectly stays gated.
-    delayReady = false;
     await page.waitForTimeout(150);
     assert.equal(sent.length, before, "ready does not replay the draft");
     // Held input keeps later typing until Send or Discard, on a ready terminal too: a key sent beside
@@ -445,12 +439,10 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     await page.locator(".xterm-helper-textarea").press("b");
     await until(async () => (await page.locator(".draft-text").textContent()) === "a b");
     assert.equal(sent.length, before, "typing beside a held draft reaches nothing");
-    // A physical Escape is a semantic Herdr key (Kitty-aware), not an input byte.
-    // It still reaches the program while the held draft blocks ordinary typing.
-    const beforeEsc = sentKeys.length;
+    // an interrupt is not typing: it still reaches the program while the draft waits
     await page.locator(".xterm-helper-textarea").press("Escape");
-    await until(() => sentKeys.length > beforeEsc);
-    assert.deepEqual(sentKeys.at(-1).keys, ["esc"]);
+    await until(() => sent.length > before);
+    assert.equal(sent.at(-1).text, "\x1b");
     assert.equal(await page.locator(".draft-text").textContent(), "a b");
     const heldNote = "Not sent: send or discard the held input first.";
     const banner = page.locator(".terminal-banner", { hasText: heldNote });
@@ -504,12 +496,9 @@ export async function checkTerminalInput(browser: Browser, origin: string, pane:
     // a draft that takes pastes holds more than "a b" by now: Send types what it holds
     const heldText = await page.locator(".draft-text").textContent();
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    // Physical Escape now uses a separate `keys` frame rather than an `input`
-    // frame. Sending the held draft therefore adds exactly *one* input frame,
-    // not the two counted by the pre-semantic-Escape regression.
-    await until(() => sent.length > afterEscape);
+    await until(() => sent.length > before + 1);
     assert.equal(sent.at(-1).text, heldText);
-    assert.equal(sent.length, afterEscape + 1, "Send types the held text once, with no Enter");
+    assert.equal(sent.length, before + 2, "Send types the held text once, with no Enter");
     // Real xterm handling: an IME's provisional syllable stays local until commit.
     const imeBefore = sent.length;
     const input = page.locator(".xterm-helper-textarea");
@@ -652,9 +641,7 @@ async function checkKeyBarWhileLineComposes(browser: Browser, origin: string, pa
     await until(() => frames.length > before, "Esc frame");
     await interrupt.tap();
     await until(() => frames.length > before + 1, "^C frame");
-    // Key-bar Escape is a Herdr semantic chord (Kitty-aware), unlike Ctrl+C,
-    // which remains an explicit control byte. Both work during IME composition.
-    assert.deepEqual(frames.slice(before).map((frame) => [frame.type, frame.text ?? frame.keys]), [["keys", ["esc"]], ["input", "\x03"]]);
+    assert.deepEqual(frames.slice(before).map((frame) => [frame.type, frame.text ?? frame.keys]), [["input", "\x1b"], ["input", "\x03"]]);
     assert.equal(await line.inputValue(), "fix the", "the composing line keeps its text");
     // the switch to direct typing would unmount the line mid-composition: it waits
     const direct = page.locator('.key-bar [data-key="direct"]');

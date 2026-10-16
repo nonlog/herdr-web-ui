@@ -42,17 +42,6 @@ beforeAll(() => {
 afterAll(() => {
   server?.stop();
   rmSync(stateDir, { recursive: true, force: true });
-  // If the runner hangs after all assertions have passed, report the classes
-  // of outstanding handles without exposing socket addresses or test data.
-  const resources = () => (process as typeof process & { getActiveResourcesInfo?: () => string[] })
-    .getActiveResourcesInfo?.() ?? [];
-  const summarize = (): string => JSON.stringify(resources().reduce<Record<string, number>>((out, name) => {
-    out[name] = (out[name] ?? 0) + 1;
-    return out;
-  }, {}));
-  console.log(`[api-contract cleanup] resources after stop: ${summarize()}`);
-  const followup = setTimeout(() => console.log(`[api-contract cleanup] resources after settle: ${summarize()}`), 1000);
-  followup.unref();
 });
 
 const base = () => `http://localhost:${server.port}`;
@@ -3420,13 +3409,12 @@ describe("terminal lens of a bridge without the PTY sidecar", () => {
     } finally { bridge.stop(); rmSync(dir, { recursive: true, force: true }); }
   };
 
-  it("reports portable terminal control from /api/health and /api/bridge when the PTY sidecar is absent", async () => {
+  it("reports a mirror from /api/health and /api/bridge though herdr itself can attach", async () => {
     const herdr = await ping();
-    // the case only means something against a herdr that can direct-attach on this runner
+    // the case only means something against a herdr that can attach
     expect(herdr.terminal_attach).toBe(true);
-    expect(herdr.terminal_control).toBe(true);
-    const controlled = { ...herdr, terminal_attach: false };
-    expect(await told(false)).toEqual({ health: controlled, bridge: controlled });
+    const mirrored = { ...herdr, terminal_attach: false, terminal_mirror: true };
+    expect(await told(false)).toEqual({ health: mirrored, bridge: mirrored });
   });
 
   it("passes herdr's own answer through where the sidecar runs", async () => {

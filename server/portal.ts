@@ -162,46 +162,42 @@ function scriptInterpreter(value: string | undefined): boolean {
   return /^(?:sh|bash|dash|zsh|ksh|ash)(?:\.exe)?$/i.test(value?.split(/[\\/]/).at(-1) ?? "");
 }
 
-/** KERN_PROCARGS2: argc, executable path, NUL padding, then argc NUL-terminated arguments. */
-export function parseDarwinArgv(bytes: Uint8Array): string[] | null {
-  if (bytes.length < 4) return null;
-  const argc = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt32(0, true);
-  if (argc <= 0 || argc > bytes.length) return null;
-  let offset = bytes.indexOf(0, 4);
-  if (offset < 0) return null;
-  while (offset < bytes.length && bytes[offset] === 0) offset++;
-  const argv: string[] = [];
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  try {
-    for (let i = 0; i < argc; i++) {
-      const end = bytes.indexOf(0, offset);
-      if (end < 0) return null;
-      argv.push(decoder.decode(bytes.subarray(offset, end)));
-      offset = end + 1;
+/** `ps` has no argv mode on every supported Unix, so parse its quoted command conservatively. */
+function splitCommandLine(command: string): string[] | null {
+  const args: string[] = [];
+  let arg = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let started = false;
+  for (const char of command.trim()) {
+    if (escaped) {
+      arg += char;
+      escaped = false;
+      started = true;
+    } else if (char === "\\") {
+      escaped = true;
+      started = true;
+    } else if (quote !== null) {
+      if (char === quote) quote = null;
+      else arg += char;
+      started = true;
+    } else if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+    } else if (/\s/.test(char)) {
+      if (started) {
+        args.push(arg);
+        arg = "";
+        started = false;
+      }
+    } else {
+      arg += char;
+      started = true;
     }
-  } catch { return null; }
-  return argv;
-}
-
-async function darwinProcessArgv(pid: number): Promise<string[] | null> {
-  const { dlopen, ptr } = await import("bun:ffi");
-  const lib = dlopen("/usr/lib/libSystem.B.dylib", {
-    sysctl: { args: ["ptr", "u32", "ptr", "ptr", "ptr", "u64"], returns: "i32" },
-  });
-  try {
-    // ps joins argv with unquoted spaces; only the kernel's original boundaries prove identity.
-    const mib = new Int32Array([1, 8]); // CTL_KERN, KERN_ARGMAX
-    const argmax = new Int32Array(1);
-    const size = new BigUint64Array([4n]);
-    if (lib.symbols.sysctl(ptr(mib), 2, ptr(argmax), ptr(size), null, 0) !== 0) return null;
-    if (argmax[0]! <= 0 || argmax[0]! > 16 * 1024 * 1024) return null;
-    const bytes = new Uint8Array(argmax[0]!);
-    const processMib = new Int32Array([1, 49, pid]); // CTL_KERN, KERN_PROCARGS2, pid
-    size[0] = BigInt(bytes.length);
-    if (lib.symbols.sysctl(ptr(processMib), 3, ptr(bytes), ptr(size), null, 0) !== 0) return null;
-    if (size[0]! > BigInt(bytes.length)) return null;
-    return parseDarwinArgv(bytes.subarray(0, Number(size[0])));
-  } finally { lib.close(); }
+  }
+  if (quote !== null || escaped) return null;
+  if (started) args.push(arg);
+  return args.length > 0 ? args : null;
 }
 
 async function processArgv(pid: number, timeoutMs: number): Promise<string[] | null> {
@@ -220,8 +216,11 @@ async function processArgv(pid: number, timeoutMs: number): Promise<string[] | n
       if (argv.at(-1) === "") argv.pop();
       return argv.length > 0 && argv[0] !== "" ? argv : null;
     }
-    if (process.platform === "darwin") return await darwinProcessArgv(pid);
-    return null;
+    const ps = Bun.spawn(["ps", "-ww", "-o", "command=", "-p", String(pid)], {
+      stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: timeoutMs, killSignal: "SIGKILL",
+    });
+    const [code, text] = await Promise.all([ps.exited, new Response(ps.stdout as ReadableStream<Uint8Array>).text()]);
+    return code === 0 ? splitCommandLine(text) : null;
   } catch { return null; }
 }
 

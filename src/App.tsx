@@ -128,8 +128,8 @@ function storeSelection(machineId: string, paneId: string | null): void {
  * terminal.
  */
 /** `hasAgent`: herdr leaves `agent` out for a shell, so callers compare with `!= null` */
-function storedView(lenses: PaneLenses, picks: ReadonlyMap<string, PaneView>, paneId: string, machineId: string, hasAgent: boolean | null, terminalAvailable: boolean): PaneView {
-  if (!terminalAvailable) return "chat";
+function storedView(lenses: PaneLenses, picks: ReadonlyMap<string, PaneView>, paneId: string, machineId: string, hasAgent: boolean | null, terminalAttach: boolean): PaneView {
+  if (!terminalAttach) return "chat";
   const key = paneStorageId(machineId, paneId);
   const picked = picks.get(key);
   if (picked !== undefined) return picked;
@@ -858,20 +858,20 @@ export function App() {
   // one thing to a screen reader (A4); null while no tab owns this pane
   const tabPanelLabel = paneTabPanelLabel(snapshot, selectedPane, t);
   const selectedAgent = selectedPane?.agent ?? null;
-  // Unknown herdr (offline, or a server that predates the flags) counts as terminal-capable.
-  // Native Windows uses terminal_control; terminal_mirror is the legacy compatibility fallback.
-  const terminalAvailable = targetHerdr?.terminal_attach !== false || targetHerdr?.terminal_control === true || targetHerdr?.terminal_mirror === true;
+  // unknown herdr (offline, or a server that predates the flag) counts as attach-capable
+  // a server that repaints the pane's screen instead (terminal_mirror) has a terminal lens too
+  const terminalAttach = targetHerdr?.terminal_attach !== false || targetHerdr?.terminal_mirror === true;
 
   // the lens follows the selected pane: each pane remembers its own. It is settled in the render
   // that selects the pane, not in an effect after it: the pane's terminal attaches in that render's
   // layout effect, and an attach in the previous pane's lens resized a pane whose lens is chat
   // a new Settings default is a new start for every pane's lens
   const lenses = useMemo(() => new PaneLenses(settings.defaultView), [settings.defaultView]);
-  const lensKey = JSON.stringify([selectedPaneId, selectedMachineId, selectedPane !== null, selectedAgent !== null, terminalAvailable, settings.defaultView]);
+  const lensKey = JSON.stringify([selectedPaneId, selectedMachineId, selectedPane !== null, selectedAgent !== null, terminalAttach, settings.defaultView]);
   const notificationView = notificationViewForPane(notificationViewTarget, selectedMachineId, selectedPaneId);
   let view = lens.view;
   if (lens.key !== lensKey) {
-    if (selectedPaneId !== null) view = storedView(lenses, viewPicks, selectedPaneId, selectedMachineId, selectedPane ? selectedAgent !== null : null, terminalAvailable);
+    if (selectedPaneId !== null) view = storedView(lenses, viewPicks, selectedPaneId, selectedMachineId, selectedPane ? selectedAgent !== null : null, terminalAttach);
     setLens({ key: lensKey, view });
   }
   // a tapped alert's lens is drawn over the pane's own, never stored: once it is gone (the pane or
@@ -914,7 +914,7 @@ export function App() {
   splitShownRef.current = splitOn;
   const otherWorkspace = otherPane ? otherMachine?.snapshot?.workspaces.find((workspace) => workspace.workspace_id === otherPane.workspace_id) ?? null : null;
   const otherHerdr = split?.other.machineId === "local" ? health?.herdr : otherMachine?.herdr;
-  const otherAttach = otherHerdr?.terminal_attach !== false || otherHerdr?.terminal_control === true || otherHerdr?.terminal_mirror === true;
+  const otherAttach = otherHerdr?.terminal_attach !== false || otherHerdr?.terminal_mirror === true;
 
   // the other half's pane closed: another pane of its tab takes its place, else back to one pane.
   // An offline PC's cached roster cannot say so, as for the selection itself
@@ -1422,10 +1422,10 @@ export function App() {
               <MessageSquare />
               <span className="header-desktop-only">{t("Chat")}</span>
             </button>
-            <button type="button" aria-pressed={view === "terminal"} onClick={() => { setView("terminal"); setDrawerOpen(false); }} title={terminalAvailable ? t("Live terminal (⌘⇧J)") : t("Live terminal is unavailable on this bridge")}>
+            <button type="button" aria-pressed={view === "terminal"} onClick={() => { setView("terminal"); setDrawerOpen(false); }} title={terminalAttach ? t("Live terminal (⌘⇧J)") : t("Live terminal: coming to Windows PCs once herdr can attach there")}>
               <SquareTerminal />
               <span className="header-desktop-only">{t("Terminal")}</span>
-              {!terminalAvailable && <span className="pill pill-soon">{t("soon")}</span>}
+              {!terminalAttach && <span className="pill pill-soon">{t("soon")}</span>}
             </button>
           </div>
         )}
@@ -1512,7 +1512,7 @@ export function App() {
             const pane = active ? selectedPane : otherPane;
             const workspace = active ? selectedWorkspace : otherWorkspace;
             const slotSnapshot = active ? snapshot : otherMachine?.snapshot ?? null;
-            const attach = active ? terminalAvailable : otherAttach;
+            const attach = active ? terminalAttach : otherAttach;
             const lensOf = (item: HerdrPane): PaneView => active && item.pane_id === selectedPaneId ? view
               : storedView(lenses, viewPicks, item.pane_id, machineId, item.agent != null, attach);
             const slotView = active ? view : pane ? lensOf(pane) : "terminal";
@@ -1586,6 +1586,7 @@ export function App() {
                         // Wait for the roster before attaching: the loading placeholder is replaced
                         // by the keyed tile, and must never claim the pane on a throwaway connection.
                         paneId={item?.restore_error ? null : item?.pane_id ?? null}
+                        terminalId={item?.terminal_id ?? null}
                         mirrored={herdr ? herdr.terminal_attach === false || herdr.terminal_mirror === true : null}
                         restoreError={item?.restore_error ?? null}
                         agent={item?.agent ?? null}
@@ -1606,8 +1607,6 @@ export function App() {
                         findRequest={active && findRequest.paneId === item?.pane_id ? findRequest.serial : 0}
                         autoSelected={active ? autoSelected : true}
                         terminalFontSize={settings.terminalFontSize}
-                        terminalCursorStyle={settings.terminalCursorStyle}
-                        terminalCursorBlink={settings.terminalCursorBlink}
                         split={herdrSplit || splitOn}
                         terminalWheelSpeed={settings.terminalWheelSpeed}
                         terminalFontFamily={settings.terminalFontFamily}

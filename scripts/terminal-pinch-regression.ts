@@ -17,7 +17,7 @@ async function until(check: () => boolean | Promise<boolean>, label: string): Pr
   }
 }
 
-/** Real phone touch events: live font and badge, saved size on release, restore on cancel, shared grid unchanged. */
+/** Real phone touch events: live font and badge while pinching, one resize and saved size on release, restore on cancel. */
 export async function checkTerminalPinch(browser: Browser, origin: string, paneId: string): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
   await context.addInitScript(({ paneId }) => {
@@ -42,6 +42,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     const errors: string[] = [];
     let ready = false;
     let resizes = 0;
+    let lastResize: { cols: number; rows: number } | undefined;
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("websocket", (socket) => {
       socket.on("framereceived", ({ payload }) => {
@@ -52,6 +53,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
         const message = JSON.parse(String(payload));
         if (message.type === "resize") {
           resizes++;
+          lastResize = { cols: message.cols, rows: message.rows };
         }
       });
     });
@@ -129,6 +131,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     const w0 = (await probe()).wheels;
     await spreadTo(100, 154);
     await until(async () => (await probe()).fontPx === 20, "pinch out renders 20 px before release");
+    await until(async () => (await probe()).rows < baseline.rows, "pinch out refits fewer local rows before release");
     const moving = await probe();
     assert.equal(moving.transform, "", "pinch applies no inline transform to the terminal");
     assert.equal(moving.computedTransform, "none", "pinch leaves the terminal visually unscaled");
@@ -137,7 +140,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     assert.equal(await badge.textContent(), "20px", "badge shows the target font size during the 13 to 20 px pinch");
     assert.equal(resizes, r0, "pinch sends no resize frames before release");
     assert.equal(moving.wheels, w0, "pinch sends no wheel events");
-    assert.equal(moving.rows, baseline.rows, "a phone keeps the shared grid while changing its font");
+    assert(moving.rows < baseline.rows, "live larger font fits fewer rows than the baseline");
     await release();
     await until(async () => (await probe()).saved === 20, "pinch out commits and saves 20 px");
     const enlarged = await probe();
@@ -147,8 +150,8 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     await Bun.sleep(400);
     const settled = await probe();
     assert.equal(settled.saved, 20, "pinch out saves 20 px after settling");
-    assert.equal(resizes, r0, "pinch release keeps the shared PTY size");
-    assert.equal(settled.rows, baseline.rows, "saved font changes preserve the adopted grid");
+    assert.equal(resizes - r0, settled.focused ? 1 : 0, "release resizes once only when the terminal is in use");
+    if (resizes > r0) assert.equal(lastResize?.rows, settled.rows, "release resize rows match the live local grid");
     assert.equal(settled.wheels, w0, "release sends no wheel events");
     assert.equal(settled.scale, 1, "pinch leaves browser zoom unchanged");
 
@@ -161,7 +164,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     await Bun.sleep(400);
     const reduced = await probe();
     assert.equal(reduced.saved, 13, "pinch in saves 13 px after settling");
-    assert.equal(resizes, rBack, "pinch in release keeps the shared PTY size");
+    assert.equal(resizes - rBack, reduced.focused ? 1 : 0, "pinch in release resizes exactly once only when the terminal is in use");
     for (const [from, to, size] of [[100, 240, 22], [240, 60, 10], [100, 130, 13]] as const) {
       const rClamp = resizes;
       await spreadTo(from, to);
@@ -173,7 +176,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
       await Bun.sleep(400);
       const clamped = await probe();
       assert.equal(clamped.saved, size, `pinch ${from} to ${to} saves ${size} px after settling`);
-      assert.equal(resizes, rClamp, `pinch ${from} to ${to} keeps the shared PTY size`);
+      assert.equal(resizes - rClamp, clamped.focused ? 1 : 0, `pinch ${from} to ${to} release resizes exactly once only when the terminal is in use`);
     }
 
     const r1 = resizes;
@@ -218,7 +221,7 @@ export async function checkTerminalPinch(browser: Browser, origin: string, paneI
     await until(() => ready, "reloaded terminal must accept input");
     await until(async () => (await probe()).fontPx === 20, "saved font survives reload");
     assert.deepEqual(errors, [], "pinch regression has no page errors");
-    console.log("PASS terminal pinch: live font and badge, shared PTY size unchanged, clamps 10–22, cancel restores, no scroll during or after a pinch, kept after reload");
+    console.log("PASS terminal pinch: live font and badge while pinching, no resize until release, exactly one on release, clamps 10–22, cancel restores, no scroll during or after a pinch, kept after reload");
   } finally { await context.close(); }
 }
 

@@ -142,7 +142,6 @@ describe("demo transport", () => {
   /** Client frames the demo needs no case for, each with its reason; any other frame gets a case in site/demo/transport.ts. */
   const DEMO_IGNORES: Record<string, string> = {
     "pty-ack": "the demo has no output flow control to release; its switch's default branch drops it",
-    "scroll": "the demo has no native Herdr terminal controller to forward semantic wheel events to; its local fake history remains browser-owned",
   };
 
   it("answers every /api route the server handles", () => {

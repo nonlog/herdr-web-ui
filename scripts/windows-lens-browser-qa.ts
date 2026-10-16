@@ -1,76 +1,71 @@
-/** Real Herdr, two browsers: passive history must not mutate the shared pane. Run only after a CI build. */
-import { TEST_SESSION } from "./test-herdr.ts";
+/** What a PC without terminal attach (Windows, herdrdev/herdr#4821) looks like in the browser:
+ * the server answers as a Windows herdr would (`terminalAttach: false`) over a real pane of
+ * the test herdr, and the terminal lens shows that pane's screen, mirrored. A grid that is not
+ * the browser's own (a mirror's, an observer's) must pan to every cell on a small screen. Run after
+ * `bun run build`; UI_EVIDENCE_DIR saves screenshots. */
+import "./test-herdr.ts";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 import { createServer } from "../server/index.ts";
-import { herdrRpc, sessionSnapshot, paneRead, paneScrollInfo, paneSendKeys, paneSendText, workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
-import { PtySession } from "../server/pty/session.ts";
+import { workspaceCreate, workspaceClose } from "../server/herdr/client.ts";
 import { chromePath } from "./chrome-path.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-winlens-"));
 const evidence = process.env["UI_EVIDENCE_DIR"];
 if (evidence) mkdirSync(evidence, { recursive: true });
 const workspaces: string[] = [];
-const servers: Array<ReturnType<typeof createServer>> = [];
-const pages: Page[] = [];
-const errors: string[] = [];
+let server: ReturnType<typeof createServer> | undefined;
+let attachServer: ReturnType<typeof createServer> | undefined;
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
-let native: PtySession | undefined;
-type Frame = { type?: string; pane_id?: string; keep_size?: boolean; data?: string; keys?: string[] };
 
-async function until(done: () => Promise<boolean>, label: string, timeout = 15_000): Promise<void> {
+async function until(done: () => Promise<boolean>, label: string, timeout = 10_000): Promise<void> {
   const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) { if (await done()) return; await Bun.sleep(50); }
+  while (Date.now() < deadline) { if (await done()) return; await Bun.sleep(100); }
   throw new Error(`Timed out: ${label}`);
 }
-const screen = (page: Page) => page.locator(".pane-terminal .xterm-rows").innerText();
-const historyScreen = (page: Page) => page.locator(".pane-terminal-local-history .xterm-rows").innerText();
-const historyVisible = (page: Page) => page.locator(".pane-terminal-local-history:not([hidden])").count();
-const input = (page: Page) => page.locator(".pane-terminal .xterm-helper-textarea");
-function record(page: Page) {
-  pages.push(page);
-  const sent: Frame[] = []; const received: Frame[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.setDefaultTimeout(15_000);
-  page.on("websocket", (socket) => {
-    socket.on("framesent", ({ payload }) => { try { sent.push(JSON.parse(String(payload)) as Frame); } catch {} });
-    socket.on("framereceived", ({ payload }) => { try { received.push(JSON.parse(String(payload)) as Frame); } catch {} });
-  });
-  return { sent, received, ready: (pane: string) => until(async () => received.some((m) => m.type === "input-ready" && m.pane_id === pane), "this connection's input-ready") };
-}
-async function shell(page: Page, text: string): Promise<void> {
-  await input(page).focus(); await page.keyboard.type(text); await page.keyboard.press("Enter");
-}
-let sizeSequence = 0;
-async function size(paneId: string): Promise<string> {
-  const marker = `fork-size-${++sizeSequence}:`;
-  await paneSendText(paneId, `printf '${marker}'; stty size`); await paneSendKeys(paneId, ["Enter"]);
-  const regex = new RegExp(`${marker}(\\d+)\\s+(\\d+)`);
-  let result = "";
-  await until(async () => {
-    const text = (await paneRead({ paneId, source: "visible" })).text;
-    const match = regex.exec(text); if (match) result = match.slice(1).join("x");
-    return !!match;
-  }, "native PTY size");
-  return result;
-}
-const scrollOf = (page: Page) => page.locator(".pane-terminal").evaluate((host) => ({
-  left: host.scrollLeft, top: host.scrollTop, width: host.scrollWidth - host.clientWidth,
-  height: host.scrollHeight - host.clientHeight, adopted: host.hasAttribute("data-adopted-grid"),
-}));
+const screen = (page: Page) => page.locator(".xterm-rows").innerText();
+
+/** Where `text` sits against the terminal mount: each side's distance inside it, negative when cut off. */
+const inset = (page: Page, text: string) => page.evaluate((needle) => {
+  const host = document.querySelector(".pane-terminal");
+  const rows = host?.querySelector(".xterm-rows");
+  if (!host || !rows) return null;
+  const box = host.getBoundingClientRect();
+  const walker = document.createTreeWalker(rows, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+    const at = node.data.indexOf(needle);
+    if (at < 0) continue;
+    const range = document.createRange();
+    range.setStart(node, at);
+    range.setEnd(node, at + needle.length);
+    const rect = range.getBoundingClientRect();
+    return { left: rect.left - box.left, right: box.left + host.clientWidth - rect.right, top: rect.top - box.top, bottom: box.top + host.clientHeight - rect.bottom };
+  }
+  return null;
+}, text);
+const shown = (at: Awaited<ReturnType<typeof inset>>): boolean => at !== null && Math.min(at.left, at.right, at.top, at.bottom) > -1;
+const scrollOf = (page: Page) => page.evaluate(() => {
+  const host = document.querySelector(".pane-terminal")!;
+  return { left: host.scrollLeft, top: host.scrollTop, width: host.scrollWidth - host.clientWidth, height: host.scrollHeight - host.clientHeight, adopted: host.hasAttribute("data-adopted-grid") };
+});
+/** One finger dragged across the terminal, as real touch events (CDP), from the middle of the mount. */
 async function drag(page: Page, dx: number, dy: number): Promise<void> {
   const box = (await page.locator(".pane-terminal").boundingBox())!;
   const cdp = await page.context().newCDPSession(page);
-  const x = box.x + box.width / 2 - dx / 2, y = box.y + box.height / 2 - dy / 2;
+  const x = box.x + box.width / 2 - dx / 2;
+  const y = box.y + box.height / 2 - dy / 2;
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
   for (let step = 1; step <= 10; step++) await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x + dx * step / 10, y: y + dy * step / 10 }] });
-  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }); await cdp.detach();
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await cdp.detach();
 }
-async function wheel(page: Page, rows: number): Promise<void> {
-  await page.locator(".pane-terminal > .xterm").evaluate((term, rows) => term.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaMode: 1, deltaY: rows })), rows);
+/** Drags until `done`, a few times at most: one drag is shorter than a wide grid. */
+async function dragUntil(page: Page, dx: number, dy: number, done: () => Promise<boolean>, label: string): Promise<void> {
+  for (let tries = 0; tries < 8 && !(await done()); tries++) await drag(page, dx, dy);
+  assert.equal(await done(), true, label);
 }
 
 try {
@@ -78,252 +73,156 @@ try {
   const created = await workspaceCreate({ cwd, label: "herdr-web-ui-test-winlens" });
   workspaces.push(created.workspace.workspace_id);
   const paneId = created.root_pane.pane_id;
-  // A real native Herdr frontend in the isolated CI session, not another web
-  // controller. Its window is deliberately smaller than the desktop browser.
-  assert.ok(TEST_SESSION.includes("test") || process.env["CHECK_DIR"], "native frontend must use an isolated test session");
-  let nativeOutput = "";
-  native = new PtySession({ command: process.env["HERDR_WEB_HERDR_BIN"] || "herdr", args: ["--session", TEST_SESSION],
-    cols: 110, rows: 34, env: { HERDR_SOCKET_PATH: process.env["HERDR_SOCKET"]!, TERM: "xterm-256color" },
-    onData: data => { nativeOutput = (nativeOutput + data).slice(-262144); }, onExit: () => {} });
-  await until(async () => nativeOutput.length > 0, "native frontend connected");
-  await herdrRpc("workspace.focus", { workspace_id: created.workspace.workspace_id });
-  const nativeRect = async () => (await sessionSnapshot()).layouts.flatMap(layout => layout.panes).find(p => p.pane_id === paneId)!.rect;
-  await until(async () => { const rect = await nativeRect(); return rect.height > 0 && rect.height < 34 && rect.width <= 110; }, "native window lays out its pane");
-  const beforeBrowser = await nativeRect();
-  const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false }); servers.push(server);
+  server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false });
   const origin = `http://127.0.0.1:${server.port}`;
-  const health = await (await fetch(`${origin}/api/health`)).json() as { herdr: { terminal_attach?: boolean; terminal_mirror?: boolean; terminal_control?: boolean } };
-  assert.equal(health.herdr.terminal_attach, false, "native Windows uses the control stream rather than node-pty");
+  const health = await (await fetch(`${origin}/api/health`)).json() as { herdr: { terminal_attach?: boolean; terminal_mirror?: boolean } };
+  assert.deepEqual([health.herdr.terminal_attach, health.herdr.terminal_mirror], [false, true]);
   browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
-  const desktopContext = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
-  const desktop = await desktopContext.newPage(); const desktopWire = record(desktop);
-  await desktop.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`); await desktopWire.ready(paneId);
-  assert.equal((await paneScrollInfo(paneId))?.viewport_rows, beforeBrowser.height, "desktop browser cannot enlarge the native PTY and clip its bottom");
-  await desktop.setViewportSize({ width: 1500, height: 1000 });
-  await desktop.locator(".pane-terminal[data-adopted-grid]").waitFor();
-  await desktop.evaluate(() => window.dispatchEvent(new Event("focus")));
-  // fixed wait: confirm the native PTY dimensions never change after focus/resize debounce.
-  await Bun.sleep(300);
-  assert.equal((await paneScrollInfo(paneId))?.viewport_rows, beforeBrowser.height, "browser resize/focus keeps native geometry");
-  native.resize(100, 28);
-  await until(async () => (await nativeRect()).height < beforeBrowser.height, "native window becomes shorter");
-  await until(async () => (await paneScrollInfo(paneId))?.viewport_rows === (await nativeRect()).height, "control follows native resize, without locking the previous size");
-  await desktop.setViewportSize({ width: 1280, height: 800 });
-  await shell(desktop, "echo mirror-ok-$((40+2))");
-  await until(async () => (await screen(desktop)).includes("mirror-ok-42"), "typed input reaches Windows-style control transport");
-  const desktopGrid = await size(paneId);
-  await shell(desktop, "for i in $(seq 1 300); do printf '\\033[31mhistory-line-%04d\\033[0m\\r\\n' \"$i\"; done; echo isolation-live-$((200+42))");
-  await until(async () => (await screen(desktop)).includes("isolation-live-242"), "live fixture output");
-  const nativeScroll = await paneScrollInfo(paneId); assert.equal(nativeScroll?.offset_from_bottom, 0);
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.setDefaultTimeout(10_000);
+  await page.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
+  const terminal = page.getByRole("button", { name: /^Terminal/ });
+  await terminal.waitFor();
+  assert.equal(await terminal.getAttribute("aria-pressed"), "true", "a shell pane opens in the terminal lens");
+  assert.equal(await terminal.locator(".pill-soon").count(), 0, "no soon pill: the lens works");
+  assert.equal(await page.locator(".terminal-banner-soon").count(), 0);
+  // typed in the page, run by the pane's shell, read back from herdr's screen
+  await page.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type("echo mirror-ok-$((40+2))");
+  await page.keyboard.press("Enter");
+  await until(async () => (await screen(page)).includes("mirror-ok-42"), "the command's output reaches the mirrored terminal");
+  // colour survives: herdr's read keeps the escape sequences
+  await page.keyboard.type("printf '\\033[31mred-cell\\033[0m\\n'");
+  await page.keyboard.press("Enter");
+  await until(async () => await page.locator(".xterm-rows span[class*='xterm-fg-1']", { hasText: "red-cell" }).count() > 0, "a red cell is painted red");
+  if (evidence) await page.screenshot({ path: join(evidence, "windows-mirror-desktop.png") });
+  console.log("PASS the terminal lens of a PC without attach shows the pane's screen, typed input included");
 
-  // A native Herdr controller adopts the original desktop grid, even when the
-  // web viewport is shorter. A Claude-style TUI can paint a footer *below* its
-  // cursor. The old cursor follower kept snapping browser scrollTop back above
-  // that footer, while Instant local history swallowed all downward wheels.
-  await desktop.setViewportSize({ width: 1200, height: 345 });
-  await until(async () => (await scrollOf(desktop)).height > 90, "native grid overflows the short desktop web viewport");
-  await shell(desktop, `printf '\\033[2J\\033[Htop-of-screen-isolation-live-242\\033[${Math.max(8, beforeBrowser.height - 3)};1Hnative-footer-below-cursor\\033[2;1H'`);
-  await until(async () => (await screen(desktop)).includes("native-footer-below-cursor"), "footer below the active input row");
-  await desktop.getByRole("button", { name: "Application scroll", exact: true }).click();
-  await desktop.getByRole("button", { name: "Instant local history", exact: true }).waitFor();
-  // The shell's focused textarea may scroll the DOM mount to its lower edge;
-  // explicitly start at the top so this measures a downward gesture, not an
-  // already-bottomed scrollbar. This is still a per-browser-only scroll.
-  await desktop.locator(".pane-terminal").evaluate((host) => { host.scrollTop = 0; });
-  await until(async () => (await scrollOf(desktop)).top < 2, "browser viewport starts at its top edge");
-  const beforePan = await scrollOf(desktop);
-  const beforeSharedScrollCommands = desktopWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length;
-  console.log("QA adopted grid before down-wheel", beforePan);
-  await wheel(desktop, 14);
-  await until(async () => (await scrollOf(desktop)).top > beforePan.top + 30, "downward wheel pans an oversized native grid in local-history mode");
-  assert.equal(await historyVisible(desktop), 0, "panning the visible grid does not replace it with cached history");
-  await desktop.locator(".pane-terminal").evaluate((host) => { host.scrollTop = host.scrollHeight - host.clientHeight; });
-  await until(async () => (await scrollOf(desktop)).top >= (await scrollOf(desktop)).height - 2, "scrollbar reaches the terminal's actual bottom");
-  await desktop.getByRole("button", { name: "Back to live", exact: true }).waitFor();
-  const manual = await scrollOf(desktop);
-  await paneSendText(paneId, "printf '\\033[2;1Hlive-update-above-footer'"); await paneSendKeys(paneId, ["Enter"]);
-  await until(async () => (await screen(desktop)).includes("live-update-above-footer"), "fresh ANSI arrives while reading the lower rows");
-  // fixed wait: late cursor-follow logic must not undo manual scrolling.
-  await Bun.sleep(150);
-  assert.ok(Math.abs((await scrollOf(desktop)).top - manual.top) < 3, "incoming output preserves the user's scrollbar position instead of following a higher cursor");
-  assert.equal(desktopWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length, beforeSharedScrollCommands, "local panning adds no shared Herdr scroll or resize commands");
-  await desktop.getByRole("button", { name: "Back to live", exact: true }).click();
-  await until(async () => !(await desktop.getByRole("button", { name: "Back to live", exact: true }).count()), "follow-live resumes explicitly");
-  await desktop.getByRole("button", { name: "Instant local history", exact: true }).click();
-  await desktop.setViewportSize({ width: 1280, height: 800 });
-  console.log("PASS adopted native grid: down-wheel and scrollbar reach the footer, streaming keeps the manual viewport, Back to live resumes follow");
+  // the chat lens and back: the mirror is still there, and the grid is the pane's own
+  await page.getByRole("button", { name: /^Chat/ }).click();
+  await terminal.click();
+  await until(async () => (await screen(page)).includes("mirror-ok-42"), "the screen is back after a lens switch");
+  console.log("PASS the mirrored screen survives a lens switch");
 
-  const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" });
-  // Upstream now defaults phones to direct typing; this test explicitly exercises
-  // the input-line workflow and must not depend on a persisted user setting.
-  await phoneContext.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ terminalInputMode: "line" })));
-  const phone = await phoneContext.newPage(); const phoneWire = record(phone);
-  let delayed = false; let reads = 0;
-  await phone.route("**/api/pane/read?**", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.searchParams.get("source") === "recent" && url.searchParams.get("format") === "ansi") {
-      reads++;
-      // fixed wait: simulate a deliberately delayed history HTTP response to test request ordering.
-      if (delayed) await Bun.sleep(800);
-    }
-    await route.continue();
-  });
-  await phone.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`); await phoneWire.ready(paneId);
-  await until(async () => (await screen(phone)).includes("isolation-live-242"), "phone joins existing live screen");
-  await phone.locator('.pane-terminal[data-history-cache="ready"]').waitFor();
-  assert.equal((await scrollOf(phone)).adopted, true);
-  assert.ok(phoneWire.sent.some((m) => m.type === "attach" && m.keep_size === true));
-  assert.equal(phoneWire.sent.filter((m) => m.type === "resize").length, 0);
-  assert.equal((await paneScrollInfo(paneId))?.viewport_rows, nativeScroll?.viewport_rows);
+  // a screen that fills the pane: a line that ends in the grid's last column, and the prompt on its last row
+  await page.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type("for i in $(seq 1 60); do echo hist-$i; done; printf '%*s\\n' $COLUMNS right-edge");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("tail-marker");
+  await until(async () => /right-edge[\s\S]*tail-marker/.test(await screen(page)), "the full screen reaches the mirrored terminal");
 
-  // Add 800 ms to every subsequent history read. A warm-cache gesture must still paint promptly.
-  delayed = true;
-  const readsBefore = reads;
-  const elapsed = await phone.evaluate(async () => {
-    const overlay = document.querySelector<HTMLElement>(".pane-terminal-local-history")!;
-    const start = performance.now();
-    return await new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => { observer.disconnect(); reject(new Error("warm-cache scroll waited for network")); }, 600);
-      const observer = new MutationObserver(() => {
-        if (Number(overlay.dataset.offset) > 0 && !overlay.hidden) { clearTimeout(timer); observer.disconnect(); resolve(performance.now() - start); }
-      });
-      observer.observe(overlay, { attributes: true });
-      document.querySelector(".pane-terminal > .xterm")!.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -40, deltaMode: 1 }));
-    });
-  });
-  assert.ok(elapsed < 600, `warm-cache gesture painted in ${elapsed.toFixed(1)} ms with 800 ms network delay`);
-  assert.equal(reads, readsBefore, "cached scroll does not fetch before it can paint");
-  await until(async () => (await historyScreen(phone)).includes("history-line-"), "private history contains real old output");
-  assert.ok(await phone.locator('.pane-terminal-local-history .xterm-rows span[class*="xterm-fg-1"]').count() > 0, "history keeps ANSI red styling");
-  const paints = await phone.locator(".pane-terminal-local-history").getAttribute("data-paints");
-  for (let i = 0; i < 12; i++) await wheel(phone, -1);
-  assert.equal(await phone.locator(".pane-terminal-local-history").getAttribute("data-paints"), paints, "wheel bursts scroll existing rows rather than resetting/reparsing ANSI");
-  assert.equal((await paneScrollInfo(paneId))?.offset_from_bottom, 0);
-  assert.equal(phoneWire.sent.filter((m) => m.type === "scroll" || m.type === "resize").length, 0);
-  assert.ok((await screen(desktop)).includes("isolation-live-242"));
-  // xterm's DOM renderer paints on animation frames; the final wheel's viewport update is
-  // synchronous but its rows are not. Freeze only after that user gesture has been painted.
-  await phone.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-  const frozen = await historyScreen(phone);
-  await paneSendText(paneId, "echo still-live-$((600+7))"); await paneSendKeys(paneId, ["Enter"]);
-  await until(async () => (await screen(desktop)).includes("still-live-607"), "desktop remains live while phone reads history");
-  assert.equal(await historyScreen(phone), frozen, "incoming frames do not move a reading viewport");
-  await drag(phone, 0, 120);
-  assert.equal((await paneScrollInfo(paneId))?.offset_from_bottom, 0, "real touch does not move global history");
-  assert.equal(await phone.evaluate(() => {
-    const pane = document.querySelector(".pane-terminal")!.getBoundingClientRect();
-    const overlay = document.querySelector(".pane-terminal-local-history")!.getBoundingClientRect();
-    return Math.abs(pane.top - overlay.top) < 2 && Math.abs(pane.height - overlay.height) < 2;
-  }), true, "history overlay is pinned to the viewport, not its scrolled content");
-  if (evidence) { await phone.screenshot({ path: join(evidence, "phone-independent-history.png") }); await desktop.screenshot({ path: join(evidence, "desktop-still-live.png") }); }
-  await wheel(phone, 10_000);
-  await until(async () => (await historyVisible(phone)) === 0, "reverse scroll returns to live bottom");
-  await wheel(phone, -12); await until(async () => (await historyVisible(phone)) === 1, "history reopens");
-  const line = phone.getByRole("textbox", { name: "Terminal input line", exact: true });
-  await line.fill("echo phone-input-$((70+2))"); await line.press("Enter");
-  await until(async () => (await screen(desktop)).includes("phone-input-72"), "input from history reaches live program");
-  assert.equal(await historyVisible(phone), 0);
-  await phone.setViewportSize({ width: 390, height: 520 });
-  // fixed wait: keyboard-sized viewport must not resize the shared native grid after debounce.
-  await Bun.sleep(300);
-  assert.equal(phoneWire.sent.filter((m) => m.type === "resize").length, 0, "keyboard-sized viewport changes send no PTY resize");
-  assert.equal(await size(paneId), desktopGrid, "native PTY geometry is unchanged");
-  await phone.setViewportSize({ width: 390, height: 844 });
-  console.log(`PASS isolated touch history, ANSI, frozen viewport, input and geometry; cached gesture ${elapsed.toFixed(1)} ms with 800 ms artificial history latency`);
+  // #230: the grid is the pane's own, wider and taller than a phone. Every cell can be reached.
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const small = await phone.newPage();
+  small.on("pageerror", (error) => errors.push(error.message));
+  small.setDefaultTimeout(10_000);
+  await small.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
+  await until(async () => (await screen(small)).includes("tail-marker"), "a second, phone-sized viewer gets the current screen");
+  if (evidence) await small.screenshot({ path: join(evidence, "windows-mirror-phone.png") });
+  console.log("PASS a phone-sized second viewer sees the same screen");
+  await until(async () => shown(await inset(small, "tail-marker")), "the view opens on the rows with the prompt");
+  assert.equal(shown(await inset(small, "right-edge")), false, "the grid is wider than the phone");
+  await dragUntil(small, -300, 0, async () => shown(await inset(small, "right-edge")), "a drag to the left brings the last column in");
+  assert.equal(shown(await inset(small, "tail-marker")), false, "the prompt's start went out to the left");
+  if (evidence) await small.screenshot({ path: join(evidence, "windows-mirror-phone-panned-right.png") });
+  const right = await scrollOf(small);
+  assert.equal(Math.abs(right.left - right.width) <= 1, true, "panned to the grid's right edge");
+  await dragUntil(small, 300, 300, async () => { const at = await scrollOf(small); return at.left === 0 && at.top === 0; }, "a drag back reaches the first row and column");
+  if (evidence) await small.screenshot({ path: join(evidence, "windows-mirror-phone-panned-top.png") });
+  if (right.height > 0) assert.equal(shown(await inset(small, "tail-marker")), false, "at the top the last row is below the mount");
+  await dragUntil(small, 0, -300, async () => shown(await inset(small, "tail-marker")), "a drag up brings the last row back");
+  assert.equal(await small.evaluate(() => document.documentElement.scrollWidth <= innerWidth && scrollY === 0), true, "the page itself never scrolls");
+  console.log("PASS on a phone a drag pans a mirrored grid to its last column and its last row");
+  await phone.close();
 
-  // A Kitty-disambiguated TUI distinguishes the Escape key from a literal 0x1b.
-  // This reproduces the Pi/Claude/Codex Stop failure with a harmless test process,
-  // never an agent in the user's real session.
-  const kitty = join(root, "kitty.py");
-  writeFileSync(kitty, "import os,sys,termios,tty\nold=termios.tcgetattr(0)\ntty.setraw(0)\ntry:\n sys.stdout.write('\\x1b[>1uKITTY-READY\\r\\n');sys.stdout.flush()\n while True:\n  data=os.read(0,128)\n  sys.stdout.write('KITTY-BYTES:'+data.hex()+'\\r\\n');sys.stdout.flush()\n  if b'q' in data: break\nfinally:\n sys.stdout.write('\\x1b[<uKITTY-END\\r\\n');sys.stdout.flush();termios.tcsetattr(0,termios.TCSADRAIN,old)\n");
-  await shell(desktop, `python3 -u '${kitty}'`);
-  await until(async () => (await screen(desktop)).includes("KITTY-READY"), "Kitty keyboard mode is active in the isolated TUI");
-  const escSentAt = desktopWire.sent.length;
-  await input(desktop).press("Escape");
-  await until(async () => desktopWire.sent.slice(escSentAt).some((m) => m.type === "keys" && m.keys?.[0] === "esc"), "physical Escape is a semantic key");
-  await until(async () => (await screen(desktop)).includes("KITTY-BYTES:1b5b323775"), "Herdr encodes Escape according to Kitty protocol, rather than sending raw ESC");
-  await paneSendText(paneId, "q");
-  await until(async () => (await screen(desktop)).includes("KITTY-END"), "Kitty test process exits without interrupting an agent");
-  console.log("PASS Windows-style control delivers a semantic Escape to a Kitty-disambiguated TUI");
+  // a small desktop window: the wheel pans, and a scrollbar is there
+  const narrow = await browser.newContext({ viewport: { width: 700, height: 420 } });
+  const windowed = await narrow.newPage();
+  windowed.on("pageerror", (error) => errors.push(error.message));
+  await windowed.goto(`${origin}/?pane=${encodeURIComponent(paneId)}`);
+  await until(async () => shown(await inset(windowed, "tail-marker")), "a small window opens on the prompt's row");
+  await windowed.locator(".pane-terminal").hover();
+  await windowed.mouse.wheel(4000, 0);
+  await until(async () => shown(await inset(windowed, "right-edge")), "the wheel pans to the last column");
+  if (evidence) await windowed.screenshot({ path: join(evidence, "windows-mirror-small-window.png") });
+  await windowed.mouse.wheel(-4000, -4000);
+  await until(async () => { const at = await scrollOf(windowed); return at.left === 0 && at.top === 0; }, "the wheel pans back to the first cell");
+  console.log("PASS in a small desktop window the wheel pans a mirrored grid");
+  await narrow.close();
 
-  // Herdr's JSON ANSI bridge does not expose the application's mouse/alternate modes.
-  // Explicit Application scroll preserves TUI operation without guessing those modes.
-  const probe = join(root, "mouse.py");
-  writeFileSync(probe, "import os,sys,termios,tty\nold=termios.tcgetattr(0)\ntty.setraw(0)\ntry:\n sys.stdout.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006hTUI-READY\\r\\n');sys.stdout.flush()\n while True:\n  data=os.read(0,128)\n  if b'q' in data: break\n  sys.stdout.write('TUI-INPUT:'+data.hex()+'\\r\\n');sys.stdout.flush()\nfinally:\n sys.stdout.write('\\x1b[?1000l\\x1b[?1006l\\x1b[?1049l');sys.stdout.flush();termios.tcsetattr(0,termios.TCSADRAIN,old)\n");
-  await shell(desktop, `python3 -u '${probe}'`);
-  await until(async () => (await screen(phone)).includes("TUI-READY"), "mouse-aware alternate-screen application starts");
-  await phone.getByRole("button", { name: "Instant local history", exact: true }).click();
-  const beforeTui = phoneWire.sent.length;
-  await wheel(phone, -3);
-  await until(async () => phoneWire.sent.slice(beforeTui).some((m) => m.type === "scroll"), "Application mode forwards semantic wheel");
-  await until(async () => (await screen(desktop)).includes("TUI-INPUT:"), "running TUI receives mouse wheel input");
-  assert.equal(await historyVisible(phone), 0);
-  await paneSendText(paneId, "q");
-  await phoneContext.close();
-  console.log("PASS explicit application scrolling keeps mouse/alternate TUI interaction");
-  native.kill(); await native.exited; native = undefined;
-
-  // Direct attach uses a transport-owned alternate buffer even for a plain shell.
-  // Local history must still work, and observer two-axis panning must stay intact.
-  const second = await workspaceCreate({ cwd, label: "herdr-web-ui-test-direct-history" }); workspaces.push(second.workspace.workspace_id);
+  // A herdr that attaches: an interact client's grid is its own and fits, so nothing pans and a
+  // vertical drag still scrolls herdr's history. An observer adopts the operator's grid and pans it.
+  const second = await workspaceCreate({ cwd, label: "herdr-web-ui-test-winlens-attach" });
+  workspaces.push(second.workspace.workspace_id);
   const attached = second.root_pane.pane_id;
-  const directServer = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "direct") }); servers.push(directServer);
-  const directOrigin = `http://127.0.0.1:${directServer.port}`;
-  const own = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" });
+  attachServer = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state-attach") });
+  const attachOrigin = `http://127.0.0.1:${attachServer.port}`;
+  const own = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   await own.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ terminalInputMode: "line" })));
-  const mine = await own.newPage(); const mineWire = record(mine);
-  await mine.goto(`${directOrigin}/?pane=${encodeURIComponent(attached)}`); await mineWire.ready(attached);
-  const mineLine = mine.getByRole("textbox", { name: "Terminal input line", exact: true });
-  await mineLine.fill("for i in $(seq 1 200); do echo direct-$i; done"); await mineLine.press("Enter");
-  await until(async () => (await screen(mine)).includes("direct-200"), "direct attach receives input/output");
-  // Initial prefetch can precede fixture output; returning to live refreshes it on the bounded timer.
-  // fixed wait: exercise the prefetch refresh interval when the initial snapshot predates fixture output.
-  await Bun.sleep(1800); await mine.locator('.pane-terminal[data-history-cache="ready"]').waitFor();
-  await drag(mine, 0, 160);
-  await until(async () => (await historyVisible(mine)) === 1 && (await historyScreen(mine)).includes("direct-"), "direct transport also uses private history");
-  assert.equal((await paneScrollInfo(attached))?.offset_from_bottom, 0);
-  assert.equal(mineWire.sent.filter((m) => m.type === "resize").length, 0);
+  const mine = await own.newPage();
+  mine.on("pageerror", (error) => errors.push(error.message));
+  mine.setDefaultTimeout(10_000);
+  await mine.goto(`${attachOrigin}/?pane=${encodeURIComponent(attached)}`);
+  const line = mine.getByRole("textbox", { name: "Terminal input line", exact: true });
+  await line.fill("for i in $(seq 1 200); do echo hist-$i; done");
+  await line.press("Enter");
+  await until(async () => (await screen(mine)).includes("hist-200"), "the attached pane's output");
+  const fitted = await scrollOf(mine);
+  assert.deepEqual([fitted.adopted, fitted.width, fitted.height], [false, 0, 0], "a grid of this browser's own fits: nothing to pan");
+  assert.equal(await mine.locator(".pane-terminal").evaluate((host) => getComputedStyle(host).overflow), "hidden");
+  await dragUntil(mine, 0, 300, async () => !(await screen(mine)).includes("hist-200"), "a drag down still scrolls herdr's history");
+  assert.deepEqual(await scrollOf(mine), fitted, "and pans nothing");
+  if (evidence) await mine.screenshot({ path: join(evidence, "attach-phone-history.png") });
+  console.log("PASS a phone's own grid fits as before, and a drag scrolls herdr's history");
   await own.close();
 
-  const operator = await desktopContext.newPage(); const operatorWire = record(operator);
-  await operator.goto(`${directOrigin}/?pane=${encodeURIComponent(attached)}`); await operatorWire.ready(attached);
-  await shell(operator, "for i in $(seq 1 80); do echo row-$i; done; printf '%*s\\r\\n' $COLUMNS right-edge");
-  await until(async () => (await screen(operator)).includes("right-edge"), "wide operator screen");
-  const watch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" });
-  const observer = await watch.newPage(); const observerWire = record(observer);
+  const operator = await context.newPage();
+  operator.on("pageerror", (error) => errors.push(error.message));
+  await operator.goto(`${attachOrigin}/?pane=${encodeURIComponent(attached)}`);
+  // typed before the terminal is attached, it would be held as a draft
+  await operator.locator(".conn-live").waitFor();
+  await until(async () => (await screen(operator)).includes("hist-"), "the operator's terminal is attached");
+  await operator.locator(".xterm-helper-textarea").focus();
+  await operator.keyboard.type("clear; for i in $(seq 1 60); do echo hist-$i; done; printf '%*s\\n' $COLUMNS right-edge");
+  await operator.keyboard.press("Enter");
+  await until(async () => (await screen(operator)).includes("right-edge"), "the operator's screen");
+  const watch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const observer = await watch.newPage();
+  observer.on("pageerror", (error) => errors.push(error.message));
+  observer.setDefaultTimeout(10_000);
+  // the app has no control for the role: the role frame its socket opens with is sent as an observer's
   await observer.routeWebSocket(/\/ws(\?|$)/, (socket) => {
     const upstream = socket.connectToServer();
     socket.onMessage((message) => {
-      const role = typeof message === "string" && (JSON.parse(message) as Frame).type === "role";
+      const role = typeof message === "string" && (JSON.parse(message) as { type?: string }).type === "role";
       upstream.send(role ? JSON.stringify({ type: "role", mode: "observe" }) : message);
     });
   });
-  await observer.goto(`${directOrigin}/?pane=${encodeURIComponent(attached)}`);
+  await observer.goto(`${attachOrigin}/?pane=${encodeURIComponent(attached)}`);
   await observer.locator(".terminal-banner-observe").waitFor();
-  await until(async () => observerWire.received.some((m) => m.type === "pty-data" && m.pane_id === attached), "observer receives replay");
-  const geometryIndex = observerWire.received.findIndex((m) => m.type === "pane-geometry" && m.pane_id === attached);
-  const replayIndex = observerWire.received.findIndex((m) => m.type === "pty-data" && m.pane_id === attached);
-  assert.ok(geometryIndex >= 0 && geometryIndex < replayIndex, "shared geometry must precede ANSI replay, or the observer permanently clips wide rows");
-  await until(async () => (await screen(observer)).includes("right-edge"), "observer receives operator grid");
-  assert.equal((await scrollOf(observer)).adopted, true);
-  await drag(observer, -220, 0); assert.ok((await scrollOf(observer)).left > 0, "observer pans horizontally");
-  await drag(observer, 220, 160);
-  assert.equal(await historyVisible(observer), 0, "observer drag remains grid panning, not history control");
-  assert.equal((await paneScrollInfo(attached))?.offset_from_bottom, 0);
-  console.log("PASS direct-attach local history and observer panning");
+  await until(async () => (await screen(observer)).includes("right-edge"), "the observer gets the operator's screen");
+  await until(async () => (await scrollOf(observer)).adopted, "the observer's mount pans");
+  if (evidence) await observer.screenshot({ path: join(evidence, "observe-phone.png") });
+  // the cursor's row (the operator's prompt) is what the view opens on
+  await until(() => observer.locator(".xterm-cursor").first().evaluate((cursor) => {
+    const host = document.querySelector(".pane-terminal")!.getBoundingClientRect();
+    const at = cursor.getBoundingClientRect();
+    return at.top >= host.top - 1 && at.bottom <= host.bottom + 1;
+  }), "an observer's view opens on the cursor's row");
+  assert.equal(shown(await inset(observer, "right-edge")), false, "the operator's grid is wider than the phone");
+  await dragUntil(observer, -300, 0, async () => shown(await inset(observer, "right-edge")), "an observer pans to the operator's last column");
+  if (evidence) await observer.screenshot({ path: join(evidence, "observe-phone-panned-right.png") });
+  await dragUntil(observer, 300, 300, async () => { const at = await scrollOf(observer); return at.left === 0 && at.top === 0; }, "and back to the first cell");
+  console.log("PASS an observer on a phone pans the operator's grid");
+  await watch.close();
   assert.deepEqual(errors, []);
-} catch (error) {
-  for (const page of pages.filter((p) => !p.isClosed())) {
-    console.error("QA page", page.url(), "live:", (await screen(page).catch(() => "unavailable")).slice(-1200));
-    console.error("QA history", await page.locator(".pane-terminal-local-history").evaluate((node) => ({ hidden: (node as HTMLElement).hidden, data: (node as HTMLElement).dataset })).catch(() => null));
-  }
-  console.error("QA pageerrors", errors);
-  throw error;
 } finally {
   await browser?.close();
-  native?.kill();
-  await native?.exited;
-  for (const server of servers) server.stop();
-  for (const id of workspaces) await workspaceClose(id).catch(() => undefined);
+  server?.stop();
+  attachServer?.stop();
+  for (const id of workspaces) await workspaceClose(id);
   rmSync(root, { recursive: true, force: true });
 }

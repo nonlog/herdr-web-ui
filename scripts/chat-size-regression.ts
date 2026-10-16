@@ -129,8 +129,7 @@ const attached = (page: Page, nth = 1) => page.waitForFunction((count) => (windo
 /**
  * The chat lens leaves the shared terminal's size alone (#361): a desktop tab drives a pane's grid
  * from its terminal lens, a phone opens the same pane in the chat lens, and the program in the pane
- * still sees the desktop's size. Switching the phone to its terminal lens must not reflow the
- * shared pane either: it adopts the existing desktop grid and scrolls history independently.
+ * still sees the desktop's size. Switching the phone to its terminal lens fits the grid to the phone.
  * The size is the one the pane's own shell reports (`stty size`), not what either browser thinks.
  */
 export async function checkChatKeepsTerminalSize(browser: Browser, origin: string): Promise<void> {
@@ -163,42 +162,79 @@ export async function checkChatKeepsTerminalSize(browser: Browser, origin: strin
     if (process.env.UI_EVIDENCE_DIR) await desktop.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "chat-size-desktop.png") });
     console.log(`PASS a phone's chat lens leaves the shared grid at the desktop's ${desktopSize}`);
 
-    // Terminal and chat lenses now both preserve the native grid on a touch device.
-    // On a phone the lens switch shows no label: the button is known by its title.
+    // the phone's terminal lens fits the grid to the phone: the shell sees it change
+    // on a phone the lens switch shows no label: the button is known by its title
     await phone.locator('button[title^="Live terminal"]').tap();
-    await phone.locator(".terminal-stack:not(.is-chat)").waitFor({ state: "attached" });
-    await phone.locator(".pane-terminal[data-adopted-grid]").waitFor({ state: "attached" });
-    // fixed wait: reject a delayed native resize after the phone observer settles.
-    await Bun.sleep(NO_RESIZE_WAIT_MS);
-    assert.deepEqual(await sent(phone), [{ dir: "out", type: "attach", keep_size: true }], "the phone's terminal lens does not send resize");
-    assert.equal(await size(), desktopSize, "the phone's terminal lens preserves the desktop grid");
-    console.log(`PASS both phone lenses leave the shared grid at ${desktopSize}`);
+    await phone.waitForFunction(() => (window as unknown as { frames_: { dir: string; type: string }[] }).frames_.some((f) => f.dir === "out" && f.type === "resize"), undefined, { timeout: 10_000 });
+    const deadline = Date.now() + 10_000;
+    let phoneSize = desktopSize;
+    while (phoneSize === desktopSize && Date.now() < deadline) phoneSize = await size();
+    assert.notEqual(phoneSize, desktopSize, "the phone's terminal lens fits the grid to the phone");
+    assert.ok(Number(phoneSize.split(" ")[1]) < Number(desktopSize.split(" ")[1]), `phone ${phoneSize} narrower than desktop ${desktopSize}`);
+    console.log(`PASS the phone's terminal lens fits the grid to ${phoneSize}`);
 
-    // A visible but unfocused desktop must not release its native grid simply
-    // because the phone was brought to the foreground.
+    // Regression (#1085): a window blur is not a hidden terminal. Its grid must remain
+    // eligible when the phone leaves the terminal, without changing blur's reconnect policy.
     const blurMark = (await framesOf(desktop)).length;
     await phone.bringToFront();
     await desktop.evaluate(() => {
-      if (document.visibilityState !== "visible") throw new Error("desktop must remain visible");
+      if (document.visibilityState !== "visible") throw new Error("desktop must stay visible");
+      // Headless contexts each retain focus; model the OS window blur without hiding the page.
       Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
       window.dispatchEvent(new Event("blur"));
     });
     assert.equal((await framesOf(desktop)).slice(blurMark)
-      .filter((frame) => frame.dir === "out" && frame.type === "release-size").length, 0,
-      "a visible unfocused desktop does not release its native grid");
+      .filter((f) => f.dir === "out" && f.type === "release-size").length, 0,
+    "a visible desktop blur does not release its grid");
+    await desktop.evaluate(([rows, cols]) => {
+      const socket = (window as unknown as { socket_: WebSocket }).socket_;
+      let finish: (time: number) => void;
+      // A deadline resolves to Infinity so a late delivery fails without an unhandled rejection.
+      const restored = new Promise<number>((resolve) => { finish = resolve; });
+      Object.assign(window, { gridRestored_: restored });
+      const timer = window.setTimeout(() => {
+        socket.removeEventListener("message", receive);
+        finish(Infinity);
+      }, 5_000);
+      function receive(event: MessageEvent): void {
+        const frame = JSON.parse(String(event.data));
+        if (frame.type !== "pane-geometry" || frame.rows !== rows || frame.cols !== cols) return;
+        window.clearTimeout(timer);
+        socket.removeEventListener("message", receive);
+        finish(Date.now());
+      }
+      socket.addEventListener("message", receive);
+    }, desktopSize.split(" ").map(Number));
+    const chatAt = Date.now();
+    await phone.locator('button[title^="Chat transcript"]').tap();
+    const restoredAt = await desktop.evaluate(() => (window as unknown as { gridRestored_: Promise<number> }).gridRestored_);
+    assert.ok(restoredAt - chatAt <= 1_000, "phone Chat restores the visible desktop grid within 1 s");
+    // pane-geometry announces the resize before the sidecar applies it to herdr's pty.
+    // Read shell replies within the same 1 s budget, rather than racing the sidecar once.
+    let restoredSize = "";
+    while (Date.now() < chatAt + 1_000 && restoredSize !== desktopSize) restoredSize = await size();
+    assert.equal(restoredSize, desktopSize, "the unfocused desktop's grid is restored in the real pty");
+    assert.ok(Date.now() - chatAt <= 1_000, "the real pty restores the desktop grid within 1 s");
+    console.log(`PASS phone Chat restores the visible unfocused desktop's ${desktopSize}`);
+    await phone.locator('button[title^="Live terminal"]').tap();
+    let reclaimedSize = "";
+    const reclaimDeadline = Date.now() + 10_000;
+    while (Date.now() < reclaimDeadline && reclaimedSize !== phoneSize) reclaimedSize = await size();
+    assert.equal(reclaimedSize, phoneSize, "returning to the phone terminal still reclaims its grid");
 
-    // The desktop still owns its normal terminal grid; switching to chat must adopt the same
-    // grid without resizing it. xterm's DOM renderer keeps one element per row.
+    // the desktop's terminal lens ignored that resize: it drives the grid itself. Entering the chat
+    // lens, its hidden screen takes the grid the pty has now, since what the chat reads there (a
+    // masked prompt) is drawn for the phone's grid. xterm's DOM renderer keeps one element a row.
     const hiddenRows = () => desktop.locator(".pane-terminal .xterm-rows > div").count();
-    const desktopRows = Number(desktopSize.split(" ")[0]);
-    assert.equal(await hiddenRows(), desktopRows, "the desktop's terminal grid remains intact");
+    const phoneRows = Number(phoneSize.split(" ")[0]);
+    assert.notEqual(await hiddenRows(), phoneRows, "the desktop's terminal lens kept its own grid");
     await desktop.getByTitle("Chat transcript (⌘⇧J)", { exact: true }).click();
     await desktop.locator(".terminal-stack.is-chat").waitFor({ state: "attached" });
     const adopted = Date.now() + 10_000;
-    while (await hiddenRows() !== desktopRows && Date.now() < adopted) await Bun.sleep(100);
-    assert.equal(await hiddenRows(), desktopRows, "the desktop's chat lens keeps the shared row count");
-    assert.equal(await size(), desktopSize, "entering the desktop chat lens resizes nothing");
-    console.log(`PASS the desktop's chat lens preserves the native grid of ${desktopSize}`);
+    while (await hiddenRows() !== phoneRows && Date.now() < adopted) await Bun.sleep(100);
+    assert.equal(await hiddenRows(), phoneRows, "the desktop's chat lens draws its hidden screen for the shared grid");
+    assert.equal(await size(), phoneSize, "entering the chat lens resizes nothing");
+    console.log(`PASS the desktop's chat lens draws its hidden screen for the shared grid of ${phoneSize}`);
   } finally {
     for (const context of contexts) await context.close();
     await workspaceClose(created.workspace.workspace_id).catch(() => undefined);
@@ -243,11 +279,9 @@ export async function checkPaneSwitchKeepsTerminalSize(browser: Browser, origin:
     await other.locator(".terminal-stack.is-chat").waitFor({ state: "attached" });
     await attached(other, 2);
     // a resize that should not happen gets this long to show up: the grid's ResizeObserver waits 120 ms
-    // fixed wait: assert that no delayed reattachment changes the shared grid.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     const sent = (await framesOf(other)).slice(before).filter((f) => f.dir === "out" && (f.type === "attach" || f.type === "resize"));
-    assert.deepEqual(sent, [{ dir: "out", type: "attach", keep_size: true }],
-      "the picked pane attaches exactly once, adopting the shared grid without resizing it");
+    assert.deepEqual(sent, [{ dir: "out", type: "attach", keep_size: true }], "the picked pane attaches in its own lens");
     assert.equal(await size(), desktopSize, "picking a chat-lens pane leaves the desktop's grid");
     console.log(`PASS picking a chat-lens pane from a terminal-lens pane leaves the shared grid at ${desktopSize}`);
   } finally {
@@ -351,10 +385,10 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
     const desktopSize = await size();
     const phone = await open({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     await attached(phone);
-    // The fork's mobile terminal is always a keep-size observer: the desktop
-    // owns this Unix PTY, and phone viewport/font changes never resize it.
-    const phoneSize = await size();
-    assert.equal(phoneSize, desktopSize, "the phone's terminal lens adopts the existing grid without resizing");
+    const deadline = Date.now() + 10_000;
+    let phoneSize = desktopSize;
+    while (phoneSize === desktopSize && Date.now() < deadline) phoneSize = await size();
+    assert.notEqual(phoneSize, desktopSize, "the phone's terminal lens fits the grid to the phone");
 
     // the desktop's window turns visible behind another app: shown, without the focus
     const shown = (await sizing(desktop)).length;
@@ -362,7 +396,6 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
       Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    // fixed wait: absence of resize must survive the native 120 ms observer debounce.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     assert.deepEqual((await sizing(desktop)).slice(shown), [], "a window shown without the focus sends no resize");
     assert.equal(await size(), phoneSize, "a window shown without the focus leaves the phone's grid");
@@ -380,7 +413,6 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
     const snapshots = (await framesOf(desktop)).filter((f) => f.dir === "in" && f.type === "snapshot").length;
     await desktop.evaluate(() => (window as unknown as { socket_: WebSocket }).socket_.close());
     await desktop.waitForFunction((count) => (window as unknown as { frames_: { dir: string; type: string }[] }).frames_.filter((f) => f.dir === "in" && f.type === "snapshot").length > count, snapshots, { timeout: 15_000 });
-    // fixed wait: a background reconnect must remain non-sizing through its settle window.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     assert.deepEqual((await sizing(desktop)).slice(reconnecting), [], "a background reconnect attaches nothing");
     assert.equal(await size(), phoneSize, "a background reconnect leaves the phone's grid");
@@ -424,7 +456,6 @@ export async function checkBackgroundTabKeepsTerminalSize(browser: Browser, orig
     const watchesBeforeSwitch = (await framesOf(desktop)).filter((frame) => frame.dir === "out" && frame.type === "watch").length;
     await workspaceClose(created.workspace.workspace_id);
     await desktop.locator(`.terminal-stack[data-pane-owner="${nextPane}"]`).waitFor({ state: "attached", timeout: 15_000 });
-    // fixed wait: watch for a forbidden resize after the pane switch debounce.
     await Bun.sleep(NO_RESIZE_WAIT_MS);
     assert.deepEqual((await sizing(desktop)).slice(switching), [], "a background move to the next pane attaches nothing");
     assert.equal(await nextSize(), nextBefore, "a background move to the next pane leaves its grid");
@@ -1002,8 +1033,7 @@ if (import.meta.main) {
 
 /**
  * A window that keeps its focus gets no focus event when another device sized the pane meanwhile
- * (another desktop used beside a PC left in front): a click or a key takes the pane back.
- * Touch clients retain the shared grid instead of becoming resize owners.
+ * (a phone used beside a PC left in front): a click or a key in its terminal takes the pane back.
  */
 export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, origin: string): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-reclaim-size-"));
@@ -1039,33 +1069,28 @@ export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, o
     await sizeBecomes(desktopSize, "the desktop took the pane at its own size");
     const phone = await openRecording(browser, contexts, origin, paneId, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }, { ...settings, terminalInputMode: "line" }, false, inFront);
     await attached(phone);
-    await sizeBecomes(desktopSize, "the phone keeps the desktop's shared grid");
-    assert.equal((await framesOf(phone)).filter((frame) => frame.dir === "out" && frame.type === "resize").length, 0, "the phone sends no resize");
+    const phoneSize = await askedGrid(phone);
+    await sizeBecomes(phoneSize, "the phone took the pane at its own size");
 
     await desktop.locator(".xterm").click();
     await sizeBecomes(desktopSize, "a click in the desktop terminal");
     await phone.locator(".xterm").tap();
-    await sizeBecomes(desktopSize, "a tap in the phone terminal preserves the shared grid");
-    const other = await openRecording(browser, contexts, origin, paneId, { viewport: { width: 1000, height: 600 } }, settings, false, inFront);
-    await attached(other);
-    const otherSize = await askedGrid(other);
-    await sizeBecomes(otherSize, "another desktop took the pane at its own size");
-    // A right-click opens the menu without taking the pane back from that desktop.
+    await sizeBecomes(phoneSize, "a tap in the phone terminal");
+    // a right-click is for the pane menu, not the user taking the pane: the grid stays the phone's
     await desktop.locator(".xterm").click({ button: "right" });
-    // fixed wait: the context menu must not cause a late PTY resize.
     await Bun.sleep(500);
-    assert.equal(await size(), otherSize, "a right-click leaves the pane at the other desktop's size");
+    assert.equal(await size(), phoneSize, "a right-click in the desktop terminal leaves the pane at the phone's size");
     // Escape closes the menu where one opened; in the terminal it is a key like any other
     await desktop.keyboard.press("Escape");
     await desktop.keyboard.press("Shift");
     await sizeBecomes(desktopSize, "a key in the desktop terminal");
     console.log("PASS a window that kept its focus takes the pane back on a click or a key in its terminal");
 
-    // Upstream's input-ownership handoff is correct for a direct-attach phone,
-    // but this fork's passive phone lens must keep the desktop's shared grid.
-    // Text, Enter and key-bar controls must still reach the application.
+    // The phone's own input sits outside its grid: the input line, its Send and Enter and the key
+    // bar. Each takes the pane back to the phone's grid, and the resize goes out before what it sends.
+    const [phoneRows, phoneCols] = phoneSize.split(" ").map(Number);
     const outFrom = async (page: Page, from: number) => (await framesOf(page)).slice(from).filter((f) => f.dir === "out");
-    const inputWithoutResize = async (what: string, from: number, sends: readonly string[]) => {
+    const resizedBefore = async (what: string, from: number, sends: readonly string[]) => {
       const deadline = Date.now() + 10_000;
       let out: Frame[] = [];
       while (Date.now() < deadline) {
@@ -1075,42 +1100,41 @@ export async function checkFocusedWindowReclaimsTerminalSize(browser: Browser, o
       }
       const sent = out.findIndex((f) => sends.includes(f.type));
       assert.ok(sent >= 0, `${what}: the phone sent none of ${sends.join("/")}: ${JSON.stringify(out)}`);
-      // fixed wait: a delayed native resize is forbidden after this input.
-      await Bun.sleep(NO_RESIZE_WAIT_MS);
-      out = await outFrom(phone, from);
-      assert.equal(out.filter((f) => f.type === "resize").length, 0,
-        `${what}: phone controls never take over the desktop's grid: ${JSON.stringify(out)}`);
-      await sizeBecomes(desktopSize, what);
+      const resized = out.findIndex((f) => f.type === "resize" && f.cols === phoneCols && f.rows === phoneRows);
+      assert.ok(resized >= 0 && resized < sent, `${what}: the phone's own grid goes out before its input: ${JSON.stringify(out)}`);
+      await sizeBecomes(phoneSize, what);
     };
-    // Tapping the line does not resize the shared grid before any input is sent.
+    // focus into the line: a tap there is the user on the phone, before a key is typed
     let mark = (await framesOf(phone)).length;
     await phone.locator(".terminal-input-text").tap();
-    // fixed wait: focus-triggered native resize uses a delayed layout observer.
-    await Bun.sleep(NO_RESIZE_WAIT_MS);
-    assert.equal((await outFrom(phone, mark)).filter((f) => f.type === "resize").length, 0,
-      "tapping the phone input line cannot resize the desktop's grid");
-    await sizeBecomes(desktopSize, "a tap into the phone input line");
+    const focusDeadline = Date.now() + 10_000;
+    while (Date.now() < focusDeadline) {
+      if ((await outFrom(phone, mark)).some((f) => f.type === "resize")) break;
+      await Bun.sleep(50);
+    }
+    assert.ok((await outFrom(phone, mark)).some((f) => f.type === "resize" && f.cols === phoneCols && f.rows === phoneRows), "a tap into the input line takes the pane back to the phone's grid");
+    await sizeBecomes(phoneSize, "a tap into the input line");
     // the line keeps its focus from here on: no focus event helps the steps below
     await desktop.keyboard.press("Shift");
     await sizeBecomes(desktopSize, "a key in the desktop terminal, the phone's line focused");
     await phone.keyboard.type("true");
     mark = (await framesOf(phone)).length;
     await phone.keyboard.press("Enter");
-    // the line's Enter follows its text after the server's gap, without resizing.
+    // the line's Enter follows its text after the server's gap: the size is asked once the line is in
     await phone.waitForFunction(() => (document.querySelector(".terminal-input-text") as HTMLTextAreaElement | null)?.value === "", undefined, { timeout: 10_000 });
-    await inputWithoutResize("a line sent from the phone's input line", mark, ["submit", "input"]);
+    await resizedBefore("a line sent from the phone's input line", mark, ["submit", "input"]);
     await desktop.keyboard.press("Shift");
     await sizeBecomes(desktopSize, "a key in the desktop terminal, before the key bar");
     mark = (await framesOf(phone)).length;
     // Ctrl+C, not Esc: the shell would read Esc and the size command's first letter as one Meta key
     await phone.locator(".key-bar").getByRole("button", { name: "Control C" }).tap();
-    await inputWithoutResize("a key-bar tap on the phone", mark, ["input", "keys"]);
+    await resizedBefore("a key-bar tap on the phone", mark, ["input", "keys"]);
     await desktop.keyboard.press("Shift");
     await sizeBecomes(desktopSize, "a key in the desktop terminal, before the empty line's Enter");
     mark = (await framesOf(phone)).length;
     await phone.locator(".terminal-input-send").tap();
-    await inputWithoutResize("Enter from the phone's empty input line", mark, ["input", "keys"]);
-    console.log("PASS phone input line, Enter and key bar send without taking the desktop's PTY grid");
+    await resizedBefore("Enter from the phone's empty input line", mark, ["input", "keys"]);
+    console.log("PASS the phone's input line, its Enter and the key bar take the pane back before they send");
   } finally {
     for (const context of contexts) await context.close().catch(() => undefined);
     if (workspace) await workspaceClose(workspace).catch(() => undefined);

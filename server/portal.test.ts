@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PortalStatus } from "../shared/protocol.ts";
-import { atLeast, handlePortalRequest, parseDarwinArgv, PortalService, readyUrl, relayOrigin } from "./portal.ts";
+import { atLeast, handlePortalRequest, PortalService, readyUrl, relayOrigin } from "./portal.ts";
 
 /**
  * The service runs a stand-in portal here, a shell script, and asks a relay through an injected
@@ -26,7 +26,7 @@ interface StandIn {
 
 /** A portal whose `expose` prints `says`, then the ready line unless `ready` is false, and runs until stopped. */
 function standIn(options: { version?: string; ready?: boolean; says?: string; ignoreTerm?: boolean; exitAfter?: boolean } = {}): StandIn {
-  const dir = mkdtempSync(join(root, "bin with spaces-"));
+  const dir = mkdtempSync(join(root, "bin-"));
   const path = join(dir, "portal");
   const seen = join(dir, "seen");
   const pids = join(dir, "pids");
@@ -147,19 +147,6 @@ describe("what Portal is given and says", () => {
     expect(atLeast("v2.10.0", "v2.6.1")).toBe(true);
     expect(atLeast("v2.6.0", "v2.6.1")).toBe(false);
     expect(atLeast("devel", "v2.6.1")).toBe(false);
-  });
-
-  it("preserves Darwin argv boundaries and excludes the process environment", () => {
-    const argv = ["/Applications/My Tools/portal", "expose", "", "--identity-path", "/Users/test/a 'quoted' \\ path/identity.json", "\uFEFFexpose", "\uFEFF--identity-path"];
-    const body = new TextEncoder().encode(`/bin/portal\0\0\0${argv.join("\0")}\0TOKEN=not-an-argument\0`);
-    const bytes = new Uint8Array(4 + body.length);
-    new DataView(bytes.buffer).setInt32(0, argv.length, true);
-    bytes.set(body, 4);
-    expect(parseDarwinArgv(bytes)).toEqual(argv);
-    expect(parseDarwinArgv(bytes.subarray(0, bytes.indexOf(0, 20)))).toBeNull();
-    expect(parseDarwinArgv(new Uint8Array(3))).toBeNull();
-    new DataView(bytes.buffer).setInt32(0, -1, true);
-    expect(parseDarwinArgv(bytes)).toBeNull();
   });
 });
 
@@ -435,7 +422,7 @@ describe("running Portal", () => {
   });
 
   it("stops a Portal the last server left running even when it may not open the address itself", async () => {
-    const stateDir = mkdtempSync(join(root, "state with spaces-"));
+    const stateDir = mkdtempSync(join(root, "state-"));
     const portal = standIn();
     const first = new PortalService({ stateDir, bin: portal.path, fetch: relay() });
     first.start({ relay: RELAY, port: 7317, ...open });

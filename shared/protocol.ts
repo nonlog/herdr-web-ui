@@ -54,9 +54,9 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  */
 
 /** HTTP API
- *  GET    /api/health                    -> { ok: true, herdr: HerdrIdentity (shared/machines.ts; terminal_attach false on native
- *                                          Windows; terminal_control supplies the live no-PTY bridge there; terminal_mirror is the
- *                                          legacy pane.read repaint fallback; /api/bridge tells the same herdr), auth: HealthAuth,
+ *  GET    /api/health                    -> { ok: true, herdr: HerdrIdentity (shared/machines.ts; terminal_attach false on a
+ *                                          Windows herdr and on a bridge that cannot run the PTY sidecar; terminal_mirror: its
+ *                                          terminal lens is the pane's screen, repainted; /api/bridge tells the same herdr), auth: HealthAuth,
  *                                          web_ui: { boot_id: string | null, revision: string | null } }
  *  GET    /api/session                   -> { snapshot: SessionSnapshot }
  *  GET    /api/access                    -> RemoteAccess (how a phone can reach this server: what
@@ -1075,7 +1075,7 @@ export interface PushPayload {
 /** WebSocket at /ws
  *
  *  Client -> server frames: attach {pane_id, cols, rows} | detach {pane_id} | input {pane_id, text}
- *    | keys {pane_id, keys} | resize {pane_id, cols, rows} | scroll {pane_id, direction, lines} | role {mode}
+ *    | keys {pane_id, keys} | resize {pane_id, cols, rows} | release-size {pane_id} | role {mode}
  *    | pty-ack {pane_id, stream_id, offset} | secret {id, pane_id, prompt, secret}
  *    | watch {pane_id, cols, rows} | unwatch {pane_id} | conversation-watch {pane_id, enabled}
  *  Server -> client frames: snapshot | pty-data | pty-exit | pane-geometry | role-ack
@@ -1159,9 +1159,9 @@ export type ClientMessage =
    * Never queued, retried, sent through agent.prompt, or echoed in a result. */
   | { type: "secret"; id: number; pane_id: string; prompt: string; secret: string }
   | { type: "resize"; pane_id: string; cols: number; rows: number }
-  /** Semantic terminal wheel event for herdr terminal-session controllers. */
-  | { type: "scroll"; pane_id: string; direction: "up" | "down"; lines: number; column?: number; row?: number; modifiers?: number }
-  /** A covered terminal relinquishes its grid to the remaining visible client. */
+  /** this client's terminal is covered again (the chat lens): if the pty has its grid, the server sizes
+   * the pty for the latest grid of another interact client still showing the terminal, or leaves it.
+   * Never answered; an older server ignores it, so it needs no feature. */
   | { type: "release-size"; pane_id: string }
   /** Cumulative UTF-8 payload bytes processed by xterm, only for this subscription. */
   | { type: "pty-ack"; pane_id: string; stream_id: string; offset: number }
@@ -1181,21 +1181,19 @@ export type ClientMessage =
   | { type: "ping"; id: number };
 
 /** What a server supports beyond the base protocol, listed in its first snapshot; older bridges list nothing. */
-export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "terminal-scroll" | "watch" | "conversation-watch" | "ping";
+export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "watch" | "conversation-watch" | "ping";
 
 export type ServerMessage =
   | { type: "snapshot"; snapshot: SessionSnapshot; features?: ServerFeature[] }
-  /** ANSI terminal bytes: direct attach appends raw PTY output; terminal_control sends herdr frames; a legacy mirror may repaint a whole screen. */
+  /** raw PTY bytes: append to the terminal, never repaint over it. A mirrored pane (HerdrIdentity.terminal_mirror) sends whole screens the same way. */
   | { type: "pty-data"; pane_id: string; data: string; flow?: { stream_id: string; offset: number } }
   | { type: "pty-exit"; pane_id: string; code: number | null }
   /** a pane that waited for another web bridge to let go of its terminal (error `attach_held`) is attached again */
   | { type: "attach-resumed"; pane_id: string }
   /** Attachment readiness (omitted ready means true); false revokes it during retry. Never a typed-text acknowledgement. */
   | { type: "input-ready"; pane_id: string; ready?: boolean }
-  /** the shared terminal grid changed: observe clients adopt it, interact clients drive it.
-   * fixed: pane.read mirror, so nobody resizes it. control: herdr terminal-session controller,
-   * so the browser adopts native geometry and sends semantic wheel events instead of xterm mouse bytes. */
-  | { type: "pane-geometry"; pane_id: string; cols: number; rows: number; fixed?: boolean; control?: boolean }
+  /** the shared pty's grid changed: observe clients adopt it, interact clients drive it. `fixed`: the grid is the pane's own in herdr (a mirrored pane), so every client adopts it and none resizes */
+  | { type: "pane-geometry"; pane_id: string; cols: number; rows: number; fixed?: boolean }
   | { type: "role-ack"; mode: ClientRole }
   /** ok after Enter delivery, or bridge acceptance (`pending`); never an agent execution acknowledgement.
    * `draft`: on an immediate send's input_draft, the one-row draft in Claude's input box that a send

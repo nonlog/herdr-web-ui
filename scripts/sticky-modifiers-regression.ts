@@ -53,11 +53,7 @@ try {
         if (message.type === "error") console.log("terminal error", message);
         socket.send(raw);
       });
-      socket.onMessage((raw) => {
-        const message = JSON.parse(String(raw));
-        if (message.type === "input" || message.type === "keys") frames.push(message);
-        remote.send(raw);
-      });
+      socket.onMessage((raw) => { frames.push(JSON.parse(String(raw))); remote.send(raw); });
     });
     await page.goto(`http://127.0.0.1:${server.port}/?pane=${encodeURIComponent(pane)}`);
     const settingsShortcut = await page.evaluate(() => /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent))

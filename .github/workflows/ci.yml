@@ -101,29 +101,6 @@ jobs:
         if: needs.changes.outputs.draft != 'true'
       - run: bun test ./scripts/windows-plugin.test.ts ./scripts/plugin-runtime.test.ts ./scripts/phone-setup.test.ts ./server/windows-native.test.ts
         if: needs.changes.outputs.draft != 'true'
-      - name: Windows Codex namespace and resumed-session regressions
-        if: needs.changes.outputs.draft != 'true'
-        run: bun test ./server/codex.test.ts ./server/windows-native.test.ts --test-name-pattern "Windows Codex resume candidates|Codex rollout resolution"
-      - name: Package the prebuilt Windows runtime
-        if: needs.changes.outputs.draft != 'true'
-        shell: pwsh
-        run: |
-          $stage = Join-Path $env:RUNNER_TEMP 'herdr-runtime'
-          $source = Join-Path $env:RUNNER_TEMP 'herdr-source.zip'
-          git archive --format=zip --output=$source HEAD
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Expand-Archive -LiteralPath $source -DestinationPath $stage
-          Copy-Item -LiteralPath dist,node_modules -Destination $stage -Recurse
-          @{ revision = $env:GITHUB_SHA; platform = 'windows-x64'; producer = 'github-actions'; run_id = $env:GITHUB_RUN_ID } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'ci-runtime.json') -Encoding utf8
-          tar -a -c -f "$env:RUNNER_TEMP/herdr-windows-runtime.zip" -C $stage .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v7
-        if: needs.changes.outputs.draft != 'true'
-        with:
-          name: windows-runtime-${{ github.sha }}
-          path: ${{ runner.temp }}/herdr-windows-runtime.zip
-          retention-days: 3
-          compression-level: 0
   macos-session:
     name: Native macOS session identity
     needs: changes
@@ -144,7 +121,7 @@ jobs:
           exit 0
       - run: bun install --frozen-lockfile
         if: needs.changes.outputs.draft != 'true'
-      - run: bun test ./server/claude-store.test.ts ./server/process-start.test.ts ./server/portal.test.ts
+      - run: bun test ./server/claude-store.test.ts ./server/process-start.test.ts
         if: needs.changes.outputs.draft != 'true'
   fast:
     name: Fast checks
@@ -172,14 +149,6 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*' '+refs/tags/remote-v*:refs/tags/remote-v*'
-          # A manually dispatched validation of a source-sync candidate has no
-          # pull_request.base or push.before. Compare its version to fork/main
-          # instead of treating every such CI run as a new release.
-          # An actual release still invokes --release and checks the Worker.
-          if [ -z "$BASE_SHA" ] && [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            git fetch --no-tags --depth=1 origin main
-            BASE_SHA="$(git rev-parse FETCH_HEAD)"
-          fi
           if [ -n "$BASE_SHA" ]; then git fetch --no-tags --depth=1 origin "$BASE_SHA" || true; fi
           bun scripts/release-guards.ts --base "$BASE_SHA"
       - name: Preserve check report and verification logs

@@ -45,7 +45,7 @@ import { PendingMessages } from "./PendingMessages.tsx";
 import type { AgentStatus, ClientRole, ConversationMetadata, InteractivePrompt, PlanSummary, ServerMessage } from "../../shared/protocol.ts";
 import type { PaneControls, PaneView } from "../lib/actions.ts";
 import { usePaneLane } from "../lib/chatLane.ts";
-import { useSettings, terminalTheme, type Palette, type ResolvedTheme, type TerminalCursorStyle } from "../lib/settings.ts";
+import { useSettings, terminalTheme, type Palette, type ResolvedTheme } from "../lib/settings.ts";
 import { loadFontStack, TERMINAL_FONT_STACK, terminalFontStack } from "../lib/fontFamily.ts";
 import { useT } from "../lib/i18n.ts";
 import { isAppShortcut } from "../lib/shortcuts.ts";
@@ -54,7 +54,7 @@ import { keyboardHoldsGrid, keyboardUp } from "../lib/keyboard.ts";
 import { OpenFileContext } from "../lib/filePaths.ts";
 import { fileUriPath, hyperlinkFilter, isWebLink, terminalFileLinkProvider } from "../lib/terminalFileLinks.ts";
 import { adjustTerminalGlyphs } from "../lib/terminalGlyphs.ts";
-import { SEMANTIC_WHEEL_MIN_INTERVAL_MS, semanticWheelDeltaLines, semanticWheelIntent } from "../lib/terminalWheel.ts";
+import { semanticWheelDeltaLines } from "../lib/terminalWheel.ts";
 import { TerminalHistoryCache, HISTORY_INITIAL_LINES, HISTORY_REFRESH_MS, accumulateHistoryWheel, type HistorySnapshot } from "../lib/terminalHistory.ts";
 import { terminalLabel } from "../lib/terminalLabel.ts";
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
@@ -77,6 +77,8 @@ const inUse = (): boolean => document.visibilityState === "visible" && document.
 export interface PaneTerminalProps {
   /** The pane this terminal attaches to; null renders the placeholder. */
   paneId: string | null;
+  /** A restored pane keeps its ID but gets a new terminal after herdr restarts. */
+  terminalId?: string | null;
   /** null while the PC identity loads, before the first attach's fixed-grid frame arrives. */
   mirrored?: boolean | null;
   /**
@@ -115,11 +117,7 @@ export interface PaneTerminalProps {
   terminalFontSize: number;
   /** one of several panes drawn side by side: under 80 columns its font shrinks to reach them */
   split?: boolean;
-  /** xterm cursorStyle (settings); a program's own DECSCUSR still changes it, as before this setting existed */
-  terminalCursorStyle: TerminalCursorStyle;
-  /** xterm cursorBlink (settings) */
-  terminalCursorBlink: boolean;
-  /** multiplier for terminal scrolling; application mode repeats mouse reports */
+  /** mouse reports sent per wheel event (settings): 1 is xterm's own one report */
   terminalWheelSpeed: number;
   /** fonts tried before the built-in stack (settings); "" keeps the built-in one */
   terminalFontFamily: string;
@@ -143,6 +141,7 @@ const heldRowNotes = new Map<string, { owner: string; id: string; text: string }
 
 export function PaneTerminal({
   paneId,
+  terminalId = null,
   mirrored = false,
   restoreError = null,
   agent = null,
@@ -162,8 +161,6 @@ export function PaneTerminal({
   autoSelected = false,
   terminalFontSize,
   split = false,
-  terminalCursorStyle,
-  terminalCursorBlink,
   terminalWheelSpeed,
   terminalFontFamily,
   theme,
@@ -195,9 +192,7 @@ export function PaneTerminal({
   // the split half following the other half's grid of the same tab sizes nothing either
   const follow = useContext(PaneFollowContext);
   const followRef = useRef(follow); followRef.current = follow;
-  // Both the Windows native-controller grid and the inactive split half only observe
-  // the shared PTY geometry. Neither may resize it on behalf of this browser.
-  const sizesPty = (): boolean => presentedRef.current && shownRef.current && !localGridRef.current && !followRef.current;
+  const sizesPty = (): boolean => presentedRef.current && shownRef.current && !followRef.current;
   const { answerPanePrompt, uploadPaneImage } = useMachineApi();
   const uploadFileRef = useRef(uploadPaneImage);
   uploadFileRef.current = uploadPaneImage;
@@ -288,15 +283,8 @@ export function PaneTerminal({
   useLayoutEffect(clearModifiers, [paneId, chatView, active, clearModifiers]);
   // observe mode: the ref is what onData and the resize listeners read mid-stream
   const observeRef = useRef(false);
-  // a legacy pane.read mirror: the grid is the pane's own in herdr, adopted like an observer's
+  // a mirrored pane (no terminal attach on its PC): the grid is the pane's own in herdr, adopted like an observer's
   const fixedGridRef = useRef(false);
-  // herdr terminal session control is browser-sized like direct attach, but wheel events are
-  // semantic commands so herdr can choose host scrollback vs TUI mouse/alternate scrolling.
-  const controlSessionRef = useRef(false);
-  // Touch-sized clients keep herdr's shared pane geometry and browse retained history locally.
-  // That keeps a phone's viewport/scroll gestures from moving or reflowing a native Herdr UI.
-  const localGridRef = useRef(false);
-  // the terminal grid as the server last said it for this pane (pane-geometry), whoever set it
   const mirroredRef = useRef(mirrored); mirroredRef.current = mirrored;
   // the pty's grid as the server last said it for this pane (pane-geometry), whoever set it
   const sharedGridRef = useRef<{ cols: number; rows: number } | null>(null);
@@ -346,8 +334,7 @@ export function PaneTerminal({
   // keyboard by itself, only a tap on the message box or the grid does. A desktop has no keyboard
   // to raise, and the pane it picks takes the typing at once.
   const coarseRef = useRef(coarse); coarseRef.current = coarse;
-  // Herdr 0.9.3's ANSI controller drops application mode metadata. An explicit target is
-  // safer than guessing TUI modes from the transport's own alternate buffer/mouse setup.
+  // Herdr's program scroll changes the shared terminal; cached history stays local.
   const [applicationScroll, setApplicationScroll] = useState(() => {
     try { const saved = localStorage.getItem("herdr-web-ui:terminal-scroll-target"); if (saved) return saved === "application"; } catch {}
     return !coarse; // touch is isolated by default; existing desktop wheel behavior is retained
@@ -573,8 +560,8 @@ export function PaneTerminal({
     const term = new Terminal({
       convertEol: false,
       // a program's own DECSCUSR still changes the cursor
-      cursorStyle: terminalCursorStyle,
-      cursorBlink: terminalCursorBlink,
+      cursorStyle: "block",
+      cursorBlink: true,
       // xterm keeps no scrollback: the attach stream lives in the alternate screen and herdr
       // owns scrollback (wheel and touch go to it). With scrollback on, the fit addon reserves
       // a scrollbar column - 15px by fallback wherever scrollbars are overlays - and the last
@@ -612,7 +599,7 @@ export function PaneTerminal({
         return cols !== undefined && Number.isFinite(cols) ? cols : null;
       };
       // a grid this client does not drive gains no columns from a smaller font
-      term.options.fontSize = narrowFontRef.current && !observeRef.current && !fixedGridRef.current && !localGridRef.current ? narrowPaneFontSize(base, colsAt) : base;
+      term.options.fontSize = narrowFontRef.current && !observeRef.current && !fixedGridRef.current ? narrowPaneFontSize(base, colsAt) : base;
       fitGrid();
     };
     term.loadAddon(fit);
@@ -716,16 +703,7 @@ export function PaneTerminal({
       }
       return true;
     });
-    // A remote terminal controller redraws a full terminal frame after a scroll. Sending every
-    // high-resolution trackpad event separately makes WAN sessions queue hundreds of frames.
-    // Keep the first event immediate, then coalesce later events to at most 25 commands/sec.
-    let controlWheelPending = 0;
-    let controlWheelTimer: number | null = null;
-    let controlWheelLastSent = -Infinity;
-    let controlWheelPane: string | null = null;
-    let controlWheelColumn: number | undefined;
-    let controlWheelRow: number | undefined;
-    let controlWheelModifiers = 0;
+    // Passive ANSI snapshots make history browsing independent of other clients.
     let historyActive = false;
     let historyOffset = 0;
     let historyWheelRemainder = 0;
@@ -854,7 +832,7 @@ export function PaneTerminal({
     const historyPan = (): void => { if (historyActive) moveLocalViewport(); };
     const onHostScroll = (): void => {
       historyPan();
-      // Scrollbar drags and browser-native scrolling pan the oversized native grid.
+      // Scrollbar drags and browser-native scrolling pan an oversized shared grid.
       // Ignore scroll events caused by our own cursor-follow adjustment.
       if (!adopted() || historyActive) return;
       if (Math.abs(host.scrollTop - observedScrollTop) <= 1) return; // horizontal panning alone
@@ -864,50 +842,6 @@ export function PaneTerminal({
       if (expected === null || Math.abs(host.scrollTop - expected) > 1) markManualPan();
     };
     host.addEventListener("scroll", onHostScroll, { passive: true });
-    const flushControlWheel = (): void => {
-      if (controlWheelTimer !== null) {
-        window.clearTimeout(controlWheelTimer);
-        controlWheelTimer = null;
-      }
-      const pane = controlWheelPane;
-      const intent = semanticWheelIntent(controlWheelPending, wheelSpeedRef.current);
-      controlWheelPending = 0;
-      if (!pane || pane !== paneRef.current || !intent) return;
-      if (socketRef.current?.scroll(
-        pane,
-        intent.direction,
-        intent.lines,
-        controlWheelColumn,
-        controlWheelRow,
-        controlWheelModifiers,
-      )) {
-        controlWheelLastSent = performance.now();
-      }
-    };
-    const queueControlWheel = (
-      pane: string,
-      deltaLines: number,
-      column: number | undefined,
-      row: number | undefined,
-      modifiers: number,
-    ): void => {
-      if (controlWheelPane !== pane) {
-        if (controlWheelTimer !== null) window.clearTimeout(controlWheelTimer);
-        controlWheelTimer = null;
-        controlWheelPending = 0;
-        controlWheelLastSent = -Infinity;
-        controlWheelPane = pane;
-      }
-      controlWheelPending += deltaLines;
-      controlWheelColumn = column;
-      controlWheelRow = row;
-      controlWheelModifiers = modifiers;
-      const wait = SEMANTIC_WHEEL_MIN_INTERVAL_MS - (performance.now() - controlWheelLastSent);
-      if (controlWheelTimer !== null) return;
-      if (wait <= 0) flushControlWheel();
-      else controlWheelTimer = window.setTimeout(flushControlWheel, wait);
-    };
-
     // herdr reads the wheel as mouse reports. Were reporting ever off, xterm would turn
     // a wheel into arrow keys, which walk an agent's prompt history instead of scrolling.
     // A selecting drag takes the wheel itself (see below); after one, a wheel scrolls the
@@ -919,8 +853,8 @@ export function PaneTerminal({
     // Shift down, and a replay without it scrolled where the wheel itself did not.
     term.attachCustomWheelEventHandler((event) => {
       const pane = paneRef.current;
-      // The native Windows grid can be taller than the browser's viewport. The
-      // older history handler swallowed every downward wheel at offset zero,
+      // An adopted grid can be taller than this browser's viewport. The
+      // history handler must not swallow a downward wheel at offset zero,
       // making the bottom rows inaccessible even though the mount can scroll.
       // Pan the live grid first; only scroll into cached history at its top edge.
       if (pane && localHistoryEnabled() && !historyActive && adopted() && !event.ctrlKey) {
@@ -943,34 +877,8 @@ export function PaneTerminal({
         return false;
       }
       if (drag) { dragWheel(event); return false; }
-      // terminal session control has no local PTY for xterm to encode the wheel into.
-      // Normalize the browser delta to terminal rows and coalesce a burst before sending it:
-      // herdr still decides host scrollback vs DEC mouse reporting / alternate scroll.
-      if (controlSessionRef.current && !observeRef.current) {
-        if (event.ctrlKey || event.deltaY === 0) return false;
-        if (term.hasSelection()) term.clearSelection();
-        const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
-        let column: number | undefined;
-        let row: number | undefined;
-        if (screen) {
-          const rect = screen.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            column = Math.max(0, Math.min(term.cols - 1, Math.floor((event.clientX - rect.left) / (rect.width / term.cols))));
-            row = Math.max(0, Math.min(term.rows - 1, Math.floor((event.clientY - rect.top) / (rect.height / term.rows))));
-          }
-        }
-        const modifiers = (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0);
-        if (pane) queueControlWheel(
-          pane,
-          semanticWheelDeltaLines(event.deltaY, event.deltaMode, term.rows),
-          column,
-          row,
-          modifiers,
-        );
-        return false;
-      }
       // an adopted grid sends herdr nothing: the wheel is the browser's, and pans the mount
-      if (observeRef.current || fixedGridRef.current) return false;
+      if (adopted()) return false;
       if (term.hasSelection()) term.clearSelection();
       const reporting = term.modes.mouseTrackingMode !== "none";
       // a trackpad pinch arrives as a wheel with Ctrl down: it is not scrolling, and goes once as before
@@ -989,13 +897,13 @@ export function PaneTerminal({
     setTerminal(term);
     fitRef.current = fit;
 
-    // A grid that is not this browser's own (observing, or the legacy pane.read mirror)
-    // may be larger than the mount. The mount then scrolls (PaneTerminal.css) and a
+    // A grid that is not this browser's own (observing, or mirrored from a PC that cannot
+    // attach) may be larger than the mount. The mount then scrolls (PaneTerminal.css) and a
     // drag pans it. Until the user pans, the view keeps the cursor's row in sight: the top of
     // the grid while the row fits there, else the bottom rows, where a prompt sits. A mirror
     // has no cursor; xterm's own rests on the last row with text, which serves the same.
     // the split's other half drawing the active half's tab follows the grid that half gives the pty
-    const adopted = (): boolean => observeRef.current || fixedGridRef.current || localGridRef.current || followRef.current;
+    const adopted = (): boolean => observeRef.current || fixedGridRef.current || followRef.current;
     // The soft keyboard takes the bottom of the screen, not the pane: a fit to what is left above
     // it would size the shared pty to that strip, and every other viewer of the pane, herdr's own
     // window included, would reflow twice per keyboard (#1045). While the keyboard is up, a host
@@ -1492,7 +1400,7 @@ export function PaneTerminal({
         setObserving(nowObserving);
         term.options.disableStdin = nowObserving || heldRef.current;
         onRoleAckRef.current?.(message.mode);
-        if (!nowObserving && !fixedGridRef.current && !localGridRef.current && !chatViewRef.current && inUse() && !keyboardHolds(true)) {
+        if (!nowObserving && !fixedGridRef.current && !chatViewRef.current && inUse() && !keyboardHolds(true)) {
           try {
             fit.fit();
             fitted();
@@ -1506,29 +1414,21 @@ export function PaneTerminal({
         setManualGridPan(false);
         followCursor();
       } else if (message.type === "pane-geometry") {
-        // Observe clients adopt the shared grid. A legacy mirror and a Windows controller
-        // follow Herdr's native pane size. The controller remains live, with semantic
-        // wheel input (controlSessionRef), but never resizes the native PTY from the browser.
+        // An observer or a mirrored pane follows its shared terminal geometry.
         if (message.pane_id !== paneRef.current) return;
         if (message.fixed) {
           fixedGridRef.current = true;
-          controlSessionRef.current = false;
-          term.options.fontSize = baseFontRef.current;
-        } else if (message.control) {
-          fixedGridRef.current = false;
-          controlSessionRef.current = true;
-          // Herdr's Windows controller locks the shared native PTY. Desktop and
-          // touch browsers both adopt it; only the native layout owns this size.
-          localGridRef.current = true;
-          socket.keepSize(message.pane_id);
+          // nor while the grid is fixed (a mirrored pane): back to the user's size
           term.options.fontSize = baseFontRef.current;
         }
         // kept while the terminal lens ignores it: another device may drive the grid, and the
         // chat lens entered later must draw its hidden screen for that grid, not this device's
         sharedGridRef.current = { cols: message.cols, rows: message.rows };
         // the chat lens adopts the shared grid too: the screen it reads (a masked prompt) is drawn for it
-        if (!observeRef.current && !fixedGridRef.current && !localGridRef.current && !followRef.current && !chatViewRef.current) {
+        if (!observeRef.current && !fixedGridRef.current && !followRef.current && !chatViewRef.current) {
           if (!keyboardHeld) return;
+          // a grid held under the keyboard draws the pane's own grid (an attach made under it adopted
+          // the pane's size, another device may have sized it): the catch-up fit takes the pane back
           heldForce = true;
         }
         if (term.cols !== message.cols || term.rows !== message.rows) term.resize(message.cols, message.rows);
@@ -1687,24 +1587,17 @@ export function PaneTerminal({
       const secret = secretRef.current !== null;
       const input = data;
       const key = keyFromData(data);
-      // The composer labels Stop explicitly. Preserve its stop:true input frame;
-      // only ordinary terminal Esc needs a semantic Herdr key chord.
-      const chord = stopKey && input === "\u001b" ? null : enterChord ?? (!pasting && !composingRef.current && !compositionCommitPendingRef.current
-        ? (barKey?.chord ?? physicalChord
-          ?? (hasModifiers(modifiersRef.current) && key !== null ? terminalChord(key, modifiersRef.current) : null)
-          // An unmodified legacy ESC byte may not cancel a Kitty-aware TUI.
-          ?? (key === "Escape" ? "esc" : null))
+      const chord = enterChord ?? (!pasting && !composingRef.current && !compositionCommitPendingRef.current
+        ? barKey !== null ? barKey.chord
+          : physicalChord ?? (hasModifiers(modifiersRef.current) && key !== null ? terminalChord(key, modifiersRef.current) : null)
         : null);
       if (draftHeldForRef.current === current) {
         // A chord or a modified Enter is never held, and never sent beside held text either
         // (Ctrl+J, or Ctrl+Enter under modifyOtherKeys, would run the line).
-        // Plain Escape is the exception: it interrupts the running agent and
-        // must reach Herdr's semantic key encoder even while a draft is held.
         // A paste the draft cannot take (an unbracketed tab or control character) is refused too, never sent
         // ahead of the held start.
         const pasted = pasting || input.startsWith("\x1b[200~");
-        const interrupt = !pasted && key === "Escape" && chord === "esc";
-        if ((chord !== null && !interrupt) || modifiedEnter || (pasted && applyToDraft(EMPTY_DRAFT, input) === EMPTY_DRAFT)) {
+        if (chord !== null || modifiedEnter || (pasted && applyToDraft(EMPTY_DRAFT, input) === EMPTY_DRAFT)) {
           const t = tRef.current;
           setInputError(t("Not sent: send or discard the held input first."));
           return;
@@ -1827,6 +1720,7 @@ export function PaneTerminal({
         // the grid belongs to the pty while observing, and to herdr when fixed: only the view moves
         // (a soft keyboard opening must not leave the prompt under it)
         if (adopted()) {
+          panned = false;
           followCursor();
           return;
         }
@@ -1850,16 +1744,16 @@ export function PaneTerminal({
     });
     observer.observe(host);
 
-    // Touch screens never emit wheel events and xterm.js has no touch scrolling.
-    // A vertical drag browses this browser's passive history; only a mouse-reporting
-    // TUI is allowed to receive semantic wheel input. Horizontal movement pans an
-    // adopted shared grid without resizing or scrolling herdr itself.
+    // Touch screens never emit wheel events and xterm.js has no touch scrolling:
+    // translate a single-finger drag on the terminal into wheel events, so the
+    // normal buffer scrolls its own viewport and the alternate buffer (with mouse
+    // reporting on) forwards the gesture to herdr, exactly like a mouse wheel.
     // The text follows the finger, as everywhere on a phone: dragging down brings
     // older lines in. Each event carries the finger's position, since xterm reports
     // a wheel at the cell under it (without one, every report said row 1, column 1).
     // An adopted grid has no history to send a wheel to (an observer's reports are dropped, a
     // mirror reports nothing): there the drag pans the mount, both ways, to the cells past its edge.
-    // Two fingers pinch the font locally; an adopted native grid keeps its shared PTY size.
+    // Two fingers pinch the font size: the font follows them locally, and the shared pty resizes once when one lifts.
     let touchX = 0;
     let touchY = 0;
     /** finger travel of this gesture not yet sent as a wheel report */
@@ -1976,21 +1870,11 @@ export function PaneTerminal({
       const across = touchX - first.clientX;
       touchX = first.clientX;
       touchY = first.clientY;
-      if (observeRef.current || fixedGridRef.current) {
+      if (adopted()) {
         panned = true;
         host.scrollBy(across, delta);
         return;
       }
-      // A touch-only mirror browses local history, never scrolls or resizes the
-      // native Herdr pane shared with the desktop.
-      if (localGridRef.current && Math.abs(across) > Math.abs(delta)) {
-        panned = true;
-        host.scrollBy(across, 0);
-        return;
-      }
-      // Both private history and application scroll consume the same bounded
-      // pixel-to-row accumulation: a quick swipe must travel the same distance
-      // as a slow swipe rather than emit one wheel event per touchmove.
       // xterm sends herdr one report per wheel event however far it went, and herdr scrolls a
       // few lines per report: one line-mode wheel per that many rows of finger travel keeps a
       // swipe as far as a slow drag, and the text under the finger
@@ -2011,8 +1895,7 @@ export function PaneTerminal({
     const onTouchEnd = (event: TouchEvent): void => {
       // a lifted one-finger drag sends what is left once it reaches half a step: a flick shorter
       // than one step still scrolls, and a long drag loses at most half a step at its end
-      if (tracking && event.type === "touchend" && !pinchStroke
-        && !observeRef.current && !fixedGridRef.current) {
+      if (tracking && event.type === "touchend" && !pinchStroke && !adopted()) {
         sendTouchWheels(finalStep(touchPixels, cellHeight() * HERDR_MOUSE_SCROLL_LINES));
       }
       touchPixels = 0;
@@ -2159,7 +2042,7 @@ export function PaneTerminal({
       cachedReleaseRef.current = false;
       setInputReady(false);
       setOutputReady(false);
-      if (!observeRef.current && !chatViewRef.current && !localGridRef.current && shownRef.current && !keyboardHolds(true)) {
+      if (!observeRef.current && !chatViewRef.current && shownRef.current && !keyboardHolds(true)) {
         try {
           fit.fit();
           fitted();
@@ -2169,7 +2052,7 @@ export function PaneTerminal({
       }
       const away = !inUse();
       // under the keyboard the attach adopts the pane's size (keep_size) and the catch-up fit takes it
-      socket.attach(current, term.cols, term.rows, chatViewRef.current || localGridRef.current || away || !shownRef.current || followRef.current || keyboardHeld);
+      socket.attach(current, term.cols, term.rows, chatViewRef.current || away || !shownRef.current || followRef.current || keyboardHeld);
       if (away) leave();
     };
     // Existing attaches keep their grid while away. New connections watch instead, except
@@ -2271,7 +2154,6 @@ export function PaneTerminal({
       window.clearInterval(poll);
       observer.disconnect();
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
-      if (controlWheelTimer !== null) window.clearTimeout(controlWheelTimer);
       cache.reset(null);
       if (prefetchTimer !== null) window.clearTimeout(prefetchTimer);
       host.removeEventListener("scroll", onHostScroll);
@@ -2374,7 +2256,7 @@ export function PaneTerminal({
         historyTerm.options.fontSize = terminalFontSize;
         historyTerm.options.fontFamily = fontFamily;
       }
-      if (observeRef.current || fixedGridRef.current || localGridRef.current || chatViewRef.current || keyboardHoldsRef.current(true)) return;
+      if (observeRef.current || fixedGridRef.current || chatViewRef.current || keyboardHoldsRef.current(true)) return;
       try {
         fitRef.current?.fit();
         fittedRef.current();
@@ -2390,14 +2272,6 @@ export function PaneTerminal({
     else void loadFontStack(fontFamily, terminalFontSize).then(apply);
     return () => { superseded = true; };
   }, [terminalFontSize, fontFamily]);
-
-  // Cursor settings change xterm drawing but must not resize the shared PTY.
-  useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    term.options.cursorStyle = terminalCursorStyle;
-    term.options.cursorBlink = terminalCursorBlink;
-  }, [terminalCursorStyle, terminalCursorBlink]);
 
   // the setting, a zoom or the last sibling closing need not resize the host: the observer may stay silent
   useEffect(() => {
@@ -2429,7 +2303,9 @@ export function PaneTerminal({
       if (shared && hidden && !observeRef.current && (hidden.cols !== shared.cols || hidden.rows !== shared.rows)) hidden.resize(shared.cols, shared.rows);
       return;
     }
-    if (observeRef.current || fixedGridRef.current || localGridRef.current || keyboardHoldsRef.current(true)) return;
+    if (observeRef.current || fixedGridRef.current) return;
+    // the composer's keyboard may still be up as the terminal lens appears: its grid waits for it to go
+    if (keyboardHoldsRef.current(true)) return;
     const term = termRef.current;
     try {
       fitRef.current?.fit();
@@ -2491,7 +2367,8 @@ export function PaneTerminal({
     if (sizesPty() && inUse()) socketRef.current?.resize(pane, term.cols, term.rows, true);
   }, [follow]);
 
-  // Reset synchronously on pane changes: old composition timers must never see the new pane.
+  // Reset on a pane or terminal replacement: a herdr restart can keep the pane ID.
+  // Old composition timers must never see the new terminal.
   useLayoutEffect(() => {
     const socket = socketRef.current;
     const term = termRef.current;
@@ -2507,11 +2384,9 @@ export function PaneTerminal({
     setHeld(false);
     setUnsupported(false);
     fixedGridRef.current = false;
-    controlSessionRef.current = false;
-    localGridRef.current = coarseRef.current;
     sharedGridRef.current = null;
     // the next pane's grid is this browser's again unless it says otherwise (pane-geometry)
-    hostRef.current?.toggleAttribute("data-adopted-grid", observeRef.current || localGridRef.current);
+    hostRef.current?.toggleAttribute("data-adopted-grid", observeRef.current);
     secretRef.current = null;
     setSecret(null);
     term.options.disableStdin = observeRef.current;
@@ -2541,6 +2416,11 @@ export function PaneTerminal({
     // A fresh background pane must not acquire size ownership even with the release setting off.
     // This also covers a replacement pane: no prior release or input ownership is inherited.
     setReleased(false);
+    // A restored terminal in a cached tab waits until that tab is presented again.
+    if (cachedRef.current) {
+      setReleased(true);
+      return leavePane;
+    }
     if (deferAttachRef.current(paneId)) return leavePane;
     // under the keyboard (a pane picked while typing) the fit waits for it to go, and the attach adopts
     // the pane's size meanwhile
@@ -2555,14 +2435,14 @@ export function PaneTerminal({
     }
     // A pane exempt from watching still asks to keep an existing attachment's size while away.
     const away = !inUse();
-    socket.attach(paneId, term.cols, term.rows, chatViewRef.current || localGridRef.current || away || !shownRef.current || followRef.current || held);
+    socket.attach(paneId, term.cols, term.rows, chatViewRef.current || away || !shownRef.current || followRef.current || held);
     // no blur or hidden comes for a tab already out of use: it lets go of this pane after a moment too
     if (away) leaveRef.current();
     // the chat lens covers the grid and its composer takes the keyboard: focusing the hidden
     // grid sent the keys straight to the pane, and showed a phone's IME text mid-screen
     if (activeRef.current && !chatViewRef.current && !autoSelected && !coarseRef.current && !modalOpen() && !findOpenRef.current) term.focus();
     return leavePane;
-  }, [paneId]);
+  }, [paneId, terminalId]);
 
   // the message the tab kept its pane for has gone (or was held): out of use, it lets go now
   useEffect(() => { releaseRef.current(); }, [pending]);
@@ -2763,9 +2643,8 @@ export function PaneTerminal({
     }
   }, [inputLine, coarse, chatView, directTyping, paneId]);
 
-  // Chat Stop uses upstream's ordered input.stop contract for Escape; physical
-  // and key-bar Escape retain their Kitty-compatible semantic key encoding.
-  // Unlike other agents, Hermes needs Ctrl+C rather than Escape to stop its turn.
+  // the composer's stop button: Escape interrupts the agent's current turn in every
+  // supported TUI (Claude Code, omp, codex) without killing the process the way ^C would
   // Hermes' Stop is one Ctrl+C per turn (hermesStop.ts): a second one would quit it
   const hermesStopSentRef = useRef(false);
   // when this pane last sent Hermes a Ctrl+C: status flicker or a quick new turn resets the
@@ -2775,8 +2654,8 @@ export function PaneTerminal({
   useEffect(() => { if (agentStatus !== "working" && agentStatus !== "blocked") hermesStopSentRef.current = false; }, [agentStatus]);
   useEffect(() => { hermesStopSentRef.current = false; hermesCtrlCAtRef.current = null; }, [paneId, agent]);
   const abortTurn = useCallback(() => {
-    const socket = socketRef.current;
     const term = termRef.current;
+    const socket = socketRef.current;
     if (!term || !socket || !socket.connected) return;
     const now = Date.now();
     const key = stopKey(agent, () => {
@@ -3133,95 +3012,89 @@ export function PaneTerminal({
       )}
       {presented && findOpen && !chatView && paneId !== null && (
         <FindBar key={paneId} paneId={paneId} viewportIntent={viewportIntent} onResult={setSearchState} activePane={active} focusRequest={findRequest} disabled={!connected || held || ended || released || !outputReady}
-          onClose={() => {
-            // Clear the viewport's highlighted cells synchronously with the
-            // close request, not only in FindBar's deferred unmount cleanup.
-            setSearchState(null);
-            setFindOpen(false);
-            if (activeRef.current && !coarse) termRef.current?.focus();
-          }} />
+          onClose={() => { setFindOpen(false); if (activeRef.current && !coarse) termRef.current?.focus(); }} />
       )}
       <div className="terminal-surface">
         <div className="terminal-banners">
-        {paneId !== null && held && !noticesDocked && (
-          <div className="terminal-banner terminal-banner-warning" role="status">
-            <span>{t("Another app has this pane open. It connects here as soon as that app lets go.")}</span>
-            {!observing && socketRef.current?.canTakeOver() && (
-              <button type="button" className="btn terminal-banner-action" title={t("Take this pane from another web app or terminal attach. That connection will close.")} onClick={() => { if (paneId !== null) socketRef.current?.takeOver(paneId); }}>{t("Open here")}</button>
-            )}
-          </div>
-        )}
-        {paneId !== null && !chatView && unsupported && (
-          <div className="terminal-banner terminal-banner-soon" role="status">
-            <span>{t("Live terminal is unavailable on this bridge")}</span>
-          </div>
-        )}
-        {paneId !== null && outputError && !noticesDocked && (
-          <div className="terminal-banner terminal-banner-warning terminal-banner-output-error" role="status">
-            <span>{outputError}</span>
-            <button type="button" className="btn" onClick={() => reattachRef.current()}>{t("Reconnect")}</button>
-          </div>
-        )}
-        {!chatView && inputError && <div className="terminal-banner" role="status">{inputError}<button type="button" className="btn terminal-banner-action" onClick={() => setInputError(null)}>{t("Dismiss")}</button></div>}
-        {!chatView && !observing && connected && !inputReady && !held && !ended && !released && <div className="terminal-banner" role="status">{t("Waiting for terminal input…")}</div>}
-        {paneId !== null && !chatView && released && <div className="terminal-banner" role="status">{t(watching ? "View only while you use another window · click to type" : "Paused while you use another window")}</div>}
-        {/* the chat lens says these itself (ChatView), inline; the pills are the grid's */}
-        {paneId !== null && !chatView && ended && !outputError && (
-          <div className="terminal-banner" role="status">
-            terminal ended{!draftIsEmpty(draft) ? " — held input discarded" : ""}
-          </div>
-        )}
-        {paneId !== null && !chatView && !ended && !connected && (
-          <div className="terminal-banner terminal-banner-warning" role="status">
-            reconnecting to herdr web ui…
-            {draft.text.length > 0 && <span className="draft-held"> input held: “{draft.text}”</span>}
-          </div>
-        )}
-        {paneId !== null && !ended && connected && !draftIsEmpty(draft) && !noticesDocked && (
-          <div className="terminal-banner terminal-banner-draft" role="status">
-            <span className="draft-label">{t("Input held until the terminal is ready:")}</span>
-            {draft.text.length > 0 && <code className="draft-text">{draft.text}</code>}
-            {/* the preview shows the start of the text: without this, a draft that lost its end looks whole */}
-            {draft.truncated && <span className="draft-truncated">{t("Some input could not be held and was left out.")}</span>}
-            {/* Enter is never held: without this, two commands look like one line and a paste looks whole */}
-            {draft.leftOut && <span className="draft-truncated">{t("An Enter or line break was left out: Send never presses Enter.")}</span>}
-            <span className="draft-actions">
-              <button type="button" className="draft-send" disabled={draft.text.length === 0 || observing || secretActive || held} onClick={sendDraft}>
-                {t("Send")}
-              </button>
-              <button type="button" className="draft-discard" onClick={discardDraft}>
-                {t("Discard")}
-              </button>
-            </span>
-          </div>
-        )}
-        {paneId !== null && !ended && observing && (
-          <div className="terminal-banner terminal-banner-observe" role="status">
-            view only — the operator’s screen size is untouched
-          </div>
-        )}
-        {paneId !== null && !chatView && selectionQuote?.pane === paneId && (
-          <button type="button" className="terminal-banner terminal-banner-action terminal-quote"
-            onMouseDown={(event) => { event.preventDefault(); }}
-            onClick={() => {
-              const block = formatTerminalQuote({ label: title?.trim() || paneId, range: selectionQuote.range, text: selectionQuote.text });
-              if (block === null) return;
-              const key = `herdr-web-ui:composer-draft:${paneStorageId(machineId, paneId)}`;
-              const next = appendQuote(composerDrafts.read(key).text, block, MAX_COMPOSER_CHARS);
-              if (next === null) { noteClipboard(t("Too long for the message draft")); return; }
-              composerDrafts.set(key, next);
-              termRef.current?.clearSelection();
-              noteClipboard(t("Added to the message draft"));
-            }}>
-            <Quote aria-hidden="true" />{t("Quote in message")}
-          </button>
-        )}
-        {clipboardNote && !noticesDocked && (
-          <div className="terminal-banner" role="status">
-            {clipboardNote}
-          </div>
-        )}
-      </div>
+          {paneId !== null && held && !noticesDocked && (
+            <div className="terminal-banner terminal-banner-warning" role="status">
+              <span>{t("Another app has this pane open. It connects here as soon as that app lets go.")}</span>
+              {!observing && socketRef.current?.canTakeOver() && (
+                <button type="button" className="btn terminal-banner-action" title={t("Take this pane from another web app or terminal attach. That connection will close.")} onClick={() => { if (paneId !== null) socketRef.current?.takeOver(paneId); }}>{t("Open here")}</button>
+              )}
+            </div>
+          )}
+          {paneId !== null && !chatView && unsupported && (
+            <div className="terminal-banner terminal-banner-soon" role="status">
+              <span>{t("Live terminal is coming to Windows PCs: herdr cannot attach a terminal there yet. The chat lens works now.")}</span>
+            </div>
+          )}
+          {paneId !== null && outputError && !noticesDocked && (
+            <div className="terminal-banner terminal-banner-warning terminal-banner-output-error" role="status">
+              <span>{outputError}</span>
+              <button type="button" className="btn" onClick={() => reattachRef.current()}>{t("Reconnect")}</button>
+            </div>
+          )}
+          {!chatView && inputError && <div className="terminal-banner" role="status">{inputError}<button type="button" className="btn terminal-banner-action" onClick={() => setInputError(null)}>{t("Dismiss")}</button></div>}
+          {!chatView && !observing && connected && !inputReady && !held && !ended && !released && <div className="terminal-banner" role="status">{t("Waiting for terminal input…")}</div>}
+          {paneId !== null && !chatView && released && <div className="terminal-banner" role="status">{t(watching ? "View only while you use another window · click to type" : "Paused while you use another window")}</div>}
+          {/* the chat lens says these itself (ChatView), inline; the pills are the grid's */}
+          {paneId !== null && !chatView && ended && !outputError && (
+            <div className="terminal-banner" role="status">
+              terminal ended{!draftIsEmpty(draft) ? " — held input discarded" : ""}
+            </div>
+          )}
+          {paneId !== null && !chatView && !ended && !connected && (
+            <div className="terminal-banner terminal-banner-warning" role="status">
+              reconnecting to herdr web ui…
+              {draft.text.length > 0 && <span className="draft-held"> input held: “{draft.text}”</span>}
+            </div>
+          )}
+          {paneId !== null && !ended && connected && !draftIsEmpty(draft) && !noticesDocked && (
+            <div className="terminal-banner terminal-banner-draft" role="status">
+              <span className="draft-label">{t("Input held until the terminal is ready:")}</span>
+              {draft.text.length > 0 && <code className="draft-text">{draft.text}</code>}
+              {/* the preview shows the start of the text: without this, a draft that lost its end looks whole */}
+              {draft.truncated && <span className="draft-truncated">{t("Some input could not be held and was left out.")}</span>}
+              {/* Enter is never held: without this, two commands look like one line and a paste looks whole */}
+              {draft.leftOut && <span className="draft-truncated">{t("An Enter or line break was left out: Send never presses Enter.")}</span>}
+              <span className="draft-actions">
+                <button type="button" className="draft-send" disabled={draft.text.length === 0 || observing || secretActive || held} onClick={sendDraft}>
+                  {t("Send")}
+                </button>
+                <button type="button" className="draft-discard" onClick={discardDraft}>
+                  {t("Discard")}
+                </button>
+              </span>
+            </div>
+          )}
+          {paneId !== null && !ended && observing && (
+            <div className="terminal-banner terminal-banner-observe" role="status">
+              view only — the operator’s screen size is untouched
+            </div>
+          )}
+          {paneId !== null && !chatView && selectionQuote?.pane === paneId && (
+            <button type="button" className="terminal-banner terminal-banner-action terminal-quote"
+              onMouseDown={(event) => { event.preventDefault(); }}
+              onClick={() => {
+                const block = formatTerminalQuote({ label: title?.trim() || paneId, range: selectionQuote.range, text: selectionQuote.text });
+                if (block === null) return;
+                const key = `herdr-web-ui:composer-draft:${paneStorageId(machineId, paneId)}`;
+                const next = appendQuote(composerDrafts.read(key).text, block, MAX_COMPOSER_CHARS);
+                if (next === null) { noteClipboard(t("Too long for the message draft")); return; }
+                composerDrafts.set(key, next);
+                termRef.current?.clearSelection();
+                noteClipboard(t("Added to the message draft"));
+              }}>
+              <Quote aria-hidden="true" />{t("Quote in message")}
+            </button>
+          )}
+          {clipboardNote && !noticesDocked && (
+            <div className="terminal-banner" role="status">
+              {clipboardNote}
+            </div>
+          )}
+        </div>
         {/* xterm hides its rendered rows from assistive technology, so the region around the
             visible grid carries the pane's name: a screen reader announces which pane
             this is. No tabIndex: xterm's helper textarea takes the keyboard here on attach, so a

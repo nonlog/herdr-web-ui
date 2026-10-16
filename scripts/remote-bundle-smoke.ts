@@ -15,9 +15,9 @@ mkdirSync(bundle); mkdirSync(home);
 const bun = join(bundle, windows ? "bin/bun.exe" : "bin/bun");
 const herdr = windows ? process.env["HERDR_WEB_HERDR_BIN"] || join(process.env["LOCALAPPDATA"] ?? "", "Programs/Herdr/bin/herdr.exe") : join(bundle, "bin/herdr");
 if (windows) assert.ok(existsSync(herdr), `herdr is not installed at ${herdr}`);
-// The PC this stands for has no Node of its own: direct attach on Unix must run on the Node the
-// bundle carries (#265), while Windows deliberately carries none because terminal session control
-// needs only Bun + herdr. Remove every host Node from PATH so both cases exercise the packaged path.
+// The PC this stands for has no Node of its own: the terminal attach must run on the Node the
+// bundle carries (#265: looked up on the launch PATH alone, such a PC mirrored instead). So every
+// PATH entry that holds a node is left out; a Windows bundle carries none and mirrors.
 const delimiter = windows ? ";" : ":";
 const path = (process.env["PATH"] ?? "").split(delimiter).filter((dir) => dir && !existsSync(join(dir, windows ? "node.exe" : "node"))).join(delimiter);
 // the pane's shell is a plain one: a login shell with an empty HOME may stop to ask how it should be set up
@@ -41,22 +41,21 @@ try {
   assert.ok(descriptor, "bundle starts a private daemon and bridge without system runtimes");
   const response = await fetch(`http://127.0.0.1:${descriptor.port}/api/bridge`, { headers: { authorization: `Bearer ${descriptor.token}` } });
   assert.equal(response.status, 200);
-  const identity = await response.json() as { socket_path: string; herdr: { terminal_attach?: boolean; terminal_control?: boolean } };
+  const identity = await response.json() as { socket_path: string; herdr: { terminal_attach?: boolean } };
   assert.equal(identity.socket_path, socket);
-  // Native Windows has no direct attach, but terminal session control is portable.
+  // a Windows herdr has no terminal attach (herdrdev/herdr#4821); the bridge must say so
   assert.equal(identity.herdr.terminal_attach, !windows);
-  assert.equal(identity.herdr.terminal_control, true);
   assert.equal((await fetch(`http://127.0.0.1:${descriptor.port}/api/session`)).status, 401);
   console.log("Remote bundle startup, isolated socket and authentication passed");
 
-  // A live terminal, not only what the bridge says of itself: direct attach where the bundle
-  // carries Node, terminal session control on Windows. Typing reaches the shell either way,
-  // and what it prints comes back.
+  // A live terminal, not only what the bridge says of itself: herdr's own attach where the
+  // bundle carries Node, a mirror of the pane's screen on Windows. Typing reaches the shell
+  // either way, and what it prints comes back.
   const headers = { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" };
   const created = await fetch(`http://127.0.0.1:${descriptor.port}/api/workspace/create`, { method: "POST", headers, body: JSON.stringify({ cwd: home, label: "herdr-web-ui-test-bundle-smoke" }) });
   assert.equal(created.status, 200, await created.clone().text());
   const paneId = (await created.json() as { pane_id: string }).pane_id;
-  const frames: { type: string; pane_id?: string; data?: string; fixed?: boolean; control?: boolean; code?: string; message?: string }[] = [];
+  const frames: { type: string; pane_id?: string; data?: string; fixed?: boolean; code?: string; message?: string }[] = [];
   const ws = new WebSocket(`ws://127.0.0.1:${descriptor.port}/ws`, { headers } as never);
   ws.onmessage = (event) => { frames.push(JSON.parse(String(event.data))); };
   await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = () => reject(new Error("bridge websocket failed")); });
@@ -68,13 +67,11 @@ try {
     ws.send(JSON.stringify({ type: "attach", pane_id: paneId, cols: 100, rows: 30 }));
     await until("the terminal paints", () => frames.some((frame) => frame.type === "pty-data" && frame.pane_id === paneId));
     const mirrored = frames.some((frame) => frame.type === "pane-geometry" && frame.pane_id === paneId && frame.fixed === true);
-    const controlled = frames.some((frame) => frame.type === "pane-geometry" && frame.pane_id === paneId && frame.control === true);
-    assert.equal(mirrored, false, "supported bundles use a live terminal transport, never pane.read mirroring");
-    assert.equal(controlled, windows, windows ? "a Windows bridge uses terminal session control" : "the bundle's Node uses direct terminal attach");
+    assert.equal(mirrored, windows, windows ? "a Windows bridge mirrors the pane's screen" : "the bundle's own Node runs the terminal attach: no mirror");
     // arithmetic, so the echo of the typed line is not the answer
     ws.send(JSON.stringify({ type: "input", pane_id: paneId, text: windows ? "echo \"smoke-$(40+2)\"\r" : "echo smoke-$((40+2))\r" }));
     await until("typing reaches the shell and its output comes back", () => frames.some((frame) => frame.type === "pty-data" && frame.pane_id === paneId && (frame.data ?? "").includes("smoke-42")));
-    console.log(`Remote bundle live terminal passed (${controlled ? "control" : "attach"})`);
+    console.log(`Remote bundle live terminal passed (${mirrored ? "mirror" : "attach"})`);
   } finally {
     ws.close();
   }

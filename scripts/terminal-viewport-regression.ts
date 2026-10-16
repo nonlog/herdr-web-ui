@@ -36,10 +36,12 @@ try {
   const errors: string[] = [];
   const searches: unknown[] = [];
   const terminalInput: string[] = [];
+  const sharedScrollCommands: string[] = [];
   page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
     try {
       const frame = JSON.parse(String(payload));
       if (["input", "keys", "submit"].includes(frame.type)) terminalInput.push(frame.type);
+      if (["scroll", "resize"].includes(frame.type)) sharedScrollCommands.push(frame.type);
     } catch { /* Only the bridge’s JSON input frames matter. */ }
   }));
   page.on("response", (response) => { if (response.url().endsWith("/api/pane/find")) void response.json().then((body) => { searches.push({ request: response.request().postDataJSON(), body }); }, () => {}); });
@@ -69,6 +71,22 @@ try {
   await page.goto(`http://127.0.0.1:${server.port}/?pane=${encodeURIComponent(paneId)}`);
   await firstMetrics;
   assert.ok((await paneScrollInfo(paneId))!.max_offset_from_bottom > 100, "herdr holds the full history");
+  // The fork's retained terminal feature: browse cached ANSI without touching the shared
+  // Herdr scroll position. Switch back to application scrolling for the upstream paging QA.
+  await page.getByRole("button", { name: "Application scroll", exact: true }).click();
+  await page.locator('.pane-terminal[data-history-cache="ready"]').waitFor({ timeout: 15_000 });
+  const sharedBefore = (await paneScrollInfo(paneId))!.offset_from_bottom;
+  const commandsBefore = sharedScrollCommands.length;
+  await page.locator(".pane-terminal > .xterm").evaluate((node) => {
+    node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -4, deltaMode: 1 }));
+  });
+  await page.locator('.pane-terminal-local-history:not([hidden])').waitFor();
+  await until(async () => Number(await page.locator('.pane-terminal-local-history').getAttribute("data-offset")) > 0, "local history wheel moves cached rows");
+  assert.equal((await paneScrollInfo(paneId))!.offset_from_bottom, sharedBefore, "private scroll does not move native Herdr history");
+  assert.equal(sharedScrollCommands.length, commandsBefore, "private scroll sends no shared scroll or resize messages");
+  await page.getByRole("button", { name: "Back to live", exact: true }).click();
+  await page.locator('.pane-terminal-local-history:not([hidden])').waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Instant local history", exact: true }).click();
   const widths = await page.evaluate(() => ({ grid: document.querySelector(".pane-terminal")!.getBoundingClientRect().width, surface: document.querySelector(".terminal-surface")!.getBoundingClientRect().width }));
   assert.equal(widths.grid, widths.surface, "the grid takes the full width, with no column reserved beside it");
   // Paging moves native history without reaching the program’s input.

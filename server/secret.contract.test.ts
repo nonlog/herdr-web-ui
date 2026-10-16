@@ -123,14 +123,7 @@ async function mirroredSecret(refuse: boolean, screens?: { visible: string; dete
   const proxy = herdrProxy(join(root, "herdr.sock"), herdr);
   // the server under test reaches herdr through the proxy; this test's own calls name herdr's socket
   process.env["HERDR_SOCKET"] = join(root, "herdr.sock");
-  const server = createServer({
-    port: 0,
-    hostname: "127.0.0.1",
-    token: "",
-    stateDir: join(root, "state"),
-    terminalAttach: false,
-    terminalControl: false,
-  });
+  const server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state"), terminalAttach: false });
   let workspace: string | undefined;
   let socket: WebSocket | undefined;
   const seen: any[] = [];

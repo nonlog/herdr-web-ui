@@ -44,10 +44,9 @@ async function lane(fail = "", kept = false, ci = "") {
   }
 }
 
-// Keep upstream's summary expectations independent of the fork's extra check.
 const rows = (text: string) => [...text.matchAll(/^(scripts\/\S+)\s+(\d+)\s+(\d+)$/gm)].map((row) => ({
   script: row[1], seconds: Number(row[2]), code: Number(row[3]),
-})).filter((row) => row.script !== "scripts/windows-lens-browser-qa.ts");
+}));
 
 describe("browser lane", () => {
   it("summarizes passing and failing scripts and stops at the original exit code", async () => {
@@ -61,6 +60,7 @@ describe("browser lane", () => {
       { script: "scripts/pending-pane-switch-regression.ts", seconds: expect.any(Number), code: 0 },
       { script: "scripts/lan-exposure-notice-regression.ts", seconds: expect.any(Number), code: 0 },
       { script: "scripts/terminal-dispose-browser-qa.ts", seconds: expect.any(Number), code: 0 },
+      { script: "scripts/herdr-restart-regression.ts", seconds: expect.any(Number), code: 0 },
       { script: "scripts/sticky-modifiers-regression.ts", seconds: expect.any(Number), code: 7 },
     ]);
     expect(text).not.toContain("STEP=scripts/key-bar-customization-demo-regression.ts");
@@ -70,7 +70,7 @@ describe("browser lane", () => {
   it("summarizes every script and exits zero on success without enabling local evidence", async () => {
     const { text, code, evidence } = await lane();
     expect(code).toBe(0);
-    expect(rows(text)).toHaveLength(56);
+    expect(rows(text)).toHaveLength(57);
     expect(rows(text).map((row) => row.script)).toContain("scripts/gjc-status-browser-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/pane-input-focus-demo-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/shortcut-exact-modifiers-demo-regression.ts");
@@ -115,13 +115,5 @@ describe("browser lane", () => {
     expect(code).toBe(0);
     expect(evidence).toBe(true);
     expect(text).toContain("STEP=scripts/file-viewer-regression.ts EVIDENCE=.ci/browser-evidence\n");
-  });
-
-  it("runs the fork's Windows check and stops the lane if it fails", async () => {
-    const { text, code } = await lane("scripts/windows-lens-browser-qa.ts");
-    expect(code).toBe(7);
-    expect(text).toMatch(/scripts\/windows-lens-browser-qa\.ts.*seconds=\d+.*exit=7/);
-    expect(text).not.toContain("STEP=scripts/ui-regression.ts");
-    expect(rows(text)).toEqual([{ script: "scripts/demo-build.ts", seconds: expect.any(Number), code: 0 }]);
   });
 });

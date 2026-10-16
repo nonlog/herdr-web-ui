@@ -3,7 +3,7 @@ import type { HealthAuth, ServerMessage, SessionSnapshot } from "./protocol.ts";
 
 export const LOCAL_MACHINE = "local";
 export const BRIDGE_PROTOCOL = 1;
-export const REMOTE_BUNDLE_VERSION = "27";
+export const REMOTE_BUNDLE_VERSION = "29";
 export interface PaneTarget { machine_id: string; pane_id: string }
 export type MachineState = "connecting" | "connected" | "reconnecting" | "disconnected" | "error";
 export interface SshTarget {
@@ -31,18 +31,16 @@ export interface Machine {
 }
 /**
  * The herdr behind a PC, as its bridge can serve it. terminal_attach is false on a Windows
- * host: herdr has no direct terminal attach there yet (herdrdev/herdr#4821), and it is false on
- * any bridge whose runtime cannot run the PTY sidecar. Herdr 0.9.3 also exposes a
- * terminal session control stream that needs no PTY sidecar and works on native Windows;
- * terminal_control marks that bridge path. terminal_mirror remains the legacy fallback.
+ * host: herdr has no `terminal attach` there yet (herdrdev/herdr#4821), and it is false on
+ * any bridge whose runtime cannot run the PTY sidecar (the win32 bundle ships none). Such a
+ * PC's panes have the chat lens and a mirrored terminal (terminal_mirror). Absent on older
+ * bridges, which are never Windows.
  */
 export interface HerdrIdentity {
   version: string;
   protocol: number;
   terminal_attach?: boolean;
-  /** herdr's newline-JSON terminal session control bridge; no Node/node-pty sidecar required. */
-  terminal_control?: boolean;
-  /** without either live stream, the terminal lens repaints pane.read as a legacy fallback. */
+  /** without attach, the terminal lens shows the pane's screen repainted a few times a second (server/mirror.ts) */
   terminal_mirror?: boolean;
 }
 export type MachineAction = "connect" | "update_bridge" | "setup" | "bridge_conflict";

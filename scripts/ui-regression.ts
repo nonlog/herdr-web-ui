@@ -2138,7 +2138,7 @@ try {
   assert.equal(await mobilePage.evaluate(() => (window as unknown as { escapes: number }).escapes), 0, "Escape that closes the drawer does not reach the page");
   console.log("PASS Escape closes a phone's drawer and goes no further");
 
-  // Claude's suggestion on a phone is the placeholder and a chip that fills the box, until Settings turns the chip off
+  // Claude's suggestion on a phone is the placeholder; the chip that fills the box waits until Settings turns it on
   const promptRoute = `**/api/pane/prompt?pane_id=${encodeURIComponent(paneB)}`;
   const suggest = { json: { prompt: null, suggestion: "run the tests" } };
   const mobileComposer = mobilePage.getByRole("textbox", { name: "Message", exact: true });
@@ -2146,13 +2146,18 @@ try {
   await mobileComposer.fill("");
   await until(async () => await mobileComposer.getAttribute("placeholder") === "run the tests", "a phone shows the suggestion as the placeholder");
   assert.equal(await mobilePage.locator(".voice-mic").count(), 0, "a phone's chat has no mic until Settings asks for it");
+  assert.equal(await mobilePage.getByTitle("Use the suggestion", { exact: true }).count(), 0, "a phone shows no suggestion chip by default");
+  await mobilePage.goto(`${origin}/?pane=${encodeURIComponent(paneB)}&settings=chat&section=composer`);
+  await mobilePage.getByRole("switch", { name: "Suggestion chip", exact: true }).setChecked(true);
+  await mobilePage.getByRole("button", { name: "Close settings", exact: true }).click();
+  await mobileComposer.fill("");
   await mobilePage.getByTitle("Use the suggestion", { exact: true }).click();
   assert.equal(await mobileComposer.inputValue(), "run the tests", "the chip puts the suggestion in the box");
   await mobilePage.unroute(promptRoute);
   try { await mobileEvidence?.finish(); } finally { await mobile.close(); }
   assert.equal(errors.length, 0, errors.join("\n"));
   assertCspClean(csp, "the suggestion chip loads with no CSP violation");
-  console.log("PASS a phone offers Claude's suggestion as a chip");
+  console.log("PASS a phone offers Claude's suggestion as a chip once Settings turns it on");
 
   await checkTerminalInput(browser, origin, paneA, paneB);
   await checkSafariIme(browser, origin, paneA, paneB);

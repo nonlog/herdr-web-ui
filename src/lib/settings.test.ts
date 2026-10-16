@@ -29,6 +29,13 @@ it("keeps the screen wake lock off until this device explicitly enables it", () 
   expect(sanitizeSettings({ terminalWheelSpeed: "3" }).terminalWheelSpeed).toBe(1);
 });
 
+it("keeps the suggestion chip off until this device turns it on, whatever an older version stored", () => {
+  expect(sanitizeSettings({}).suggestionChip).toBe(false);
+  expect(sanitizeSettings({ showSuggestionChip: true }).suggestionChip).toBe(false);
+  expect(sanitizeSettings({ suggestionChip: true }).suggestionChip).toBe(true);
+  expect(sanitizeSettings({ suggestionChip: "true" }).suggestionChip).toBe(false);
+});
+
 it("keeps sidebar rows on two lines unless one line was chosen", () => {
   expect(sanitizeSettings({}).sidebarRows).toBe("two");
   expect(sanitizeSettings({ sidebarRows: "one" }).sidebarRows).toBe("one");
@@ -697,3 +704,4 @@ describe("shared settings", () => {
     expect(Object.keys(SETTING_SCOPE).sort()).toEqual(Object.keys(DEFAULT_SETTINGS).sort());
   });
 });
+

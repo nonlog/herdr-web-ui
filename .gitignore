@@ -23,6 +23,3 @@ _film/
 
 # one-off screenshot and probe scripts kept inside the repo so imports resolve
 scripts/*.tmp.ts
-
-# Provenance of an installed CI runtime, not source or a restriction on normal updates.
-ci-runtime.json

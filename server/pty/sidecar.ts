@@ -58,10 +58,8 @@ export function sidecarAvailable(runtime?: SidecarRuntime): boolean {
   return known;
 }
 
-/** Herdr identity as this bridge can serve it. A missing PTY sidecar disables only
- * direct attach; the portable terminal-session controller remains available. */
+/** herdr's identity as this bridge can serve it: without the sidecar, told the way a herdr that cannot attach tells it. */
 export function attachableIdentity(identity: HerdrIdentity, sidecar: boolean): HerdrIdentity {
   if (sidecar || identity.terminal_attach === false) return identity;
-  if (identity.terminal_control) return { ...identity, terminal_attach: false };
   return { ...identity, terminal_attach: false, terminal_mirror: true };
 }
