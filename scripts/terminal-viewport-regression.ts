@@ -48,7 +48,7 @@ try {
   const waitHighlight = async () => {
     try { await page.locator(".terminal-find-hit.is-current").first().waitFor(); }
     catch (error) {
-      console.error("Search diagnostic", { searches: JSON.stringify([searches[0], ...searches.slice(-2)]), native: await paneScrollInfo(paneId), dom: await page.evaluate(() => ({ text: document.querySelector(".find-bar")?.textContent, hits: document.querySelectorAll(".terminal-find-hit").length, rows: document.querySelector(".xterm-rows")?.childElementCount, screen: document.querySelector(".xterm-rows")?.textContent })) });
+      console.error("Search diagnostic", { searches: JSON.stringify([searches[0], ...searches.slice(-2)]), native: await paneScrollInfo(paneId), dom: await page.evaluate(() => ({ text: document.querySelector(".find-bar")?.textContent, hits: document.querySelectorAll(".terminal-find-hit").length, rows: document.querySelector(".pane-terminal > .xterm .xterm-rows")?.childElementCount, screen: document.querySelector(".pane-terminal > .xterm .xterm-rows")?.textContent })) });
       if (process.env.UI_EVIDENCE_DIR) { mkdirSync(process.env.UI_EVIDENCE_DIR, { recursive: true }); await page.screenshot({ path: join(process.env.UI_EVIDENCE_DIR, "terminal-search-failure.png") }); }
       throw error;
     }
@@ -57,7 +57,7 @@ try {
   // Native history moves the way a user moves it: the paging shortcut, one acknowledged page at a time.
   const pageToEdge = async (direction: -1 | 1) => {
     const deadline = Date.now() + 10000;
-    await page.locator(".xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
+    await page.locator(".pane-terminal > .xterm .xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
     for (;;) {
       const info = (await paneScrollInfo(paneId))!;
       if (info.offset_from_bottom === (direction > 0 ? info.max_offset_from_bottom : 0)) return;
@@ -90,7 +90,7 @@ try {
   const widths = await page.evaluate(() => ({ grid: document.querySelector(".pane-terminal")!.getBoundingClientRect().width, surface: document.querySelector(".terminal-surface")!.getBoundingClientRect().width }));
   assert.equal(widths.grid, widths.surface, "the grid takes the full width, with no column reserved beside it");
   // Paging moves native history without reaching the program’s input.
-  await page.locator(".xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
+  await page.locator(".pane-terminal > .xterm .xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
   const inputsBeforePaging = terminalInput.length;
   const pageRows = (await paneScrollInfo(paneId))!.viewport_rows - 1;
   // a page asked for before the client's first metrics read only asks for that read: press until one is sent
@@ -133,7 +133,7 @@ try {
     await page.keyboard.press("ControlOrMeta+Shift+PageUp");
     assert.equal((await paneScrollInfo(paneId))!.offset_from_bottom, 0, "Settings blocks the pane's paging control");
     await page.keyboard.press("Escape");
-    await page.locator(".xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
+    await page.locator(".pane-terminal > .xterm .xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
     // one line stays between pages
     const expected = Math.max(1, (await paneScrollInfo(paneId))!.viewport_rows - 1);
     await page.keyboard.press("ControlOrMeta+Shift+PageUp");
@@ -147,7 +147,7 @@ try {
   await page.getByRole("combobox", { name: "Scroll pane down", exact: true }).selectOption("off");
   await page.getByRole("combobox", { name: "Scroll pane up", exact: true }).selectOption("PageDown");
   await page.keyboard.press("Escape");
-  await page.locator(".xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
+  await page.locator(".pane-terminal > .xterm .xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
   await page.keyboard.press("ControlOrMeta+Shift+PageDown");
   await until(async () => (await paneScrollInfo(paneId))!.offset_from_bottom === pageRows, "a rebound global PageDown pages up only once");
   await page.keyboard.press("ControlOrMeta+Shift+Comma");
@@ -171,7 +171,7 @@ try {
   const jumpBox = (await jump.boundingBox())!, gridBox = (await page.locator(".pane-terminal").boundingBox())!;
   assert.ok(jumpBox.x + jumpBox.width <= gridBox.x + gridBox.width && jumpBox.y + jumpBox.height <= gridBox.y + gridBox.height,
     "the jump button sits inside the grid's bottom-right corner");
-  await page.locator(".xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
+  await page.locator(".pane-terminal > .xterm .xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
   const inputsBeforeJump = terminalInput.length;
   await jump.click();
   await until(async () => (await paneScrollInfo(paneId))!.offset_from_bottom === 0, "the jump button returns to the native bottom");
@@ -242,7 +242,7 @@ try {
   await until(async () => {
     const native = await paneScrollInfo(paneId);
     return !!native && native.viewport_rows < beforeFindRows
-      && native.viewport_rows === await page.locator(".xterm-rows > div").count();
+      && native.viewport_rows === await page.locator(".pane-terminal > .xterm .xterm-rows > div").count();
   }, "the search bar's native geometry is ready");
   await input.fill("mark_needle");
   await input.press("Enter");
@@ -262,8 +262,8 @@ try {
   await input.press("Enter");
   await waitHighlight();
   const hit = (await page.locator(".terminal-find-hit.is-current").first().boundingBox())!;
-  const screen = (await page.locator(".xterm-screen").boundingBox())!;
-  const wide = await page.evaluate(() => { const row = document.querySelector(".xterm-rows > div"); return row?.getBoundingClientRect().height ?? 0; });
+  const screen = (await page.locator(".pane-terminal > .xterm .xterm-screen").boundingBox())!;
+  const wide = await page.evaluate(() => { const row = document.querySelector(".pane-terminal > .xterm .xterm-rows > div"); return row?.getBoundingClientRect().height ?? 0; });
   assert.ok(hit.width > 20 && hit.height > 0 && wide > 0 && hit.x >= screen.x, "wide and combining text has visible cell-aligned emphasis");
   // An older page write must finish before a newer explicit search moves the pane.
   // The fetch observer records dispatch synchronously; no timing sleep is needed to prove
@@ -296,7 +296,7 @@ try {
   };
   await page.route("**/api/pane/scroll", holdScroll);
   try {
-    await page.locator(".xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
+    await page.locator(".pane-terminal > .xterm .xterm-helper-textarea").evaluate((node: HTMLTextAreaElement) => node.focus());
     await page.keyboard.press("ControlOrMeta+Shift+PageUp");
     await Promise.race([intercepted.promise, new Promise<never>((_resolve, reject) => {
       const signal = AbortSignal.timeout(10000);
