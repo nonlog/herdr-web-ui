@@ -857,7 +857,7 @@ export function PaneTerminal({
     const scrollLocalHistory = (pane: string, deltaY: number, deltaMode: number): boolean => {
       if (!localHistoryEnabled() || deltaY === 0 || cache.pane !== pane) return false;
       const wheel = accumulateHistoryWheel(historyWheelRemainder,
-        semanticWheelDeltaLines(deltaY, deltaMode, term.rows), wheelSpeedRef.current);
+        semanticWheelDeltaLines(deltaY, deltaMode, term.rows), wheelStateRef.current.speed);
       historyWheelRemainder = wheel.remainder;
       if (wheel.lines === 0) return true;
       historyOffset = Math.max(0, Math.min(20_000, historyOffset - wheel.lines));
@@ -899,7 +899,7 @@ export function PaneTerminal({
         const rowHeight = (term.element?.querySelector<HTMLElement>(".xterm-screen")?.offsetHeight ?? 0) / term.rows || terminalFontSize * 1.2;
         const pixels = event.deltaMode === 2 ? event.deltaY * host.clientHeight
           : event.deltaMode === 1 ? event.deltaY * rowHeight : event.deltaY;
-        const destination = Math.max(0, Math.min(max, host.scrollTop + pixels * wheelSpeedRef.current));
+        const destination = Math.max(0, Math.min(max, host.scrollTop + pixels * wheelStateRef.current.speed));
         if (Math.abs(destination - host.scrollTop) > 0.5) {
           markManualPan();
           host.scrollTop = destination;
