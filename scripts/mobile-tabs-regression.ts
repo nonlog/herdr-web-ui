@@ -140,7 +140,7 @@ export async function checkMobileTabs(browser: Browser, origin: string): Promise
     const tabItems = await tabSheet.locator(".row-sheet-item").allTextContents();
     assert.equal(tabItems.indexOf("Rename pane"), 2, "a split tab's menu lists its two panes first on a phone");
     assert.ok(tabItems.includes("Rename pane") && tabItems.includes("Close pane"), "the open pane's actions are in the tab's menu on a phone");
-    assert.deepEqual(tabItems.slice(-3), ["Move tab right", "Rename tab", "Close tab"], "the first tab offers only its available adjacent move, and no New tab beside the strip's +");
+    assert.deepEqual(tabItems.slice(-4), ["Move tab right", "New tab with agent…", "Rename tab", "Close tab"], "the first tab offers only its available adjacent move, and the agent's dialog beside the strip's shell +");
     await tabSheet.getByRole("button", { name: "Cancel", exact: true }).tap();
     await tabSheet.waitFor({ state: "detached" });
 

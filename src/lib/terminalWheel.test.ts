@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { semanticWheelDeltaLines } from "./terminalWheel.ts";
+import { semanticWheelDeltaLines } from "./terminalHistory.ts";
 
 describe("semantic terminal wheel normalization", () => {
   it("maps a normal Windows pixel wheel notch to about three rows", () => {

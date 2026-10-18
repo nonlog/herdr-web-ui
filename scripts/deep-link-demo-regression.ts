@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import panes from "../site/demo/fixtures/panes.json";
 import { buildDemoApp } from "./demo-build.ts";
+import { DEMO_FILE_PREVIEW_SCRIPT } from "./demo-file-preview.ts";
 import { chromePath } from "./chrome-path.ts";
 
 // Deep links (lib/deepLink.ts) on the unmodified app over the demo's fixture transport: an
@@ -12,8 +13,8 @@ import { chromePath } from "./chrome-path.ts";
 // as it moves; Back and Forward walk the panes. All files and HTTP traffic stay in this
 // disposable, loopback-only app; no herdr session is opened.
 const app = mkdtempSync(join(tmpdir(), "herdr-deep-link-demo-"));
-const INFRA = panes.infra;
-const DOCS = panes.docs;
+const INFRA = panes.omp;
+const DOCS = panes.hermes;
 const wsOf = (pane: string) => pane.split(":")[0]!;
 
 const query = (page: Page) => page.evaluate(() => Object.fromEntries(new URLSearchParams(window.location.search)));
@@ -24,7 +25,7 @@ const waitQuery = (page: Page, name: string, value: string | null) => page.waitF
 async function withPage(browser: Browser, search: string, run: (page: Page) => Promise<void>): Promise<void> {
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, locale: "en-US" });
   try {
-    await context.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" })));
+    await context.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", fileOpen: "panel" })));
     const page = await context.newPage();
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -45,7 +46,7 @@ try {
   const index = join(app, "index.html");
   const html = readFileSync(index, "utf8");
   assert.match(html, /<script type="module"/);
-  writeFileSync(index, html.replace(/<script type="module"/, '<script src="./demo-transport.js"></script>\n    <script type="module"'));
+  writeFileSync(index, html.replace(/<script type="module"/, `<script src="./demo-transport.js"></script>${DEMO_FILE_PREVIEW_SCRIPT}\n    <script type="module"`));
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const path = new URL(request.url).pathname;
     if (!path.startsWith("/herdr-web-ui/demo/app/")) return new Response("not found", { status: 404 });
@@ -67,7 +68,7 @@ try {
         await waitSelected(page, INFRA);
         await waitQuery(page, "pane", INFRA);
         const named = await query(page);
-        assert.equal(named["ws"], `${wsOf(INFRA)}-infra`, "ws names the workspace by id and slug");
+        assert.equal(named["ws"], `${wsOf(INFRA)}-cli-tools`, "ws names the workspace by id and slug");
         assert.ok(named["view"] === "chat" || named["view"] === "terminal", JSON.stringify(named));
         assert.equal(named["machine"], undefined, "the local PC is not written");
       });
@@ -209,11 +210,11 @@ try {
       // ws carries the workspace's name as a slug; a slug another workspace has wins over a reused id
       const note = (page: Page) => page.locator(".header-note").textContent();
       await withPage(browser, `?ws=${wsOf(INFRA)}`, async (page) => {
-        await waitQuery(page, "ws", `${wsOf(INFRA)}-infra`);
+        await waitQuery(page, "ws", `${wsOf(INFRA)}-cli-tools`);
       });
-      await withPage(browser, `?ws=${wsOf(panes.api)}-infra&pane=${encodeURIComponent(panes.api)}`, async (page) => {
+      await withPage(browser, `?ws=${wsOf(panes.api)}-cli-tools&pane=${encodeURIComponent(panes.api)}`, async (page) => {
         await waitSelected(page, INFRA);
-        await waitQuery(page, "ws", `${wsOf(INFRA)}-infra`);
+        await waitQuery(page, "ws", `${wsOf(INFRA)}-cli-tools`);
         assert.equal(await note(page), "That agent has closed: its workspace is open");
       });
       await withPage(browser, `?ws=w9z-gone&pane=${encodeURIComponent("w9z:p1")}`, async (page) => {
@@ -237,28 +238,31 @@ try {
       });
       console.log("PASS a link to a Settings group scrolls to and focuses it, and another page drops it from the address");
 
-      // a link to a file opens it over its pane; closing the viewer takes it off the address
+      // a link to a file opens it beside its pane (a panel from 980px); closing the viewer takes it off the address
       await withPage(browser, `?ws=${wsOf(INFRA)}&pane=${encodeURIComponent(INFRA)}&file=README.md`, async (page) => {
-        await page.locator(".modal.file-viewer").waitFor();
+        await page.locator("aside.file-panel .file-viewer").waitFor();
+        assert.equal(await page.locator(".modal.file-viewer, .file-viewer-scrim").count(), 0, "a wide window docks the file, no dialog");
         await waitQuery(page, "file", "README.md");
+        // the pane beside the panel keeps its own Escape: the panel's is pressed from inside it
+        await page.locator("aside.file-panel").getByRole("button", { name: "Close file", exact: true }).focus();
         await page.keyboard.press("Escape");
-        await page.locator(".modal.file-viewer").waitFor({ state: "detached" });
+        await page.locator("aside.file-panel").waitFor({ state: "detached" });
         await waitQuery(page, "file", null);
         await waitQuery(page, "pane", INFRA);
       });
       // a reload restores the viewer from its own entry; Back then closes it for good
       await withPage(browser, `?ws=${wsOf(INFRA)}&pane=${encodeURIComponent(INFRA)}&file=README.md`, async (page) => {
-        await page.locator(".modal.file-viewer").waitFor();
+        await page.locator("aside.file-panel .file-viewer").waitFor();
         await page.reload();
-        await page.locator(".modal.file-viewer").waitFor();
+        await page.locator("aside.file-panel .file-viewer").waitFor();
         await page.goBack();
-        await page.locator(".modal.file-viewer").waitFor({ state: "detached" });
+        await page.locator("aside.file-panel").waitFor({ state: "detached" });
         for (const deadline = Date.now() + 1_500; Date.now() < deadline;) {
-          assert.equal(await page.locator(".modal.file-viewer").count(), 0, "the linked file does not open again after Back closed it");
+          assert.equal(await page.locator(".file-viewer").count(), 0, "the linked file does not open again after Back closed it");
           await page.waitForTimeout(100);
         }
       });
-      console.log("PASS a link to a file opens it over its pane, and closing the viewer takes it off the address");
+      console.log("PASS a link to a file opens it beside its pane, and closing the viewer takes it off the address");
 
       // Copy link puts the address on the clipboard and says so
       await withPage(browser, `?ws=${wsOf(DOCS)}&pane=${encodeURIComponent(DOCS)}`, async (page) => {
@@ -294,7 +298,7 @@ try {
       });
       // an agent herdr does not offer is left out, and a tab link opens the dialog for the linked workspace
       await withPage(browser, `?ws=${wsOf(INFRA)}-infra&new=tab&agent=nope`, async (page) => {
-        const dialog = page.getByRole("dialog", { name: /New tab · infra/ });
+        const dialog = page.getByRole("dialog", { name: /New tab · cli-tools/ });
         await dialog.waitFor();
         await waitQuery(page, "new", "tab");
         // the dialog drops it once herdr's agents are in, and the address follows a moment later
@@ -378,7 +382,7 @@ try {
           await page.goto(`${url}?ws=${wsOf(INFRA)}&pane=${encodeURIComponent(INFRA)}&sidebar=shown`);
           await page.locator('.drawer-toggle[aria-expanded="true"]').waitFor();
           await waitQuery(page, "sidebar", null);
-          await page.goto(`${url}?ws=${wsOf(panes.api)}-infra&pane=${encodeURIComponent(panes.api)}`);
+          await page.goto(`${url}?ws=${wsOf(panes.api)}-cli-tools&pane=${encodeURIComponent(panes.api)}`);
           await page.locator(".header-note").waitFor();
           const bounds = await page.evaluate(() => {
             const header = document.querySelector(".app-header")!;
@@ -463,7 +467,7 @@ try {
         const page = await delayedContext.newPage();
         const errors: string[] = [];
         page.on("pageerror", (error) => errors.push(error.message));
-        await page.goto(`${url}?machine=unregistered-PC&ws=${wsOf(INFRA)}-infra&pane=${encodeURIComponent(INFRA)}&view=chat`);
+        await page.goto(`${url}?machine=unregistered-PC&ws=${wsOf(INFRA)}-cli-tools&pane=${encodeURIComponent(INFRA)}&view=chat`);
         await page.locator(".header-note").waitFor();
         await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
         assert.equal(new URL(page.url()).searchParams.get("machine"), "unregistered-PC", "the fallback cannot rewrite the link before its local roster arrives");
@@ -499,7 +503,8 @@ try {
       });
       console.log("PASS a pane Back selects under an open modal does not take the keyboard out of it");
 
-      // Phone touch controls cannot open the palette; resizing restores the Files entry.
+      // A phone's header has no palette button: the More menu's first item opens it by touch.
+      // Files offers no palette entry on a phone; resizing restores it.
       const palettePhone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
       try {
         await palettePhone.addInitScript(() => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en" })));
@@ -510,7 +515,9 @@ try {
         await page.locator(".header-more-button").tap();
         const more = page.getByRole("dialog", { name: "More", exact: true });
         await more.waitFor();
-        assert.equal(await more.getByRole("button", { name: "Command palette", exact: true }).count(), 0, "More has no palette entry");
+        const search = more.getByRole("button", { name: "Search panes and actions", exact: true });
+        assert.equal(await search.count(), 1, "More offers Search panes and actions");
+        assert.equal((await more.locator(".row-sheet-item .row-sheet-label").allTextContents())[0], "Search panes and actions", "Search panes and actions is More's first item");
         await more.getByRole("button", { name: "Browse files", exact: true }).tap();
         const files = page.getByRole("dialog", { name: "Files", exact: true });
         await files.waitFor();
@@ -530,8 +537,16 @@ try {
         await browse.waitFor({ state: "detached" });
         await page.keyboard.press("ControlOrMeta+Shift+K");
         await palette.waitFor();
+        await page.keyboard.press("Escape");
+        await palette.waitFor({ state: "detached" });
+        await page.locator(".header-more-button").tap();
+        await more.waitFor();
+        await search.tap();
+        await palette.waitFor();
+        await page.waitForFunction(() => document.activeElement?.matches(".command-palette .palette-search input") === true, undefined, { timeout: 5000 });
+        assert.equal(await more.count(), 0, "the More sheet has gone");
       } finally { await palettePhone.close(); }
-      console.log("PASS phone header, More and Files omit palette entry points; wider Files and keyboard shortcuts still open it");
+      console.log("PASS phone header and Files omit palette buttons; More's first item opens the palette by touch; wider Files and keyboard shortcuts still open it");
 
       // a phone's ⋯ sheet is an entry of its own: Back closes it and stays on the pane; a sheet
       // closed by Cancel or by an item leaves no entry behind, so the next Back goes to the pane before

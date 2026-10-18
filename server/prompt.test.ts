@@ -12,6 +12,14 @@ const labels = (prompt: InteractivePrompt | null) => prompt?.options.map((option
 const omoPendingFixture = (name: string) => readFileSync(new URL(`./fixtures/omo-pending-5.1.30-${name}`, import.meta.url), "utf8");
 const omoExtensionTail = omoPendingFixture("extension-tail.txt");
 const withOmoExtensionTail = (screen: string) => screen.replace(/(❯\n─+\n)/, `$1${omoExtensionTail}`);
+// OmO's omo-task widget rows under the input box, as a live pane shows them: a live row wrapped onto a
+// second line, a live row, a finished row and the `+N more` line
+const omoTaskRows = ` ⠦ AdversarialVerify todo 2... · agent:omo-native-gate-reviewer(openai/gpt-6-astra:high) · turn 10 (47 tools) · $3.2103 · 26779 tok/s · running · 6m
+ 0s
+ ⠋ Map the implementation surface · category:quick · running · 41s
+ Review diff|agent:explore background completed
+ +2 more
+`;
 const CLAUDE_BACKGROUND_APPROVAL_FOOTER = "Esc to cancel · ctrl+x ctrl+k twice to stop background agents";
 const claudeBackgroundApproval = (selected: number, footer = CLAUDE_BACKGROUND_APPROVAL_FOOTER) => {
   const row = (index: number, label: string) => `${index === selected ? " ❯ " : "   "}${index + 1}. ${label}`;
@@ -178,6 +186,337 @@ Claude has written up a plan and is ready to execute. Would you like to proceed?
     expect(labels(approval)).toEqual(["Approve", "Deny"]);
   });
 
+  test("recognizes OMP's clipped legacy single-select footer only with its full menu identity", () => {
+    const screen = (footer = "Enter select · n note · ↑/↓ move · Tab/←/→ · Esc can…", rows = ["❯ ○ Local socket", "  ○ Remote relay", "  ○ Other (type your own)"], suffix = "") => `
+╭─ Ask ─────────────────────────────────────────────────╮
+│ Which route should carry the fictional session?       │
+├───────────────────────────────────────────────────────┤
+${rows.map((row) => `│ ${row.padEnd(52)}│`).join("\n")}
+├───────────────────────────────────────────────────────┤
+│ ${footer.padEnd(52)}│
+╰───────────────────────────────────────────────────────╯${suffix}
+`;
+    const prompt = parseInteractivePrompt("omp", screen());
+    expect(prompt).toMatchObject({ kind: "question", question: "Which route should carry the fictional session?", custom_option_index: 2 });
+    expect(labels(prompt)).toEqual(["Local socket", "Remote relay"]);
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+    for (const clipped of ["c…", "ca…", "can…", "canc…", "cance…"]) {
+      expect(parseInteractivePrompt("omp", screen(`Enter select · n note · ↑/↓ move · Tab/←/→ · Esc ${clipped}`))).not.toBeNull();
+    }
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Esc ca…"))).not.toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Esc…"))).not.toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Tab/←/→…"))).not.toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Tab/←/→..."))).not.toBeNull();
+
+    expect(parseInteractivePrompt("omp", screen("Enter select · ↑/↓ move · Tab/←/→ · Esc can…"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · Tab/←/→ · Esc can…"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · ↑/↓ move · Tab/←/→…"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Tab/←/→"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Tab/←/…"))).toBeNull();
+    for (const unmarked of ["c", "ca", "can"]) {
+      expect(parseInteractivePrompt("omp", screen(`Enter select · n note · ↑/↓ move · Tab/←/→ · Esc ${unmarked}`))).toBeNull();
+    }
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Esc"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen("Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cypress…"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen(undefined, ["❯ ○ Local socket", "  ○ Remote relay"]))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen(undefined, ["❯ ○ Local socket", "❯ ○ Remote relay", "  ○ Other (type your own)"]))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen(undefined, ["❯ ○ Local socket", "  ○ Remote relay", "  Other (type your own)"]))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen(undefined, ["❯ ○ Local socket", " ○ Remote relay", "  ○ Other (type your own)"]))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen(undefined, ["   ❯ ○ Local socket", "     ○ Remote relay", "     ○ Other (type your own)"]))).not.toBeNull();
+    expect(parseInteractivePrompt("omp", screen(undefined, undefined, "\nUnrelated output\n"))).toBeNull();
+  });
+
+
+  test("parses current OMP question hints and keeps descriptions out of the answer rows", () => {
+    const screen = `
+╭─ Ask ───────────────────────────╮
+│ Which deployment target?       │
+├────────────────────────────────┤
+│❯ ○ ARM server                   │
+│      Runs on the lab machine     │
+│  ○ x86 runner                   │
+│      ○ supports the hosted runner│
+│      for Linux builds            │
+│  ○ Other (type your own)        │
+├────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · ⎋ cancel │
+╰────────────────────────────────╯
+`;
+    const prompt = parseInteractivePrompt("omp", screen);
+    expect(prompt).toMatchObject({ kind: "question", question: "Which deployment target?", multi_select: false, custom_option_index: 2 });
+    expect(prompt?.options).toEqual([
+      { label: "ARM server", description: "Runs on the lab machine" },
+      { label: "x86 runner", description: "○ supports the hosted runner for Linux builds" },
+    ]);
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+    expect(answerKeys(prompt!, { custom_text: "A local test runner" })).toEqual([
+      { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] },
+      { text: "A local test runner" }, { keys: ["enter"] },
+    ]);
+  });
+
+  test("keeps glyphs in wrapped OMP labels and descriptions out of the option column", () => {
+    const prompt = parseInteractivePrompt("omp", `
+╭─ Ask ───────────────────────────╮
+│ Which deployment target?       │
+├────────────────────────────────┤
+│❯ ○ ARM server with an           │
+│    ○ unusually long label       │
+│      ☑ supports the hosted image│
+│  ○ x86 runner                   │
+│  ○ Other (type your own)        │
+├────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · ⎋ cancel │
+╰────────────────────────────────╯
+`);
+    expect(prompt?.options).toEqual([
+      { label: "ARM server with an ○ unusually long label", description: "☑ supports the hosted image" },
+      { label: "x86 runner", description: null },
+    ]);
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  test("anchors option markers to the selected row in OMP's padded panel", () => {
+    const prompt = parseInteractivePrompt("omp", `
+╭─ Ask ───────────────────────────╮
+│ Which deployment target?       │
+├────────────────────────────────┤
+│ ❯ ○ ARM server                  │
+│       ○ supports ARM builds     │
+│   ○ x86 runner                  │
+│       Hosted Linux builds       │
+│   ○ Other (type your own)       │
+├────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · ⎋ cancel │
+╰────────────────────────────────╯
+`);
+    expect(prompt?.options).toEqual([
+      { label: "ARM server", description: "○ supports ARM builds" },
+      { label: "x86 runner", description: "Hosted Linux builds" },
+    ]);
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  test("keeps OMP's native question tab strip out of the question title", () => {
+    const screen = `
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.11.1 is available. Run: omp update
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⎋ Working…
+╭─ Ask ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  Transport    Targets    Notes    Narrow view    Submit                                                             │
+│ Which route should carry the fictional session?                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ❯ ○ Local socket                                                                                                    │
+│       Keeps the session on this PC.                                                                                 │
+│   ○ Remote relay                                                                                                    │
+│       Uses the fictional remote endpoint.                                                                           │
+│   ○ Other (type your own)                                                                                           │
+│                                                                                                                     │
+│                                                                                                                     │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · ⇥/←/→ question · ⎋ cancel · Alt+H hide                                               │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+`;
+    const prompt = parseInteractivePrompt("omp", screen);
+    expect(prompt).toMatchObject({ question: "Which route should carry the fictional session?", custom_option_index: 2 });
+    expect(labels(prompt)).toEqual(["Local socket", "Remote relay"]);
+    expect(prompt?.options.map((option) => option.description)).toEqual([
+      "Keeps the session on this PC.", "Uses the fictional remote endpoint.",
+    ]);
+    expect(parseInteractivePrompt("omp", screen.replace(
+      "Which route should carry the fictional session?",
+      "Should we choose   Submit\n│ or Cancel for the fictional task?",
+    ))?.question).toBe("Should we choose Submit or Cancel for the fictional task?");
+    expect(parseInteractivePrompt("omp", screen.replace(
+      "Transport    Targets    Notes    Narrow view    Submit",
+      "Transport    Targets    Notes\n│  Narrow view    Submit",
+    ))?.question).toBe("Which route should carry the fictional session?");
+    expect(parseInteractivePrompt("omp", screen.replace(
+      "Transport    Targets    Notes    Narrow view    Submit",
+      "Transport\n│  Targets\n│  Notes\n│  Narrow view\n│  Submit",
+    ))?.question).toBe("Which route should carry the fictional session?");
+    expect(parseInteractivePrompt("omp", screen.replace(
+      "Transport    Targets    Notes    Narrow view    Submit",
+      "Transport    Targ…",
+    ))?.question).toBe("Which route should carry the fictional session?");
+    expect(parseInteractivePrompt("omp", screen.replace(
+      "Which route should carry the fictional session?",
+      "Submit\n│    Cancel\n│ Which action should run?",
+    ))?.question).toBe("Submit Cancel Which action should run?");
+  });
+
+  test("recognizes OMP's clipped single-question footer only with its question controls", () => {
+    const screen = `
+╭─ Ask ─────────────────────────────────────────────────╮
+│  Transport    Targets    Notes    Narrow view         │
+│  Submit                                               │
+│ Which deliberately long answer should remain readable │
+│ when the native question wraps across a narrow        │
+│ terminal?                                             │
+├───────────────────────────────────────────────────────┤
+│ ❯ ○ Local socket                                      │
+│   ○ Remote relay                                      │
+│   ○ Other (type your own)                             │
+├───────────────────────────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · ⇥/←/→ question · ↓ sc… │
+╰───────────────────────────────────────────────────────╯
+`;
+    const prompt = parseInteractivePrompt("omp", screen);
+    expect(prompt).toMatchObject({
+      kind: "question", question: "Which deliberately long answer should remain readable when the native question wraps across a narrow terminal?",
+    });
+    expect(labels(prompt)).toEqual(["Local socket", "Remote relay"]);
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+    expect(parseInteractivePrompt("omp", screen.replace("n note · ", ""))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen.replace("⇥/←/→ question", "⇥/←/→ navigate"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen.replace("│   ○ Other (type your own)                             │\n", ""))).toBeNull();
+  });
+
+  test("recognizes OMP's question hint when the word itself is clipped", () => {
+    const screen = `
+╭─ Ask ───────────────────────────────────────╮
+│  Transport    Targets    Notes              │
+│  Narrow view    Submit                      │
+│ Which fictional answer should remain        │
+│ readable when this question wraps across a  │
+│ narrow terminal?                            │
+├─────────────────────────────────────────────┤
+│ ❯ ○ A fictional answer that wraps across    │
+│     the narrow native terminal              │
+│       A synthetic description that also     │
+│       wraps at narrow terminal widths.      │
+│   ○ Other (type your own)                   │
+├─────────────────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · ⇥/←/→ quest… │
+╰─────────────────────────────────────────────╯
+`;
+    const prompt = parseInteractivePrompt("omp", screen);
+    expect(prompt).toMatchObject({
+      question: "Which fictional answer should remain readable when this question wraps across a narrow terminal?",
+      options: [{
+        label: "A fictional answer that wraps across the narrow native terminal",
+        description: "A synthetic description that also wraps at narrow terminal widths.",
+      }],
+    });
+    expect(answerKeys(prompt!, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+    for (const prefix of ["q", "qu", "que", "ques", "questi", "questio", "question"]) {
+      expect(parseInteractivePrompt("omp", screen.replace("quest…", `${prefix}…`))?.question).toBe(prompt?.question);
+    }
+    for (const unrelated of ["quest", "query…", "questions…"]) {
+      expect(parseInteractivePrompt("omp", screen.replace("quest…", unrelated))).toBeNull();
+    }
+    expect(parseInteractivePrompt("omp", screen.replace("n note · ", ""))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen.replace("│   ○ Other (type your own)                   │\n", ""))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen + "\nAgent resumed")).toBeNull();
+  });
+
+  test("parses OMP's review tab as an explicit submit or cancel prompt", () => {
+    const screen = `
+╭─ Ask ──────────────────────────────────────────────────────────╮
+│  Transport    Targets    Submit                                │
+│ Review answers                                                  │
+├────────────────────────────────────────────────────────────────┤
+│ 1. Transport: Remote relay                                      │
+│ 2. Targets: ARM server                                          │
+│                                                                 │
+│ ❯ Submit                                                        │
+│                                                                 │
+├────────────────────────────────────────────────────────────────┤
+│ ⏎ submit · ↑/↓ scroll · ⎋ cancel · Alt+H hide                  │
+╰────────────────────────────────────────────────────────────────╯
+`;
+    const prompt = parseInteractivePrompt("omp", screen);
+    expect(prompt).toMatchObject({
+      kind: "menu", title: "Review answers", question: "Submit these answers?", custom_option_index: null,
+    });
+    expect(prompt?.answers).toEqual([
+      { question: "Transport", answer: "Remote relay" },
+      { question: "Targets", answer: "ARM server" },
+    ]);
+    expect(prompt?.body).toBeNull();
+    expect(labels(prompt)).toEqual(["Submit", "Cancel"]);
+    const noted = parseInteractivePrompt("omp", screen
+      .replace("│ 1. Transport: Remote relay                                      │\n", "│ 1 unanswered question; Enter still submits.                     │\n│                                                                 │\n│ 1. Transport: Remote relay                                      │\n│    Note: keep the old relay                                     │\n")
+      .replace("2. Targets: ARM server        ", "2. Targets:                    "));
+    expect(noted?.answers).toEqual([
+      { question: "Transport", answer: "Remote relay", note: "keep the old relay" },
+      { question: "Targets", answer: null },
+    ]);
+    expect(noted?.body).toBe("1 unanswered question; Enter still submits.");
+    expect(answerKeys(prompt!, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["esc"] }]);
+    expect(() => answerKeys(prompt!, { custom_text: "submit now" })).toThrow();
+    expect(parseInteractivePrompt("omp", screen.replace("❯ Submit", "  Submit"))).toBeNull();
+    expect(parseInteractivePrompt("omp", screen.replace("Review answers", "Ordinary title"))).toBeNull();
+  });
+
+  test("parses current OMP multi-select hints with checked choices and safe option indices", () => {
+    const screen = `
+╭─ Ask ───────────────────────────╮
+│ Which checks should run?        │
+├────────────────────────────────┤
+│  ☒ Lint                         │
+│❯ ☐ Unit tests                   │
+│      ☑ runs without external     │
+│      tools                      │
+│  ☐ Browser checks               │
+│  ○ Other (type your own)        │
+├────────────────────────────────┤
+│ ␠ toggle · ⏎ submit · ↑/↓ move · Tab/←/→ question · ⎋ cancel │
+╰────────────────────────────────╯
+`;
+    const prompt = parseInteractivePrompt("omp", screen);
+    expect(prompt).toMatchObject({ kind: "question", multi_select: true });
+    expect(prompt?.options).toEqual([
+      { label: "Lint", description: null },
+      { label: "Unit tests", description: "☑ runs without external tools" },
+      { label: "Browser checks", description: null },
+    ]);
+    expect(answerKeys(prompt!, { option_indices: [1, 2] })).toEqual([
+      { keys: ["up"] }, { keys: ["space"] },
+      { keys: ["down"] }, { keys: ["space"] },
+      { keys: ["down"] }, { keys: ["space"] },
+      { keys: ["enter"] },
+    ]);
+  });
+
+  test("advances a current OMP multi question without switching to the next question", () => {
+    const prompt = parseInteractivePrompt("omp", `
+╭─ Ask ───────────────────────────╮
+│ Which platforms should run?     │
+├────────────────────────────────┤
+│  ☑ Linux                         │
+│❯ ☐ macOS                         │
+│  ☐ Other (type your own)        │
+├────────────────────────────────┤
+│ ␠ toggle · ⏎ next · ↑/↓ move · Tab/←/→ question · ⎋ cancel │
+╰────────────────────────────────╯
+`);
+    expect(prompt).toMatchObject({ multi_select: true, custom_option_index: null });
+    expect(answerKeys(prompt!, { option_indices: [0, 1] })).toEqual([
+      { keys: ["space"] }, { keys: ["enter"] },
+    ]);
+  });
+
+  test("leaves the Other row before advancing a current OMP multi question", () => {
+    const prompt = parseInteractivePrompt("omp", `
+╭─ Ask ───────────────────────────╮
+│ Which platforms should run?     │
+├────────────────────────────────┤
+│  ☑ Linux                         │
+│  ☐ macOS                         │
+│❯ ☐ Other (type your own)        │
+├────────────────────────────────┤
+│ ␠ toggle · ⏎ next · ↑/↓ move · Tab/←/→ question · ⎋ cancel │
+╰────────────────────────────────╯
+`);
+    expect(prompt).toMatchObject({ multi_select: true, custom_option_index: null });
+    expect(answerKeys(prompt!, { option_indices: [0] })).toEqual([{ keys: ["up"] }, { keys: ["enter"] }]);
+  });
+
   test("parses Codex continue, question, async question, and approval prompts", () => {
     const menu = parseInteractivePrompt("codex", `
 ✨ Update available! 0.146.0 -> 0.146.1
@@ -290,7 +629,11 @@ Ready to submit your answers?
 `);
     // a menu: a typed pick submits every answer at once, so the chat asks for Confirm
     expect(review).toMatchObject({ kind: "menu", title: "Review your answers", question: "Ready to submit your answers?", custom_option_index: null });
-    expect(review?.body).toContain("→ Repo owner");
+    expect(review?.answers).toEqual([
+      { question: "Which way should the PR go?", answer: "Log in as owner" },
+      { question: "Who should author the commits?", answer: "Repo owner" },
+    ]);
+    expect(review?.body).toBeNull();
     expect(labels(review)).toEqual(["Submit answers", "Cancel"]);
 
     const bash = parseInteractivePrompt("claude", `
@@ -464,6 +807,32 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     expect(trust).toMatchObject({ kind: "approval", title: "Trust this folder?", body: "Codex can read, edit, and run files here, subject to your permission settings." });
     expect(labels(trust)).toEqual(["Trust and continue", "Back to Agent Command Center"]);
     expect(answerKeys(trust!, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+  });
+
+  test("parses Codex's folder trust prompt when its hint ends with esc quit", () => {
+    const trust = parseInteractivePrompt("codex", `
+  Folder access
+  /tmp/prompt-lab-codex
+  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.
+› 1. Trust and continue
+  2. Open restricted
+  enter continue · esc quit
+`);
+    expect(trust).toMatchObject({ kind: "approval", title: "Trust this folder?" });
+    expect(labels(trust)).toEqual(["Trust and continue", "Open restricted"]);
+    expect(answerKeys(trust!, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+  });
+
+  test("does not read Codex's update prompt as an approval under a question-like line", () => {
+    expect(parseInteractivePrompt("codex", `
+• Would you like to continue with the tests next?
+
+  Update available! 0.162.1 -> 0.163.0
+› 1. Update now
+  2. Skip
+  3. Skip until next version
+  enter continue · esc skip
+`)).toBeNull();
   });
 
   test("ignores unknown agents, stale transcript menus, and ordinary output", () => {
@@ -1068,16 +1437,77 @@ ${rule}
       const card = parseInteractivePrompt("claude", withRule(rows));
       expect(card).toMatchObject({ kind: "menu", title: "Review your answers", question: "Ready to submit your answers?", custom_option_index: null });
       expect(labels(card)).toEqual(["Submit answers", "Cancel"]);
-      expect(card?.body).toContain("→ Repo owner");
+      expect(card?.answers?.map((item) => item.question)).toEqual([
+        "Which way should the PR go?", "Who should author the commits?", "What should the release notes say?",
+      ]);
+      expect(card?.answers?.[1]).toEqual({ question: "Who should author the commits?", answer: "Repo owner" });
       expect(answerKeys(card!, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
     }
+  });
+
+  test("reads a question the pane wrapped as one line, not as the terminal broke it", () => {
+    const card = parseInteractivePrompt("claude", `
+←  ☒ Names  ☒ Replay  ✔ Submit  →
+
+Review your answers
+
+ ● What should the two top-level rows be called?
+   → Fictional repo names (Recommended)
+ ● The demo's terminal replay (git log, bun test, the pretend shell) lives in the 'release' shell workspace. What
+ happens to it?
+   → Second tab in a repo (Recommended)
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+`);
+    expect(card?.answers).toEqual([
+      { question: "What should the two top-level rows be called?", answer: "Fictional repo names (Recommended)" },
+      { question: "The demo's terminal replay (git log, bun test, the pretend shell) lives in the 'release' shell workspace. What happens to it?", answer: "Second tab in a repo (Recommended)" },
+    ]);
+    expect(card?.body).toBeNull();
+  });
+
+  test("keeps Claude's own warning out of the answers, and marks what the top cut off", () => {
+    // Claude Code 2.1.302 draws the warning at the panel's edge, the answers indented
+    const card = parseInteractivePrompt("claude", `
+←  ☐ Names  ☒ Replay  ✔ Submit  →
+
+Review your answers
+
+⚠ You have not answered all questions
+
+ ● The demo's terminal replay lives in the 'release' shell workspace. What happens to it?
+   → Second tab in a repo
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+`);
+    expect(card?.answers).toEqual([{ question: "The demo's terminal replay lives in the 'release' shell workspace. What happens to it?", answer: "Second tab in a repo" }]);
+    expect(card?.body).toBe("⚠ You have not answered all questions");
+
+    // the pane's top cut an answer: its rest is shown as a rest, not as a question
+    const cut = parseInteractivePrompt("claude", tall.replace(/^[\s\S]*?(?=   the chat my own words typed in the chat\n)/, "\n"));
+    expect(cut?.answers?.[0]).toEqual({ question: null, answer: "…the chat my own words typed in the chat" });
+    expect(cut?.answers?.[1]?.answer).toBe("Once a day");
   });
 
   test("reads a review cut off at the top of the pane, its tabs and heading out of view", () => {
     const card = parseInteractivePrompt("claude", tall);
     expect(card).toMatchObject({ kind: "menu", title: "Review your answers", question: "Ready to submit your answers?" });
     expect(labels(card)).toEqual(["Submit answers", "Cancel"]);
-    expect(card?.body).toContain("→ Once a day");
+    // the wrapped lines of a question and of an answer read as one line each
+    expect(card?.answers).toEqual([
+      {
+        question: "The PC splits traffic between the main server and the reserve almost evenly, because both servers sit in the same city and answer equally fast. Which way should we go?",
+        answer: "my own words typed in the chat ".repeat(5).trim(),
+      },
+      { question: "After every subscription update the client restarts the tunnel. How often should the subscription be updated?", answer: "Once a day" },
+      { question: "The client has no leak protection. What should we do?", answer: `${"my own words typed in the chat ".repeat(3)}my own words typed in my own words typed in the chat my o` },
+    ]);
   });
 
   test("does not take an answered review above later output and the session's rule for an open one", () => {
@@ -1604,6 +2034,37 @@ ${rule60}
     });
   }
 
+  for (const count of ["one", "two"]) for (const width of ["wide", "narrow"]) {
+    test(`reads the real 5.1.30 ${count}-question ${width} widget with task rows below the box`, () => {
+      const open = openOmoAsks(omoPendingFixture(`${count}.jsonl`));
+      const screen = omoPendingFixture(`${count}-${width}.txt`).replace(/(❯\n─+\n)/, `$1${omoTaskRows}`);
+      expect(screen).toContain(omoTaskRows);
+      expect(parseInteractivePrompt("pi", screen, null, false, open)).toMatchObject({ agent: "omo", kind: "question" });
+      expect(parseInteractivePrompt("pi", `${screen}$ echo after\n`, null, false, open)).toBeNull();
+      expect(parseInteractivePrompt("pi", screen.replace(omoTaskRows, `${omoTaskRows}${" ordinary output\n".repeat(4)}`), null, false, open)).toBeNull();
+    });
+  }
+
+  test("keeps a form dead under output that only looks like OmO task rows", () => {
+    const open = openOmoAsks(omoPendingFixture("one.jsonl"));
+    const screen = omoPendingFixture("one-wide.txt");
+    const under = (rows: string) => parseInteractivePrompt("pi", screen.replace(/(❯\n─+\n)/, `$1${rows}`), null, false, open);
+    const liveRow = omoTaskRows.split("\n")[0]!;
+    expect(under(omoTaskRows)).not.toBeNull();
+    // a spinner line without a task route is another program's output
+    expect(under(" ⠦ compiling…\n")).toBeNull();
+    // a shell prompt is never a task row, whatever follows it
+    expect(under(" $ echo x|agent:explore background completed\n")).toBeNull();
+    // two unknown lines and the native footer overflow the footer budget
+    expect(under(`${liveRow}\n${" ordinary output\n".repeat(2)}`)).toBeNull();
+    expect(under(`${liveRow}\n $ echo after\n`)).toBeNull();
+  });
+
+  test("reads an OmO waiting form with task rows under its rule", () => {
+    const extended = first.replace(footer, footer.replace(`${rule}\n`, `${rule}\n${omoTaskRows}`));
+    expect(parseInteractivePrompt("pi", extended)).toMatchObject({ agent: "omo", kind: "question", title: "Question 1 of 2" });
+  });
+
   test("reads an OmO waiting form with extension status under its rule", () => {
     const extended = first.replace(footer, footer.replace(`${rule}\n`, `${rule}\n${omoExtensionTail}`));
     expect(parseInteractivePrompt("pi", extended)).toMatchObject({ agent: "omo", kind: "question", title: "Question 1 of 2" });
@@ -1637,6 +2098,10 @@ ${rule60}
       const extended = screen.replace(footer, footer.replace(`${rule}\n`, `${rule}\n${omoExtensionTail}`));
       expect(parseInteractivePrompt("pi", extended)).toEqual(expected);
       expect(parseInteractivePrompt("pi", `${extended}$ `)).toBeNull();
+      // the same forms with OmO's task rows under the rule
+      const withTasks = screen.replace(footer, footer.replace(`${rule}\n`, `${rule}\n${omoTaskRows}`));
+      expect(parseInteractivePrompt("pi", withTasks)).toEqual(expected);
+      expect(parseInteractivePrompt("pi", `${withTasks}$ `)).toBeNull();
     }
   });
 
@@ -1797,6 +2262,47 @@ describe("Claude's suggested next prompt", () => {
     expect(claudeInputDraft(strip(screen('\u276f Try "x"')), screen('\u276f Try "x"'))).toBe(true);
     // colors not verified to show the live screen prove nothing
     expect(claudeInputDraft(strip(tip), null)).toBe(true);
+  });
+
+  test("Claude's IDE pill after the ❯ is no draft and hides no suggestion (#1096)", () => {
+    // Claude Code 2.1.302, from its bundle (not a captured screen): with an editor connected the input's
+    // leading pill `[⧉ N lines selected] ` or `[⧉ In <file>] ` is painted in the theme's IDE color, not
+    // dim, before the placeholder (its first character inverse, the rest dim)
+    const strip = (ansi: string) => ansi.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+    const pill = (label: string) => `\u001b[38;2;71;130;200m[⧉ ${label}] \u001b[39m`;
+    const grey = (text: string) => `\u001b[7m${text[0]}\u001b[27m\u001b[2m${text.slice(1)}\u001b[22m`;
+    const read = (row: string) => {
+      const ansi = screen(row);
+      const live = strip(ansi);
+      return { draft: claudeInputDraft(live, ansi), empty: claudeInputEmpty(live, ansi), clearable: claudeClearableDraft(live, ansi) };
+    };
+    const empty = { draft: false, empty: true, clearable: null };
+    expect(read(`❯ ${pill("1 line selected")}${grey('Try "refactor this function"')}`)).toEqual(empty);
+    expect(read(`❯ ${pill("In src/foo.ts")}${grey('Try "refactor this function"')}`)).toEqual(empty);
+    expect(read(`❯ ${pill("1 line selected")}\u001b[7m \u001b[27m`)).toEqual(empty);
+    expect(read(`❯ ${pill("12 lines selected")}`)).toEqual(empty);
+    expect(read(`❯ ${grey('Try "refactor this function"')}`)).toEqual(empty);
+    // a pill alone needs no colors to read as empty
+    expect(claudeInputDraft(strip(screen(`❯ ${pill("12 lines selected")}`)), null)).toBe(false);
+    // typed text after the pill is a draft, offered for clearing without the pill
+    expect(read(`❯ ${pill("1 line selected")}hello there\u001b[7m \u001b[27m`)).toEqual({ draft: true, empty: false, clearable: "hello there " });
+    expect(read(`❯ ${pill("In src/foo.ts")}\u001b[7mr\u001b[27mun`)).toEqual({ draft: true, empty: false, clearable: "run" });
+    // Claude's suggestion after the pill is still offered, its tip still is not
+    expect(parseClaudeSuggestion(screen(`❯ ${pill("3 lines selected")}${grey("run the tests again")}`))).toBe("run the tests again");
+    expect(parseClaudeSuggestion(screen(`❯ ${pill("3 lines selected")}${grey('Try "refactor this function"')}`))).toBeNull();
+    expect(parseClaudeSuggestion(screen(`❯ ${pill("3 lines selected")}typed`))).toBeNull();
+    // the chat's own message restored after the pill is that message
+    const restored = screen(`❯ ${pill("1 line selected")}run the tests`);
+    expect(claudeRestoredDraft(strip(restored), restored, "run the tests")).toBe("run the tests");
+    // drawn without colors (NO_COLOR): the pill and the tip after it are no draft, typed words are
+    const plainRule = "\u2500".repeat(60);
+    const colorless = (row: string) => ["", plainRule, row, plainRule, "  \u23f5\u23f5 auto mode on (shift+tab to cycle)"].join("\r\n");
+    const tip = colorless('❯ [⧉ 1 line selected] \u001b[7mT\u001b[27mry "refactor this function"');
+    expect(claudeInputDraft(strip(tip), tip)).toBe(false);
+    expect(claudeInputEmpty(strip(tip), tip)).toBe(true);
+    const typed = colorless("❯ [⧉ 1 line selected] Try this instead");
+    expect(claudeInputDraft(strip(typed), typed)).toBe(true);
+    expect(claudeClearableDraft(strip(typed), typed)).toBe("Try this instead");
   });
 
   test("OmO's box while it works, under a rule its status labels, is read like Claude's", () => {
@@ -3016,6 +3522,46 @@ ${"─".repeat(120)}
     for (const agent of ["codex", "omp", "pi", "omo", ""]) expect(parseInteractivePrompt(agent, captured)).toBeNull();
   });
 
+  test("reads 2.1.301's slider, which describes the level between the names and the hint", () => {
+    // captures from Claude Code 2.1.301: one line under the names at low, two at max
+    const rule = "▔".repeat(120);
+    const low = `❯ /effort
+${rule}
+   Effort
+
+                             Faster                             Smarter
+                             ─▲────────────────────────────────────────      Ultracode  off
+                             low     medium     high     xhigh      max      Tab to toggle
+
+                                    ~0.7x the estimated cost of medium (the default)
+
+
+   ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel
+`;
+    const max = `❯ /effort
+${rule}
+   Effort
+
+                             Faster                             Smarter
+                             ────────────────────────────────────────▲─      Ultracode  off
+                             low     medium     high     xhigh      max      Tab to toggle
+
+    May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.
+    (~5.2x)
+
+   ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel
+`;
+    const atLow = parseInteractivePrompt("claude", low)!;
+    expect(labels(atLow)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(answerKeys(atLow, { option_index: 2 })).toEqual([{ keys: ["right"] }, { keys: ["right"] }, { text: "s" }]);
+    const atMax = parseInteractivePrompt("claude", max)!;
+    expect(atMax.id).toBe(atLow.id);
+    expect(answerKeys(atMax, { option_index: 3 })).toEqual([{ keys: ["left"] }, { text: "s" }]);
+    // the description a narrow pane wrapped over more lines is still between the names and the hint
+    const wrapped = max.replace("Use sparingly for the hardest tasks.", "\n    Use sparingly\n    for the hardest tasks.");
+    expect(labels(parseInteractivePrompt("claude", wrapped)!)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
   test("moves with ←/→ from the level ▲ is over and picks with s, never with Enter", () => {
     const prompt = parseInteractivePrompt("claude", claudeEffort(2))!;
     expect(answerKeys(prompt, { option_index: 2 })).toEqual([{ text: "s" }]);
@@ -3370,6 +3916,16 @@ ${omoRule}
       pane.agent = "pi";
       pane.status = "blocked";
       expect(await card()).toMatchObject({ agent: "omo", kind: "question", multi_select: true });
+    });
+  });
+
+  test.skipIf(process.platform !== "linux")("discovers a pending question with task rows below the input box", async () => {
+    await withOmo(async (pane) => {
+      appendFileSync(pane.omo!.path, JSON.stringify({ type: "custom", customType: "ask-user:settlement", data: { requestId: "q1" } }) + "\n" + omoPendingFixture("one.jsonl"));
+      pane.screen = omoPendingFixture("one-wide.txt").replace(/(❯\n─+\n)/, `$1${omoTaskRows}`);
+      pane.agent = "pi";
+      pane.status = "blocked";
+      expect(await card()).toMatchObject({ agent: "omo", kind: "question" });
     });
   });
 
@@ -3831,6 +4387,152 @@ ${rows.map((row, index) => `│${index === at ? "❯" : " "} ○ ${row}`).join("
     });
   });
 
+  test("advances only the active question in a current OMP multi-question dialog", async () => {
+    const render = (question: number, cursor: number, checked: number[]) => question === 0 ? `
+╭─ Ask ───────────────────────────╮
+│ Which platforms should run?     │
+├────────────────────────────────┤
+${["Linux", "macOS", "Other (type your own)"].map((label, index) => `│${cursor === index ? "❯ " : "  "}${index === 2 ? "○" : checked.includes(index) ? "☑" : "☐"} ${label}`).join("\n")}
+├────────────────────────────────┤
+│ ␣ toggle · ⏎ next · ↑/↓ move · Tab/←/→ question · ⎋ cancel │
+╰────────────────────────────────╯
+` : `
+╭─ Ask ───────────────────────────╮
+│ Which build should run?         │
+├────────────────────────────────┤
+│❯ ○ Debug                        │
+│  ○ Release                      │
+│  ○ Other (type your own)        │
+├────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · Tab/←/→ question · ⎋ cancel │
+╰────────────────────────────────╯
+`;
+    await withPane("omp", "blocked", render(0, 0, []), async (pane) => {
+      let question = 0;
+      let cursor = 0;
+      const checked = new Set<number>();
+      pane.onSent = (sent) => {
+        if (sent === "down") cursor = Math.min(2, cursor + 1);
+        else if (sent === "space") checked.has(cursor) ? checked.delete(cursor) : checked.add(cursor);
+        else if (sent === "tab") question = 1;
+        else if (sent === "enter" && question === 0) { question = 1; cursor = 0; }
+        else if (sent === "enter" && question === 1) question = 2;
+        pane.screen = question === 2 ? "Fictional OMP answers submitted" : render(question, cursor, [...checked]);
+      };
+      const prompt = (await card())!;
+      expect(await answer(prompt.id, { option_indices: [1] })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["down", "space", "enter"]);
+      expect(question).toBe(1);
+      expect(checked).toEqual(new Set([1]));
+    });
+  });
+
+  test("submits a one-question current OMP multi dialog with Enter", async () => {
+    const screen = `
+╭─ Ask ───────────────────────────╮
+│ Which checks should run?        │
+├────────────────────────────────┤
+│❯ ☐ Unit tests                   │
+│  ☐ Browser checks               │
+│  ○ Other (type your own)        │
+├────────────────────────────────┤
+│ ␠ toggle · ⏎ submit · ↑/↓ move · Tab/←/→ question · ⎋ cancel │
+╰────────────────────────────────╯
+`;
+    await withPane("omp", "blocked", screen, async (pane) => {
+      let checked = false;
+      pane.onSent = (sent) => {
+        if (sent === "space") checked = !checked;
+        if (sent === "enter") pane.screen = "Fictional OMP answer submitted";
+      };
+      const prompt = (await card())!;
+      expect(await answer(prompt.id, { option_indices: [0] })).toEqual({ status: 200, code: undefined });
+      expect(pane.sent).toEqual(["space", "enter"]);
+      expect(checked).toBe(true);
+      expect(pane.screen).toBe("Fictional OMP answer submitted");
+    });
+  });
+
+  test("moves through OMP questions, refuses stale or typed review answers, then submits once", async () => {
+    const questions = [
+      { title: "Which route should carry the fictional session?", options: ["Local socket", "Remote relay"] },
+      { title: "Which target should receive it?", options: ["ARM server", "x86 runner"] },
+    ];
+    const drawQuestion = (question: number, cursor: number) => `
+╭─ Ask ──────────────────────────────────────────────────────────╮
+│  Transport    Targets    Submit                                │
+│ ${questions[question]!.title}
+├────────────────────────────────────────────────────────────────┤
+${questions[question]!.options.map((label, index) => `│  ${cursor === index ? "❯ " : "  "}○ ${label}`).join("\n")}
+│    ○ Other (type your own)
+├────────────────────────────────────────────────────────────────┤
+│ ⏎ select · n note · ↑/↓ move · ⇥/←/→ question · ⎋ cancel       │
+╰────────────────────────────────────────────────────────────────╯
+`;
+    const drawReview = (target = "ARM server") => `
+╭─ Ask ──────────────────────────────────────────────────────────╮
+│  Transport    Targets    Submit                                │
+│ Review answers                                                  │
+├────────────────────────────────────────────────────────────────┤
+│ 1. Transport: Remote relay                                      │
+│ 2. Targets: ${target.padEnd(50)}│
+│                                                                 │
+│ ❯ Submit                                                        │
+│                                                                 │
+├────────────────────────────────────────────────────────────────┤
+│ ⏎ submit · ↑/↓ scroll · ⎋ cancel · Alt+H hide                  │
+╰────────────────────────────────────────────────────────────────╯
+`;
+
+    await withPane("omp", "blocked", drawQuestion(0, 0), async (pane) => {
+      let activeQuestion = 0;
+      let cursor = 0;
+      let submitted = false;
+      pane.onSent = (sent) => {
+        if (sent === "down") cursor = Math.min(1, cursor + 1);
+        if (sent === "enter" && activeQuestion === 0) {
+          activeQuestion = 1;
+          cursor = 0;
+          pane.screen = drawQuestion(activeQuestion, cursor);
+        } else if (sent === "enter" && activeQuestion === 1) {
+          pane.screen = drawReview();
+        } else if (sent === "enter" && activeQuestion === 2) {
+          submitted = true;
+          pane.screen = "Fictional OMP answers submitted";
+        } else if (activeQuestion < 2) {
+          pane.screen = drawQuestion(activeQuestion, cursor);
+        }
+      };
+
+      const first = (await card())!;
+      expect(first.question).toBe(questions[0]!.title);
+      expect(await answer(first.id, { option_index: 1 })).toEqual({ status: 200, code: undefined });
+      expect(activeQuestion).toBe(1);
+      expect(pane.sent).toEqual(["down", "enter"]);
+
+      const second = (await card())!;
+      expect(second.question).toBe(questions[1]!.title);
+      expect(await answer(second.id, { option_index: 0 })).toEqual({ status: 200, code: undefined });
+      expect(pane.screen).toContain("Review answers");
+
+      const review = (await card())!;
+      expect(labels(review)).toEqual(["Submit", "Cancel"]);
+      pane.screen = drawReview("Changed target");
+      expect(await answer(review.id, { option_index: 0 })).toEqual({ status: 409, code: "prompt_changed" });
+      expect(pane.sent).toEqual(["down", "enter", "enter"]);
+
+      const refreshedReview = (await card())!;
+      expect(await answer(refreshedReview.id, { custom_text: "ordinary text" })).toEqual({ status: 400, code: "invalid_answer" });
+      expect(pane.sent).toEqual(["down", "enter", "enter"]);
+
+      activeQuestion = 2;
+      expect(await answer(refreshedReview.id, { option_index: 0 })).toEqual({ status: 200, code: undefined });
+      expect(submitted).toBe(true);
+      expect(pane.sent).toEqual(["down", "enter", "enter", "enter"]);
+      expect(pane.screen).toBe("Fictional OMP answers submitted");
+    });
+  });
+
   const input = (question: string, typed = "") => `────────────────────────────────────────\n\n ${question}\n\n> ${typed}\n enter submit  escape/ctrl+c cancel\n────────────────────────────────────────${FOOTER}`;
 
   test("answers pi's text dialog", async () => {
@@ -3991,6 +4693,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       {
         name: "pi's model list", agent: "pi", status: "idle", rows: 2, choice: { option_index: 1 }, sent: ["down", "enter"],
         draw: (at) => `────────────────────────────────────────\n\nOnly showing models from configured providers. Use /login to add providers.\n>\n\n${at === 0 ? "→" : " "} ✓ vllm/Qwen/Qwen3.8-27B [lwsa-platform] · default\n${at === 1 ? "→" : " "}   vllm-flash/Qwen3.8-Flash-Next [lwsa-platform]\n Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n────────────────────────────────────────${FOOTER}`,
+      },
+      {
+        name: "OmO's model list", agent: "omo", status: "idle", rows: 3, choice: { option_index: 2 }, sent: ["down", "down", "enter"],
+        draw: (at) => `Only showing models from configured providers. Use /login to add providers.\nenter select  ctrl+s select as default  ctrl+f favorite\n>\n${["claude-opus-4-8 [anthropic] ✓", "claude-fable-5 [anthropic]", "gpt-5.5 [chatgpt-subscription]"].map((row, index) => `${at === index ? "→" : " "}   ${row}`).join("\n")}\n  Model Name: Claude Opus 4.8\n${"─".repeat(40)}\n/tmp/app • $0.000 (sub) • 0/1M (0.0%) (auto)  (anthropic) claude-opus-4-8 • effort medium\n(😺 OmO Native)\n`,
       },
       {
         // the last row drawn carries the cursor where it carried `↓`, under another effort line
@@ -4931,6 +5637,41 @@ describe("Claude Code 2.1.29x approvals and questions", () => {
 
 // Claude Code 2.1.296's multiple choice, captured in #752: a ticked row is drawn [✔], and the
 // unnumbered Submit row between the typed answer and "Chat about this" takes the cursor too
+describe("Claude's multiple choice answered with its own text", () => {
+  // Claude Code 2.1.301: typing into "Type something" ticks that row, and Enter on Submit, under
+  // it, takes the answer to the next question or the review (→ there moves the text's cursor)
+  const screen = (at: "Manzana" | "Submit", typed = false) => [
+    "←  ☐ Frutas  ✔ Submit  →",
+    "¿Qué frutas?",
+    `${at === "Manzana" ? "❯" : " "} 1. [ ] Manzana`,
+    "         Manzana",
+    "  2. [ ] Pera",
+    "         Pera",
+    typed ? "  3. [✔] Kiwi" : "  3. [ ] Type something",
+    `${at === "Submit" ? "❯" : " "}    Submit`,
+    "─".repeat(119),
+    "  4. Chat about this",
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+  ].join("\n");
+
+  test("offers the typed answer, and types it in its row before Enter on Submit", () => {
+    const prompt = parseInteractivePrompt("claude", screen("Manzana"))!;
+    expect(prompt).toMatchObject({ multi_select: true, custom_option_index: 2 });
+    expect(labels(prompt)).toEqual(["Manzana", "Pera"]);
+    expect(answerKeys(prompt, { custom_text: "Kiwi" })).toEqual([{ keys: ["down"] }, { keys: ["down"] }, { text: "Kiwi" }, { keys: ["down"] }, { keys: ["enter"] }]);
+    // from Submit, the row is one up
+    expect(answerKeys(parseInteractivePrompt("claude", screen("Submit"))!, { custom_text: "Kiwi" })).toEqual([{ keys: ["up"] }, { text: "Kiwi" }, { keys: ["down"] }, { keys: ["enter"] }]);
+    // the choices still go as they did
+    expect(answerKeys(prompt, { option_indices: [1] })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }, { keys: ["right"] }]);
+  });
+
+  test("empties a draft already typed into the row first", () => {
+    const prompt = parseInteractivePrompt("claude", screen("Manzana", true))!;
+    expect(prompt).toMatchObject({ multi_select: true, custom_option_index: 2 });
+    expect(answerKeys(prompt, { custom_text: "Uva" })).toEqual([{ keys: ["down"] }, { keys: ["down"] }, { keys: ["ctrl+k"] }, { keys: ["ctrl+u"] }, { text: "Uva" }, { keys: ["down"] }, { keys: ["enter"] }]);
+  });
+});
+
 describe("Claude's multiple choice ticked in the terminal", () => {
   const screen = (ticked: boolean, at: "A" | "B" | "Submit" | "Chat") => [
     `←  ${ticked ? "☒" : "☐"} Pick  ✔ Submit  →`,
@@ -4948,7 +5689,7 @@ describe("Claude's multiple choice ticked in the terminal", () => {
 
   test("reads [✔] rows as ticked, without the box in their labels", () => {
     const prompt = parseInteractivePrompt("claude", screen(true, "B"))!;
-    expect(prompt).toMatchObject({ kind: "question", title: "Multiple choice", question: "Which ones?", multi_select: true, custom_option_index: null });
+    expect(prompt).toMatchObject({ kind: "question", title: "Multiple choice", question: "Which ones?", multi_select: true, custom_option_index: 2 });
     expect(prompt.options.map((option) => option.label)).toEqual(["Option A", "Option B"]);
     // both are ticked: only A is wanted, so B (under the cursor) is unticked, never ticked again
     expect(answerKeys(prompt, { option_indices: [0] })).toEqual([{ keys: ["enter"] }, { keys: ["right"] }]);
@@ -5034,5 +5775,165 @@ describe("hermesInputDraft", () => {
 
   test("does not know a screen without an input row to be empty", () => {
     expect(hermesInputDraft("Approve this command?\n  [1] Approve once\n", null)).toBe(true);
+  });
+});
+
+// Captured from OmO 5.1.30 (engine senpi 2026.10.11) running /model in an isolated herdr session:
+// fullscreen at 120 columns, after `gpt` was typed and the cursor moved down, and at 46 columns.
+describe("OmO's model list", () => {
+  const wide = `Only showing models from configured providers. Use /login to add providers.
+
+enter select ctrl+s select as default ctrl+f favorite
+
+>
+
+→   claude-opus-4-8 [anthropic] ✓
+    claude-fable-5 [anthropic]
+    claude-fable-5-1 [anthropic]
+    claude-haiku-4-5 [anthropic]
+    claude-haiku-4-5-20251001 [anthropic]
+    claude-haiku-5-5 [anthropic]
+    claude-opus-4-5 [anthropic]
+    claude-opus-4-5-20251101 [anthropic]
+    claude-opus-4-6 [anthropic]
+    claude-opus-4-7 [anthropic]
+    claude-opus-5 [anthropic]
+    claude-opus-5-5 [anthropic]
+    claude-sonnet-4-5 [anthropic]
+    claude-sonnet-4-5-20250929 [anthropic]
+    claude-sonnet-4-6 [anthropic]
+    claude-sonnet-5 [anthropic]
+    claude-sonnet-5-5 [anthropic]
+    gpt-5.3-codex-spark [chatgpt-subscription]
+    gpt-5.5 [chatgpt-subscription]
+    gpt-5.6-luna [chatgpt-subscription]
+  … 14 more below
+
+  Model Name: Claude Opus 4.8
+
+  Model catalogs refreshed.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/private/tmp/model-probe-cwd • $0.000 (sub) • 0/1M (0.0%) (auto)            (anthropic) claude-opus-4-8 • effort medium
+(😺 OmO Native by Q Kim)
+`;
+  const moved = `Only showing models from configured providers. Use /login to add providers.
+
+enter select ctrl+s select as default ctrl+f favorite
+
+> gpt
+
+    gpt-5.5 [chatgpt-subscription]
+→   gpt-6-sol [chatgpt-subscription]
+    gpt-6-luna [chatgpt-subscription]
+    gpt-5.6-sol [chatgpt-subscription]
+    gpt-6-astra [chatgpt-subscription]
+    gpt-6.1-sol [chatgpt-subscription]
+    gpt-5.6-luna [chatgpt-subscription]
+    gpt-5.6-terra [chatgpt-subscription]
+    gpt-6-sol-fast [chatgpt-subscription]
+    gpt-6-luna-fast [chatgpt-subscription]
+    gpt-5.6-sol-fast [chatgpt-subscription]
+    gpt-6-astra-fast [chatgpt-subscription]
+    gpt-6.1-sol-fast [chatgpt-subscription]
+    gpt-5.6-luna-fast [chatgpt-subscription]
+    gpt-5.6-terra-fast [chatgpt-subscription]
+    gpt-5.3-codex-spark [chatgpt-subscription]
+    gpt-6.1-sol-ultrafast [chatgpt-subscription]
+
+  Model Name: GPT-6 Sol
+
+  Model catalogs refreshed.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/private/tmp/model-probe-cwd • $0.000 (sub) • 0/1M (0.0%) (auto)            (anthropic) claude-opus-4-8 • effort medium
+(😺 OmO Native by Q Kim)
+`;
+  const narrow = `Only showing models from configured providers.
+Use /login to add providers.
+
+enter select ctrl+s select as default ctrl+f
+favorite
+
+> gpt
+
+→   gpt-5.5 [chatgpt-subscription]
+    gpt-6-sol [chatgpt-subscription]
+    gpt-6-luna [chatgpt-subscription]
+    gpt-5.6-sol [chatgpt-subscription]
+    gpt-6-astra [chatgpt-subscription]
+    gpt-6.1-sol [chatgpt-subscription]
+    gpt-5.6-luna [chatgpt-subscription]
+    gpt-5.6-terra [chatgpt-subscription]
+    gpt-6-sol-fast [chatgpt-subscription]
+    gpt-6-luna-fast [chatgpt-subscription]
+    gpt-5.6-sol-fast [chatgpt-subscription]
+    gpt-6-astra-fast [chatgpt-subscription]
+    gpt-6.1-sol-fast [chatgpt-subscription]
+    gpt-5.6-luna-fast [chatgpt-subscription]
+    gpt-5.6-terra-fast [chatgpt-subscription]
+    gpt-5.3-codex-spark [chatgpt-subscription]
+    gpt-6.1-sol-ultrafast
+[chatgpt-subscription]
+
+  Model Name: GPT-5.5
+
+  Model catalogs refreshed.
+
+──────────────────────────────────────────────
+… • 0/1M (0.0%) (auto)  claude-opus-4-8:medium
+(😺 OmO Native by Q Kim)
+`;
+
+  test("reads the catalogue under OmO's filter line, naming the model in use", () => {
+    const prompt = parseInteractivePrompt("omo", wide)!;
+    expect(prompt.kind).toBe("question");
+    expect(prompt.question).toBe("Select model (currently claude-opus-4-8 [anthropic])");
+    // the tick OmO sets after the name is not part of it, and the count of rows below is no row
+    expect(prompt.options[0]!.label).toBe("claude-opus-4-8 [anthropic]");
+    expect(prompt.options.length).toBe(20);
+    expect(prompt.options.some((option) => /more below|Model Name|catalogs/.test(option.label))).toBe(false);
+    expect(answerKeys(prompt, { option_index: 2 })).toEqual([{ keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  test("reads what a filter left, from where the cursor stands", () => {
+    const prompt = parseInteractivePrompt("omo", moved)!;
+    expect(prompt.options[0]!.label).toBe("gpt-5.5 [chatgpt-subscription]");
+    expect(prompt.options[1]!.label).toBe("gpt-6-sol [chatgpt-subscription]");
+    // no tick among a filter's rows that leave the model in use out
+    expect(prompt.question).toBe("Select model");
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["up"] }, { keys: ["enter"] }]);
+  });
+
+  test("reads a phone's pane, its hint and a model's provider wrapped onto lines of their own", () => {
+    const prompt = parseInteractivePrompt("omo", narrow)!;
+    expect(prompt).not.toBeNull();
+    expect(prompt.options.at(-1)!.label).toBe("gpt-6.1-sol-ultrafast [chatgpt-subscription]");
+    expect(prompt.options.every((option) => /\[[^\]]+\]$/.test(option.label))).toBe(true);
+  });
+
+  test("is read whatever herdr calls the pane", () => {
+    // herdr names an OmO pane `pi` or `claude` at times, or nothing
+    for (const agent of ["pi", "claude", ""]) {
+      const prompt = parseInteractivePrompt(agent, wide);
+      expect(prompt?.question).toBe("Select model (currently claude-opus-4-8 [anthropic])");
+      expect(prompt?.options.length).toBe(20);
+    }
+  });
+
+  test("still offers a filter that left a single model", () => {
+    const lines = moved.split("\n");
+    const first = lines.findIndex((line) => line.includes("gpt-5.5 [chatgpt-subscription]"));
+    const last = lines.findIndex((line) => line.includes("Model Name:"));
+    const one = [...lines.slice(0, first), "→   gpt-5.5 [chatgpt-subscription]", ...lines.slice(last)].join("\n");
+    const prompt = parseInteractivePrompt("omo", one)!;
+    expect(prompt.options.map((option) => option.label)).toEqual(["gpt-5.5 [chatgpt-subscription]"]);
+  });
+
+  test("is gone once the list is: dismissed, or quoted with other text under it", () => {
+    expect(parseInteractivePrompt("omo", wide.replace(/enter select +ctrl\+s select as default +ctrl\+f favorite\n/, ""))).toBeNull();
+    const rule = wide.lastIndexOf("─");
+    expect(parseInteractivePrompt("omo", `${wide.slice(0, wide.indexOf("Model Name"))}some other output\n${wide.slice(wide.indexOf("Model Name"))}`)).toBeNull();
+    expect(rule).toBeGreaterThan(0);
   });
 });

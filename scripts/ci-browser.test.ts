@@ -70,13 +70,16 @@ describe("browser lane", () => {
   it("summarizes every script and exits zero on success without enabling local evidence", async () => {
     const { text, code, evidence } = await lane();
     expect(code).toBe(0);
-    expect(rows(text)).toHaveLength(57);
+    expect(rows(text)).toHaveLength(67);
+    expect(rows(text).map((row) => row.script)).toContain("scripts/cliproxy-settings-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/gjc-status-browser-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/pane-input-focus-demo-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/shortcut-exact-modifiers-demo-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/chat-virtual-browser-qa.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/pwa-update-browser-qa.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/omo-chat-browser-qa.ts");
+    expect(rows(text).map((row) => row.script)).toContain("scripts/omo-plan-browser-regression.ts");
+    expect(rows(text).map((row) => row.script)).toContain("scripts/agent-skill-menu-demo-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/portal-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/agy-chat-browser-qa.ts");
     expect(rows(text).filter((row) => row.script === "scripts/ui-contexts-regression.ts")).toHaveLength(1);
@@ -87,6 +90,9 @@ describe("browser lane", () => {
     expect(rows(text).map((row) => row.script)).toContain("scripts/virtual-source-browser-qa.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/repo-diff-browser-qa.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/terminal-viewport-regression.ts");
+    expect(rows(text).map((row) => row.script)).toContain("scripts/omo-question-wheel-regression.ts");
+    expect(rows(text).map((row) => row.script)).toContain("scripts/files-prompt-regression.ts");
+    expect(rows(text).map((row) => row.script)).toContain("scripts/terminal-cjk-punctuation-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/pane-paging-demo-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/application-paging-regression.ts");
     expect(rows(text).map((row) => row.script)).toContain("scripts/palette-machines-demo-regression.ts");

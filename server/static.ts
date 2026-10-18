@@ -83,7 +83,10 @@ function cacheControlFor(pathname: string): string {
  *   an explicit `new WebSocket("ws://<same host>/ws")` and the machines event stream both
  *   connect under the enforcing header).
  * - `media-src 'self'`: the file viewer's <video>/<audio>, same-origin.
- * - `frame-src 'self'`: the PDF viewer frames /api/fs/file, same-origin.
+ * - `frame-src 'self'`: the PDF viewer frames /api/fs/file, same-origin. With the request's
+ *   origin known, also any port of the host the browser used for the app: the web panel
+ *   (src/lib/webPanel.ts) frames a page served by this PC, a dev server's localhost:5173 named
+ *   under that host. No other host is framed.
  * - `worker-src 'self'`: the service worker is /sw.js, same-origin.
  * - `object-src 'none'`: no <object>/<embed> in the app, and none may appear.
  * - `base-uri 'self'`: no <base>, and a tag that adds one changes what every relative URL
@@ -114,16 +117,32 @@ const CSP_DIRECTIVES = [
  */
 export const CONTENT_SECURITY_POLICY = CSP_DIRECTIVES.join("; ");
 
+/** A host name or bracketed IPv6 address, nothing that could end or add a directive. */
+const FRAMEABLE_HOST = /^(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])$/i;
+
+/** The policy for a request from `origin` (requestOrigin): its host's other ports may be framed. */
+export function contentSecurityPolicy(origin?: string): string {
+  let host: string | null = null;
+  try {
+    host = origin === undefined ? null : new URL(origin).hostname;
+  } catch {
+    host = null;
+  }
+  if (host === null || !FRAMEABLE_HOST.test(host)) return CONTENT_SECURITY_POLICY;
+  return CSP_DIRECTIVES.map((directive) => directive === "frame-src 'self'" ? `frame-src 'self' http://${host}:* https://${host}:*` : directive).join("; ");
+}
+
 /**
  * HERDR_WEB_CSP=report-only measures the policy above without enforcing it: the browser
  *   logs what the policy would have blocked and the app keeps working. `report-only` is the
  *   measurement mode; anything else enforces.
  */
-function cspHeader(): Record<string, string> {
+function cspHeader(origin?: string): Record<string, string> {
   const mode = process.env["HERDR_WEB_CSP"];
+  const policy = contentSecurityPolicy(origin);
   return mode === "report-only"
-    ? { "content-security-policy-report-only": CONTENT_SECURITY_POLICY }
-    : { "content-security-policy": CONTENT_SECURITY_POLICY };
+    ? { "content-security-policy-report-only": policy }
+    : { "content-security-policy": policy };
 }
 
 /**
@@ -142,6 +161,33 @@ export function renameManifest(manifest: string, name: string): string {
   return JSON.stringify({ ...JSON.parse(manifest), name, short_name: name }, null, 2);
 }
 
+/**
+ * The manifest with the app's own absolute id as a related application. Chromium's
+ * getInstalledRelatedApps() matches `platform: "webapp"` entries by absolute id only, so a tab
+ * in the browser can find the installed copy of the same origin. The origin differs per PC and
+ * per proxy, so it is added per request, never written into public/manifest.webmanifest.
+ */
+export function relateManifest(text: string, origin: string): string {
+  return JSON.stringify({ ...JSON.parse(text), related_applications: [{ platform: "webapp", id: `${origin}/` }] }, null, 2);
+}
+
+/** What /manifest.webmanifest answers: renamed under HERDR_WEB_APP_NAME, then related to its origin. */
+export function manifestBody(text: string, origin: string): string {
+  const name = appName();
+  return relateManifest(name ? renameManifest(text, name) : text, origin);
+}
+
+/**
+ * The origin a browser used to reach this request: the scheme from X-Forwarded-Proto when a
+ * proxy states one (http or https), else the request URL's, and the host from the Host header.
+ */
+export function requestOrigin(request: Request): string {
+  const url = new URL(request.url);
+  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  const scheme = forwarded === "http" || forwarded === "https" ? forwarded : url.protocol.slice(0, -1);
+  return `${scheme}://${request.headers.get("host") ?? url.host}`;
+}
+
 const APPLE_TITLE = /(<meta name="apple-mobile-web-app-title" content=")[^"]*(")/;
 
 /** The shell under another name: an iOS home-screen install takes its label from this meta. */
@@ -151,7 +197,8 @@ export function renameShell(html: string, name: string): string {
 }
 
 /** The file as built, or the manifest and the shell under HERDR_WEB_APP_NAME. */
-async function body(file: BunFile, kind: "manifest" | "shell" | null): Promise<BunFile | string> {
+async function body(file: BunFile, kind: "manifest" | "shell" | null, origin?: string): Promise<BunFile | string> {
+  if (kind === "manifest" && origin !== undefined) return manifestBody(await file.text(), origin);
   const name = appName();
   if (!name || !kind) return file;
   return kind === "manifest" ? renameManifest(await file.text(), name) : renameShell(await file.text(), name);
@@ -171,7 +218,8 @@ function encodings(header: string | null | undefined): Array<"br" | "gzip" | "id
   return (["br", "gzip", "identity"] as const).filter(coding => weight(coding) > 0).sort((a, b) => weight(b) - weight(a));
 }
 
-export async function serveStatic(pathname: string, acceptEncoding?: string | null): Promise<Response> {
+/** `origin` is what requestOrigin answers; a caller that has no request (a QA script) may leave it out. */
+export async function serveStatic(pathname: string, acceptEncoding?: string | null, origin?: string): Promise<Response> {
   const indexPath = join(DIST_DIR, "index.html");
   if (!existsSync(indexPath)) {
     return new Response(
@@ -196,8 +244,8 @@ export async function serveStatic(pathname: string, acceptEncoding?: string | nu
         return new Response(null, { status: 406, headers: { vary: "Accept-Encoding", ...cspHeader() } });
       }
       const kind = pathname === "/manifest.webmanifest" ? "manifest" : candidate === indexPath ? "shell" : null;
-      return new Response(await body(file, kind), {
-        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname), ...cspHeader() },
+      return new Response(await body(file, kind, origin), {
+        headers: { "content-type": contentTypeFor(candidate), "cache-control": cacheControlFor(pathname), ...cspHeader(origin) },
       });
     }
   }
@@ -207,6 +255,6 @@ export async function serveStatic(pathname: string, acceptEncoding?: string | nu
     return new Response(null, { status: 404, headers: { "cache-control": REVALIDATE, ...cspHeader() } });
   }
   return new Response(await body(Bun.file(indexPath), "shell"), {
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE, ...cspHeader() },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": REVALIDATE, ...cspHeader(origin) },
   });
 }
