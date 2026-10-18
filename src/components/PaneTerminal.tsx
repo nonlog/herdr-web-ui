@@ -3062,90 +3062,6 @@ export function PaneTerminal({
           </div>
         </div>
       )}
-      <div className="terminal-banners">
-        {paneId !== null && held && !noticesDocked && (
-          <div className="terminal-banner terminal-banner-warning" role="status">
-            <span>{t("Another app has this pane open. It connects here as soon as that app lets go.")}</span>
-            {!observing && socketRef.current?.canTakeOver() && (
-              <button type="button" className="btn terminal-banner-action" title={t("Take this pane from another web app or terminal attach. That connection will close.")} onClick={() => { if (paneId !== null) socketRef.current?.takeOver(paneId); }}>{t("Open here")}</button>
-            )}
-          </div>
-        )}
-        {paneId !== null && !chatView && unsupported && (
-          <div className="terminal-banner terminal-banner-soon" role="status">
-            <span>{t("Live terminal is coming to Windows PCs: herdr cannot attach a terminal there yet. The chat lens works now.")}</span>
-          </div>
-        )}
-        {paneId !== null && outputError && !noticesDocked && (
-          <div className="terminal-banner terminal-banner-warning terminal-banner-output-error" role="status">
-            <span>{outputError}</span>
-            <button type="button" className="btn" onClick={() => reattachRef.current()}>{t("Reconnect")}</button>
-          </div>
-        )}
-        {!chatView && inputError && <div className="terminal-banner" role="status">{inputError}<button type="button" className="btn terminal-banner-action" onClick={() => setInputError(null)}>{t("Dismiss")}</button></div>}
-        <div className={waitingWords === null ? "visually-hidden" : "terminal-banner"} role="status">{waitingWords}</div>
-        {paneId !== null && !chatView && released && <div className="terminal-banner" role="status">{t(watching ? "View only while you use another window · click to type" : "Paused while you use another window")}</div>}
-        {/* the chat lens says these itself (ChatView), inline; the pills are the grid's */}
-        {paneId !== null && !chatView && ended && !outputError && (
-          <div className="terminal-banner" role="status">
-            {t("Terminal ended")}
-          </div>
-        )}
-        {paneId !== null && !chatView && !ended && !connected && (
-          <div className="terminal-banner terminal-banner-warning" role="status">
-            {t(connectedBefore ? "Reconnecting to herdr web ui…" : "Connecting to herdr web ui…")}
-            {/* one line, cut with an ellipsis: a command is never broken inside a word; the title holds it whole */}
-            {draft.text.length > 0 && <span className="draft-held" title={draft.text}> {t("Input held:")} <code>“{draft.text}”</code></span>}
-          </div>
-        )}
-        {paneId !== null && !ended && connected && !draftIsEmpty(draft) && !noticesDocked && (
-          <div className="terminal-banner terminal-banner-draft" role="status">
-            {/* on screen the row is its parts, the command and its two controls; the words are for the live region */}
-            <span className="visually-hidden">{t("Input held:")}</span>
-            {draft.text.length > 0 && <code className="draft-text" title={draft.text}>{draft.text}</code>}
-            <span className="draft-actions">
-              <button type="button" className="icon-button draft-send" aria-label={t("Send held input")} title={t("Send held input")} disabled={draft.text.length === 0 || observing || secretActive || held} onClick={sendDraft}>
-                <SendHorizontal aria-hidden="true" />
-              </button>
-              <button type="button" className="icon-button draft-discard" aria-label={t("Discard held input")} title={t("Discard held input")} onClick={discardDraft}>
-                <Trash2 aria-hidden="true" />
-              </button>
-            </span>
-            {/* said only when it applies, on a line under the row. The preview shows the start of the
-                text: without this, a draft that lost its end looks whole */}
-            {draft.truncated && <span className="draft-truncated">{t("Some input could not be held and was left out.")}</span>}
-            {/* Enter is never held: without this, two commands look like one line and a paste looks whole */}
-            {draft.leftOut && <span className="draft-truncated">{t("An Enter or line break was left out: Send never presses Enter.")}</span>}
-          </div>
-        )}
-        {paneId !== null && !ended && observing && (
-          <div className="terminal-banner terminal-banner-observe" role="status">
-            <Eye aria-hidden="true" />
-            {t("View only")}
-          </div>
-        )}
-        {paneId !== null && !chatView && selectionQuote?.pane === paneId && (
-          <button type="button" className="terminal-banner terminal-banner-action terminal-quote"
-            onMouseDown={(event) => { event.preventDefault(); }}
-            onClick={() => {
-              const block = formatTerminalQuote({ label: title?.trim() || paneId, range: selectionQuote.range, text: selectionQuote.text });
-              if (block === null) return;
-              const key = `herdr-web-ui:composer-draft:${paneStorageId(machineId, paneId)}`;
-              const next = appendQuote(composerDrafts.read(key).text, block, MAX_COMPOSER_CHARS);
-              if (next === null) { noteClipboard(t("Too long for the message draft")); return; }
-              composerDrafts.set(key, next);
-              termRef.current?.clearSelection();
-              noteClipboard(t("Added to the message draft"));
-            }}>
-            <Quote aria-hidden="true" />{t("Quote in message")}
-          </button>
-        )}
-        {clipboardNote && !noticesDocked && (
-          <div className="terminal-banner" role="status">
-            {clipboardNote}
-          </div>
-        )}
-      </div>
       {presented && !chatView && paneId !== null && !observing && (
         <div className="terminal-scroll-toolbar">
           <button type="button" className="btn btn-ghost" aria-pressed={!applicationScroll}
@@ -3162,6 +3078,90 @@ export function PaneTerminal({
           onClose={() => { setFindOpen(false); if (activeRef.current && !coarse) termRef.current?.focus(); }} />
       )}
       <div className="terminal-surface">
+        <div className="terminal-banners">
+          {paneId !== null && held && !noticesDocked && (
+            <div className="terminal-banner terminal-banner-warning" role="status">
+              <span>{t("Another app has this pane open. It connects here as soon as that app lets go.")}</span>
+              {!observing && socketRef.current?.canTakeOver() && (
+                <button type="button" className="btn terminal-banner-action" title={t("Take this pane from another web app or terminal attach. That connection will close.")} onClick={() => { if (paneId !== null) socketRef.current?.takeOver(paneId); }}>{t("Open here")}</button>
+              )}
+            </div>
+          )}
+          {paneId !== null && !chatView && unsupported && (
+            <div className="terminal-banner terminal-banner-soon" role="status">
+              <span>{t("Live terminal is coming to Windows PCs: herdr cannot attach a terminal there yet. The chat lens works now.")}</span>
+            </div>
+          )}
+          {paneId !== null && outputError && !noticesDocked && (
+            <div className="terminal-banner terminal-banner-warning terminal-banner-output-error" role="status">
+              <span>{outputError}</span>
+              <button type="button" className="btn" onClick={() => reattachRef.current()}>{t("Reconnect")}</button>
+            </div>
+          )}
+          {!chatView && inputError && <div className="terminal-banner" role="status">{inputError}<button type="button" className="btn terminal-banner-action" onClick={() => setInputError(null)}>{t("Dismiss")}</button></div>}
+          <div className={waitingWords === null ? "visually-hidden" : "terminal-banner"} role="status">{waitingWords}</div>
+          {paneId !== null && !chatView && released && <div className="terminal-banner" role="status">{t(watching ? "View only while you use another window · click to type" : "Paused while you use another window")}</div>}
+          {/* the chat lens says these itself (ChatView), inline; the pills are the grid's */}
+          {paneId !== null && !chatView && ended && !outputError && (
+            <div className="terminal-banner" role="status">
+              {t("Terminal ended")}
+            </div>
+          )}
+          {paneId !== null && !chatView && !ended && !connected && (
+            <div className="terminal-banner terminal-banner-warning" role="status">
+              {t(connectedBefore ? "Reconnecting to herdr web ui…" : "Connecting to herdr web ui…")}
+              {/* one line, cut with an ellipsis: a command is never broken inside a word; the title holds it whole */}
+              {draft.text.length > 0 && <span className="draft-held" title={draft.text}> {t("Input held:")} <code>“{draft.text}”</code></span>}
+            </div>
+          )}
+          {paneId !== null && !ended && connected && !draftIsEmpty(draft) && !noticesDocked && (
+            <div className="terminal-banner terminal-banner-draft" role="status">
+              {/* on screen the row is its parts, the command and its two controls; the words are for the live region */}
+              <span className="visually-hidden">{t("Input held:")}</span>
+              {draft.text.length > 0 && <code className="draft-text" title={draft.text}>{draft.text}</code>}
+              <span className="draft-actions">
+                <button type="button" className="icon-button draft-send" aria-label={t("Send held input")} title={t("Send held input")} disabled={draft.text.length === 0 || observing || secretActive || held} onClick={sendDraft}>
+                  <SendHorizontal aria-hidden="true" />
+                </button>
+                <button type="button" className="icon-button draft-discard" aria-label={t("Discard held input")} title={t("Discard held input")} onClick={discardDraft}>
+                  <Trash2 aria-hidden="true" />
+                </button>
+              </span>
+              {/* said only when it applies, on a line under the row. The preview shows the start of the
+                  text: without this, a draft that lost its end looks whole */}
+              {draft.truncated && <span className="draft-truncated">{t("Some input could not be held and was left out.")}</span>}
+              {/* Enter is never held: without this, two commands look like one line and a paste looks whole */}
+              {draft.leftOut && <span className="draft-truncated">{t("An Enter or line break was left out: Send never presses Enter.")}</span>}
+            </div>
+          )}
+          {paneId !== null && !ended && observing && (
+            <div className="terminal-banner terminal-banner-observe" role="status">
+              <Eye aria-hidden="true" />
+              {t("View only")}
+            </div>
+          )}
+          {paneId !== null && !chatView && selectionQuote?.pane === paneId && (
+            <button type="button" className="terminal-banner terminal-banner-action terminal-quote"
+              onMouseDown={(event) => { event.preventDefault(); }}
+              onClick={() => {
+                const block = formatTerminalQuote({ label: title?.trim() || paneId, range: selectionQuote.range, text: selectionQuote.text });
+                if (block === null) return;
+                const key = `herdr-web-ui:composer-draft:${paneStorageId(machineId, paneId)}`;
+                const next = appendQuote(composerDrafts.read(key).text, block, MAX_COMPOSER_CHARS);
+                if (next === null) { noteClipboard(t("Too long for the message draft")); return; }
+                composerDrafts.set(key, next);
+                termRef.current?.clearSelection();
+                noteClipboard(t("Added to the message draft"));
+              }}>
+              <Quote aria-hidden="true" />{t("Quote in message")}
+            </button>
+          )}
+          {clipboardNote && !noticesDocked && (
+            <div className="terminal-banner" role="status">
+              {clipboardNote}
+            </div>
+          )}
+        </div>
         {/* xterm hides its rendered rows from assistive technology, so the region around the
             visible grid carries the pane's name: a screen reader announces which pane
             this is. No tabIndex: xterm's helper textarea takes the keyboard here on attach, so a
