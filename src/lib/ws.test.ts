@@ -343,6 +343,21 @@ it("refuses unsupported pending actions and never replays an action after discon
   client.close();
 });
 
+it("settles a pending action whose connection dropped before it was sent as not transmitted (regression #541)", async () => {
+  const client = new HerdrSocket("ws://test/ws");
+  client.connect();
+  const socket = FakeSocket.last;
+  socket.open();
+  // waiting for the snapshot that says the bridge takes pending actions
+  const result = client.pendingAction("w1:p1", "pending-1", "steer");
+  const submit = client.submit("w1:p1", "held copy", "held copy", false, "immediate", undefined, false, "pending-2", 0);
+  socket.disconnect();
+  expect(await result).toMatchObject({ ok: false, code: "not_transmitted" });
+  expect(await submit).toMatchObject({ ok: false, code: "not_transmitted" });
+  expect(socket.sent.filter((frame) => ["pending-action", "submit"].includes(frame.type))).toEqual([]);
+  client.close();
+});
+
 it("keeps existing Enter submits and the older bridge's input fallback compatible", async () => {
   for (const features of [[], ["submit"], ["submit", "pending-input"]]) {
     const client = new HerdrSocket("ws://test/ws");
@@ -372,7 +387,8 @@ it("never replays a queued submit after disconnecting, including before its capa
     const result = client.submit("w1:p1", "do not replay", "do not replay", false, "queue");
     for (let turn = 0; turn < 10 && known && submissions(socket).length === 0; turn++) await Promise.resolve();
     socket.disconnect();
-    expect(await result).toMatchObject({ ok: false, code: "disconnected" });
+    // regression #541: before its snapshot no frame left, so it is not sent rather than not confirmed
+    expect(await result).toMatchObject({ ok: false, code: known ? "disconnected" : "not_transmitted" });
     expect(client.canQueueMessages()).toBe(false);
     expect(client.submit("w1:p1", "offline", "offline", false, "queue")).toBeNull();
     client.connect();
@@ -856,6 +872,111 @@ it("reconnects at once when the page wakes instead of waiting out the backoff, a
   client.close();
 });
 
+it("backs off repeated short-lived opens, even when each receives a snapshot and terminal readiness", () => {
+  jest.useFakeTimers();
+  const { client, socket } = liveClient([]);
+  try {
+    let current = socket;
+    for (const delay of [250, 500, 1000, 2000, 4000, 5000, 5000]) {
+      current.disconnect();
+      expect(client.state).toBe("waiting");
+      jest.advanceTimersByTime(delay - 1);
+      expect(FakeSocket.last).toBe(current);
+      jest.advanceTimersByTime(1);
+      const next = FakeSocket.last;
+      expect(next).not.toBe(current);
+      next.open();
+      next.receive(snapshot(["input-ready"]));
+      next.receive({ type: "input-ready", pane_id: "w1:p1" });
+      expect(client.canInput("w1:p1")).toBe(true);
+      expect(next.sent.filter((frame) => frame.type === "attach")).toHaveLength(1);
+      current = next;
+    }
+  } finally {
+    client.close();
+    jest.useRealTimers();
+  }
+});
+
+it("starts the retry delay over only after an open connection has stayed up for 10s", () => {
+  jest.useFakeTimers();
+  const { client, socket } = liveClient([]);
+  try {
+    socket.disconnect();
+    jest.advanceTimersByTime(250);
+    const short = FakeSocket.last;
+    short.open();
+    jest.advanceTimersByTime(9_999);
+    short.disconnect();
+    jest.advanceTimersByTime(499);
+    expect(FakeSocket.last).toBe(short);
+    jest.advanceTimersByTime(1);
+    const stable = FakeSocket.last;
+    expect(stable).not.toBe(short);
+    stable.open();
+    jest.advanceTimersByTime(10_000);
+    stable.disconnect();
+    jest.advanceTimersByTime(249);
+    expect(FakeSocket.last).toBe(stable);
+    jest.advanceTimersByTime(1);
+    expect(FakeSocket.last).not.toBe(stable);
+  } finally {
+    client.close();
+    jest.useRealTimers();
+  }
+});
+
+it("ignores a late open from an abandoned attempt instead of replaying on the replacement", () => {
+  jest.useFakeTimers();
+  const client = new HerdrSocket("ws://test/ws");
+  try {
+    client.attach("w1:p1", 100, 30);
+    client.connect();
+    const abandoned = FakeSocket.last;
+    jest.advanceTimersByTime(8_000);
+    jest.advanceTimersByTime(250);
+    const replacement = FakeSocket.last;
+    expect(replacement).not.toBe(abandoned);
+    replacement.open();
+    const sent = [...replacement.sent];
+    abandoned.open();
+    expect(replacement.sent).toEqual(sent);
+    expect(client.state).toBe("open");
+    replacement.disconnect();
+    jest.advanceTimersByTime(499);
+    expect(FakeSocket.last).toBe(replacement);
+    jest.advanceTimersByTime(1);
+    expect(FakeSocket.last).not.toBe(replacement);
+  } finally {
+    client.close();
+    jest.useRealTimers();
+  }
+});
+
+it("still bypasses a flapping connection's backoff on wake and resets its next retry", () => {
+  jest.useFakeTimers();
+  const { client, socket } = liveClient([]);
+  try {
+    socket.disconnect();
+    jest.advanceTimersByTime(250);
+    const second = FakeSocket.last;
+    second.open();
+    second.disconnect();
+    client.wake();
+    const woken = FakeSocket.last;
+    expect(woken).not.toBe(second);
+    woken.open();
+    woken.disconnect();
+    jest.advanceTimersByTime(249);
+    expect(FakeSocket.last).toBe(woken);
+    jest.advanceTimersByTime(1);
+    expect(FakeSocket.last).not.toBe(woken);
+  } finally {
+    client.close();
+    jest.useRealTimers();
+  }
+});
+
 it("does not wake a connection whose output stopped, nor one that was closed", () => {
   const client = new HerdrSocket("ws://test/ws");
   client.connect();
@@ -1005,9 +1126,9 @@ it("lets a slow handshake connect: each attempt given up doubles the next deadli
     expect(second.readyState).toBe(FakeSocket.CONNECTING);
     second.open();
     expect(client.connected).toBe(true);
-    // an attempt that opened starts the deadline over at 8s
+    // Opening starts the connect deadline over at 8s, not the backoff: this open was brief.
     second.disconnect();
-    jest.advanceTimersByTime(250);
+    jest.advanceTimersByTime(500);
     const third = FakeSocket.last;
     expect(third).not.toBe(second);
     jest.advanceTimersByTime(8_000);
@@ -1146,7 +1267,7 @@ it("holds a submit, a pending action and a secret until the probe's pong, then s
   }
 });
 
-it("settles a submit that waited on a probe as disconnected when the socket is dropped, having sent nothing", async () => {
+it("settles a submit that waited on a probe as not transmitted when the socket is dropped, having sent nothing", async () => {
   jest.useFakeTimers();
   const { client, socket } = liveClient(["submit", "secret-input", "ping"]);
   try {
@@ -1157,7 +1278,7 @@ it("settles a submit that waited on a probe as disconnected when the socket is d
     await settle();
     jest.advanceTimersByTime(6_000);
     expect(FakeSocket.last).not.toBe(socket);
-    expect(await submit).toMatchObject({ ok: false, code: "disconnected" });
+    expect(await submit).toMatchObject({ ok: false, code: "not_transmitted" });
     expect(await secret).toMatchObject({ ok: false, code: "disconnected" });
     expect(socket.sent.filter((frame) => ["submit", "secret"].includes(frame.type))).toEqual([]);
   } finally {
@@ -1476,7 +1597,7 @@ it("settles a submit waiting on a probe when a CLOSING socket is replaced, and t
     const fresh = FakeSocket.last;
     expect(fresh).not.toBe(socket);
     await settle();
-    expect(outcome).toMatchObject({ ok: false, code: "disconnected" });
+    expect(outcome).toMatchObject({ ok: false, code: "not_transmitted" });
     expect(disconnects).toBe(1);
     fresh.open();
     fresh.receive(snapshot(["input-ready", "submit", "ping"]));

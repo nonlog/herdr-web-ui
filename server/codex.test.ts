@@ -833,6 +833,14 @@ describe("Codex submitted first exchange", () => {
     expect(matchCodexFirstExchange(screen, [row(), row("old", started - 60_000, "Other fixture", "Different answer")], started)).toBe("new");
   });
 
+  it("matches a short greeting only when the complete exchange is unique", () => {
+    const greeting = screen.replace(prompt, "hello");
+    const own = row("new", started, "hello");
+    expect(matchCodexFirstExchange(greeting, [own], started)).toBe("new");
+    expect(matchCodexFirstExchange(greeting, [own, row("old", started - 60_000, "hello")], started)).toBeNull();
+    expect(matchCodexFirstExchange(greeting.replace("hello", " "), [{ ...own, firstUserMessage: " " }], started)).toBeNull();
+  });
+
   it("requires exact prompt punctuation and the full answer", () => {
     for (const shown of [
       screen.replace(prompt, "Check-fixture"), screen.replace(prompt, "Check fixture again"),
@@ -879,6 +887,39 @@ describe("Codex submitted first exchange", () => {
     expect(matchCodexFirstExchange(screen.replace(answer, "42"), [
       row("new", started, prompt, "42"), row("old", started - 1, prompt, "42"),
     ], started)).toBeNull(); // control: competing evidence
+  });
+
+  it("matches the first short reply before Codex's completed-turn footer", () => {
+    for (const footer of ["Worked for <1s • 11:19", "Worked for 1s • 11:11 AM", "Worked for 2m 14s • 16:11", "Worked for 0s"]) {
+      const completed = screen.replace(answer, answer + "\n\n  " + footer);
+      expect(matchCodexFirstExchange(completed, [row()], started)).toBe("new");
+      expect(matchCodexFirstExchange(completed, [row(), row("old", started - 1)], started)).toBeNull();
+    }
+  });
+
+  it("does not discard answer text or an unrecognized completion footer", () => {
+    for (const suffix of [
+      "Worked for a while on this.",
+      "Worked for 1s • unknown time",
+      "Worked for 1s • 11:11 AM\nMore answer text",
+    ]) {
+      expect(matchCodexFirstExchange(screen.replace(answer, answer + "\n\n" + suffix), [row()], started)).toBeNull();
+    }
+    const literal = "Worked for 1s • 11:11 AM";
+    expect(matchCodexFirstExchange(screen.replace(answer, literal), [row("new", started, prompt, literal)], started)).toBe("new");
+    const completed = screen.replace(answer, answer + "\n\nWorked for 1s • 11:11 AM");
+    expect(matchCodexFirstExchange(completed, [
+      row(), row("old", started - 1, prompt, answer + "\n\nWorked for 1s • 11:11 AM"),
+    ], started)).toBeNull();
+  });
+
+  it("preserves a literal footer-shaped final paragraph without native chrome", () => {
+    const literal = answer + "\n\nWorked for 1s • 11:11 AM";
+    const completed = screen.replace(answer, literal);
+    expect(matchCodexFirstExchange(completed, [row("new", started, prompt, literal)], started)).toBe("new");
+    expect(matchCodexFirstExchange(completed, [
+      row("new", started, prompt, literal), row("old", started - 1),
+    ], started)).toBeNull();
   });
 
   it("skips known Codex notices before the submitted prompt (regression)", () => {

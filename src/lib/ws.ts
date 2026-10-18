@@ -29,6 +29,8 @@ const SUBMIT_TIMEOUT_MS = 90_000;
  */
 const CONNECT_TIMEOUT_MS = 8_000;
 const CONNECT_TIMEOUT_MAX_MS = 30_000;
+/** A completed handshake alone is not recovery: short-lived opens must keep the retry backoff. */
+const STABLE_CONNECTION_MS = 10_000;
 /**
  * Liveness (feature "ping"): a socket can read OPEN while its TCP path is gone (a phone moved from
  * Wi-Fi to cellular, a NAT entry expired while it slept) and no close event comes for minutes. The
@@ -54,6 +56,8 @@ const SHOWN_GRACE_MS = 5_000;
 const SOCKET_CLOSING = 2;
 const SOCKET_CLOSED = 3;
 const DISCONNECTED: SubmitResult = { ok: false, code: "disconnected", message: "the connection dropped before the pane confirmed this message" };
+/** The connection dropped before the request's frame left: nothing can have reached the pane. */
+const NOT_TRANSMITTED: SubmitResult = { ok: false, code: "not_transmitted", message: "the connection dropped before this message was sent" };
 
 /**
  * Where the connection stands. `connected` and the input checks still read the socket itself:
@@ -114,6 +118,8 @@ export class HerdrSocket {
    * after letting go of it) asks again; only the chat taking its interest back removes it. */
   private readonly conversationWanted = new Set<string>();
   private retries = 0;
+  /** When this connection opened; a brief open must not restart a flapping connection's retries. */
+  private openedAt: number | null = null;
   private reconnectTimer: number | null = null;
   /** the deadline of the attempt still in CONNECTING */
   private connectTimer: number | null = null;
@@ -272,14 +278,13 @@ export class HerdrSocket {
     }, Math.min(CONNECT_TIMEOUT_MAX_MS, CONNECT_TIMEOUT_MS * 2 ** this.connectTimeouts));
 
     socket.addEventListener("open", () => {
-      if (this.socket === socket) {
-        this.clearConnectTimer();
-        this.connectTimeouts = 0;
-        this.connectionState = "open";
-        this.lastFrameAt = Date.now();
-        this.watchIdle(socket);
-      }
-      this.retries = 0;
+      if (this.socket !== socket) return;
+      this.clearConnectTimer();
+      this.connectTimeouts = 0;
+      this.connectionState = "open";
+      this.openedAt = Date.now();
+      this.lastFrameAt = this.openedAt;
+      this.watchIdle(socket);
       // always send the role, never only when non-default: a user can flip the role
       // while disconnected (setMode stores it without sending), so without this frame
       // the reconnect would leave the server on the stale role and no ack would ever
@@ -410,6 +415,8 @@ export class HerdrSocket {
 
   /** Drops the current connection: its submits settle as disconnected and the disconnect handlers run. */
   private endConnection(): void {
+    if (this.openedAt !== null && Date.now() - this.openedAt >= STABLE_CONNECTION_MS) this.retries = 0;
+    this.openedAt = null;
     this.socket = null;
     this.clearConnectTimer();
     this.clearLiveness();
@@ -815,7 +822,7 @@ export class HerdrSocket {
     return (async (): Promise<SubmitResult> => {
       await Promise.race([this.snapshotSeen, new Promise((resolve) => window.setTimeout(resolve, SNAPSHOT_WAIT_MS))]);
       // a liveness probe in flight is waited out: nothing is sent on a socket that may be dead
-      if (!(await this.probeSettled(socket))) return DISCONNECTED;
+      if (!(await this.probeSettled(socket))) return NOT_TRANSMITTED;
       if (this.mode === "observe") return { ok: false, code: "read_only", message: "Observe connections cannot submit messages." };
       // hold is decided once the snapshot said what the bridge supports: one too old to hold queues it as before
       if (delivery === "hold" && !this.canHoldMessages()) delivery = "queue";
@@ -837,7 +844,7 @@ export class HerdrSocket {
     if (!this.connected || socket === null || this.mode === "observe") return null;
     return (async (): Promise<SubmitResult> => {
       await Promise.race([this.snapshotSeen, new Promise((resolve) => window.setTimeout(resolve, SNAPSHOT_WAIT_MS))]);
-      if (!(await this.probeSettled(socket))) return DISCONNECTED;
+      if (!(await this.probeSettled(socket))) return NOT_TRANSMITTED;
       if (this.mode === "observe") return { ok: false, code: "read_only", message: "Observe connections cannot change pending messages." };
       if (!this.canQueueMessages()) return { ok: false, code: "pending_input_unsupported", message: "Update this PC to manage pending messages." };
       return this.submitRequest({ type: "pending-action", id: this.nextSubmit++, pane_id: paneId, pending_id: pendingId, action,
@@ -859,7 +866,7 @@ export class HerdrSocket {
     });
     try { this.rawSend(message); }
     catch {
-      this.submits.get(id)?.(DISCONNECTED);
+      this.submits.get(id)?.(NOT_TRANSMITTED);
       this.submits.delete(id);
       this.requests.delete(id);
     }

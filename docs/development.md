@@ -47,10 +47,15 @@ first, as CI's herdr-backed lanes do. A second run in the same checkout exits at
 slots free: runs in one checkout share `dist/` and the generated types. A checkout is its real
 path, plus `RUNNER_NAME` when that is set: the self-hosted runners of one PC share a loopback and
 all check out to the same path. The
-generated-types check (`bun run generate:types --check`) is read-only, but `test:unit` includes
+generated-types and generated-themes checks (`bun run generate:types --check`,
+`bun run generate:themes --check`) are read-only, but `test:unit` includes
 `scripts/generate-protocol-types.test.ts`, which rewrites the generated file while it runs. Fast
 checks and the browser lane also build into `dist/`; avoid overlapping runs that write to the same
 checkout. (`check run` runs only its named command unless `--build` is supplied.)
+Theme colors are edited only in the theme blocks of `src/styles.css`. Never edit the generated
+copies (`src/lib/themes.generated.ts`, the DESIGN.md region between the `GENERATED THEMES`
+markers, the `theme-color` tag in `index.html`, the colors in `public/manifest.webmanifest`); run
+`bun run generate:themes` after a color change.
 Admission is serialized briefly on port 41745. After taking a candidate slot, the run checks all
 eight slots again for its checkout and counts every active holder against its requested limit,
 including holders above its candidate range. A busy admission port refuses rather than waits.
@@ -103,11 +108,13 @@ bun scripts/key-bar-customization-demo-regression.ts # mobile key layout, saved 
 bun scripts/key-bar-hold-repeat-regression.ts # phone touch key-bar taps, holds (arrows and editing keys), swipes and sticky Ctrl on demo fixtures
 bun scripts/settings-pages-demo-regression.ts # every Settings page on a 390px and a 320px phone, and Back stepping out of the dialog
 bun scripts/chat-browser-qa.ts  # chat lens end to end
+bun scripts/omo-plan-browser-regression.ts # OmO todo progress and plan panel on isolated native fixtures
 bun scripts/pane-input-focus-demo-regression.ts # the input focus shortcut against fictional panes
 bun scripts/shortcut-exact-modifiers-demo-regression.ts # recording exact-modifier chords: confirm, refusals, dispatch
 bun scripts/output-browser-qa.ts # terminal output flow control end to end
 bun scripts/math-browser-qa.ts  # chat math: KaTeX loads with the first expression
 bun scripts/recent-folders-regression.ts # owned workspaces: PC-scoped history, reload, three chips on one row that fill Directory, pending and failures
+bun scripts/phone-worktree-sheet-regression.ts # a phone's New worktree sheet: the agent list's own stroke, and a Shell checkout's terminal opening
 bun run test:ssh                # remote-PC integration over SSH
 bun scripts/fresh-install-docker.ts [owner/repo] [ref]  # a new user's install in a bare Ubuntu (Docker)
 ```
@@ -137,10 +144,13 @@ bun scripts/chat-greeting-demo-regression.ts  # an empty chat's greeting: centre
 bun scripts/composer-fit-demo-regression.ts   # one Send/Stop control, pending Send now actions, context/label fit and Chat font sizing
 bun scripts/held-rows-demo-regression.ts      # held messages: the fold under an approval card, its button, a row's error
 bun scripts/sidebar-activity-demo-regression.ts # Agents order Activity and pins: blocked pinned, recency, Pin agent / Unpin agent and Pin workspace / Unpin workspace from a right-click and the context-menu key, and the ⋯ on a phone
+bun scripts/sidebar-branch-line-demo-regression.ts # herdr's branch line: a repository and an unmarked git folder say their branch under the name, worktrees and folders outside git stay one line, desktop and phone, dark and light
 bun scripts/prompt-dock-demo-regression.ts    # the prompt card docked over the input card: its place, its height on a short phone, the grip, a typed pick
 bun scripts/plugin-actions-demo-regression.ts # a plugin action that ends after the server stopped waiting: the late failure said, a traceback's height on a phone with its keyboard up
 bun scripts/font-swap-demo-regression.ts      # the app's faces arriving late on a slow link: a reader at the end of a chat stays there, a tab strip the user scrolled stays put
 bun scripts/narrow-pane-demo-regression.ts    # a split pane under 80 columns: the smaller font, a zoom, and a pane no font can bring to 80
+bun scripts/agent-skill-menu-demo-regression.ts [agent …] # each agent's `/` (and `$`) skill menu, its origin groups and its skill chips at 1280 and 390px, one case file per agent in scripts/skill-menu-cases/, screenshots in evidence/agent-skill-menu/<agent>/
+bun scripts/install-state-demo-regression.ts  # Install app against a real CDP install on a throwaway profile and HOME: the help or the prompt before, gone in the app window and a tab of its origin, back after uninstall
 ```
 
 `FILE_VIEWER_CASE=landscape-notch` selects a viewer case; `FILE_VIEWER_CSS=/path/to/before.css` compares another stylesheet. These checks use Chromium mobile emulation and synthetic safe-area/keyboard geometry; they cannot verify actual iOS Safari keyboard dismissal or notch insets. The existing `bun scripts/file-viewer-regression.ts` separately checks history with an owned herdr pane. The original `scripts/mobile-viewport-regression.ts` exports `checkMobileViewport` for the real-app `bun run test:ui` suite; it also checks the command palette and xterm focus transitions. The demo runners build the real client into a temporary directory, inject the committed fictional-session transport and serve it only on loopback; they do not use a live herdr session or download website media. Run on its own, each builds the client itself (`scripts/demo-build.ts`); the browser lane builds it once and names the directory in `HERDR_DEMO_BUILD`, and each runner copies that instead. They exercise real-app viewport and alert geometry, but not live herdr connectivity.
@@ -230,7 +240,7 @@ resolves through existing provider/process evidence, checks file identity, size 
 without parsing turns, and rechecks session resolution every 5 s (2 s while a transcript is
 missing). The last interested client, failed/ended attachment and server stop release it.
 
-Newest-page refreshes are single-flight. Push-triggered reads start at least 2 s apart using
+Newest-page refreshes are single-flight. Push-triggered reads start at least 1 s apart using
 monotonic elapsed time, with one trailing refresh at a fixed deadline: continuous writes cannot
 keep postponing it. A push after idle reads immediately. Initial display, explicit sends,
 status/history repairs, reconnect and visibility return bypass that delay but not serialization.
@@ -245,7 +255,7 @@ pane or machine switch.
 A Chat showing the scrollback stand-in (no native transcript yet, or none recognized) has no
 file for the monitor to watch. While it is visible, the pane's own `pty-data` (a mirror's screen
 frames on Windows) invalidates it through the same coordinator, so continuous output rereads
-at most every 2 s and a quiet pane is not read. A Chat showing a native transcript ignores
+at most every 1 s and a quiet pane is not read. A Chat showing a native transcript ignores
 terminal output.
 
 Conversation responses are gzipped like every other text answer (`server/compress.ts`), with
@@ -279,7 +289,7 @@ to about 11.2% of its identity response; real tool output and conversations will
 
 ### Visible-Chat subscription and bounded-refresh resource measurement
 
-The current policy was compared with upstream 2 s polling on macOS in headed Chrome,
+The push policy was compared with upstream 2 s polling on macOS in headed Chrome,
 using owned native Codex fixtures initially about 60 KB each. Each row is a paired
 20 s sample, excluding initial loading, with fresh bridge processes and the same
 16 owned workspaces present for both versions. Both versions retain the existing
@@ -317,13 +327,14 @@ retained the monitor; closing the last view removed all monitors, the monitor ti
 and owned PTY children. No browser errors occurred in these samples.
 
 These resource results do not remeasure the latency or compressed payload figures
-in the historical table above.
+in the historical table above. They were taken with a 2 s push-read bound; the bound is now
+1 s, so a pane written continuously gets up to twice the REST reads shown in the last rows.
 
 ## README media
 
 `bun run build && bun scripts/readme-media/capture.ts` regenerates the stills and demos in `docs/screenshots/` from a staged, fictional session in its own herdr session (`herdr-web-ui-demo`). Pass `shots` or `video` to redo only one of them. It needs ffmpeg.
 
-- `stage.ts` builds the session: five workspaces under `/tmp/herdr-demo`, curated chats served in place of transcripts, and the hostname rewritten.
+- `stage.ts` builds the session from `site/demo/fixtures.ts`: two git repositories under `/tmp/herdr-demo`, each with two agent worktrees herdr adds, a release shell tab, curated chats served in place of transcripts, and the hostname rewritten.
 - `record.ts` records a walkthrough at 2x (Chrome's screencast, with `--force-device-scale-factor=2`), logging pointer moves, clicks, taps and camera cues as it drives the page.
 - `compose.ts` draws every output frame on a canvas: a backdrop, a browser window or a phone, the frame under an eased camera, and a vector cursor with click ripples or touch rings. It writes `demo-*.mp4` (1920×1200 and 1080×1920, 30 fps) and a GIF of each. Stills get the same window or phone on a transparent background.
 
