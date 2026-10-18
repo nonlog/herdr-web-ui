@@ -16,6 +16,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { isLoopbackAddress } from "./access.ts";
+import { PAGE_MEDIA_ROUTE } from "./file-view.ts";
 import { badRequest, jsonResponse } from "./http.ts";
 
 export const TOKEN_COOKIE = "herdr_web_token";
@@ -73,6 +74,12 @@ export function isAuthenticated(request: Request, token: string): boolean {
   if (token === "") return true;
   const cookie = parseCookies(request.headers.get("cookie")).get(TOKEN_COOKIE);
   if (cookie !== undefined && matches(cookie, token)) return true;
+  return bearerMatches(request, token);
+}
+
+/** The token came in an `Authorization` header: a proxy or a script sends it with every request, so signing out cannot take it away. */
+export function bearerMatches(request: Request, token: string): boolean {
+  if (token === "") return false;
   const authorization = request.headers.get("authorization") ?? "";
   if (authorization.slice(0, BEARER_PREFIX.length).toLowerCase() !== BEARER_PREFIX) return false;
   return matches(authorization.slice(BEARER_PREFIX.length), token);
@@ -82,6 +89,9 @@ export function isAuthenticated(request: Request, token: string): boolean {
 export function requiresAuth(pathname: string): boolean {
   if (pathname === "/ws") return true;
   if (!pathname.startsWith("/api/")) return false;
+  // a rendered page's media address is its own credential, kept to the client that rendered it for a fixed time
+  // (file-view.ts): the page has no origin and sends no cookie
+  if (PAGE_MEDIA_ROUTE.test(pathname)) return false;
   return pathname !== "/api/health" && pathname !== "/api/auth" && pathname !== "/api/devices/pair";
 }
 

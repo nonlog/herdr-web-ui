@@ -116,7 +116,8 @@ async function checkLayout(): Promise<void> {
             const body = document.querySelector<HTMLElement>(".file-viewer-body")!;
             // a long name is cut inside its stem; the extension stays whole
             const title = document.querySelector<HTMLElement>(".file-viewer-title .file-viewer-stem")!;
-            const controls = [...header.querySelectorAll<HTMLElement>(".icon-button")].map((element) => {
+            // the controls drawn: on a phone new tab and download wait in More, so they are not
+            const controls = [...header.querySelectorAll<HTMLElement>(".icon-button")].filter((element) => element.getClientRects().length > 0).map((element) => {
               const bounds = rect(element);
               // Rounded button corners do not belong to the hit target.
               const points = [[bounds.x + 8, bounds.y + 8], [bounds.right - 8, bounds.y + 8], [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2], [bounds.x + 8, bounds.bottom - 8], [bounds.right - 8, bounds.bottom - 8]];
@@ -127,8 +128,9 @@ async function checkLayout(): Promise<void> {
               title: { ...rect(title), scrollWidth: title.scrollWidth, clientWidth: title.clientWidth, overflow: getComputedStyle(title).textOverflow },
               documentWidth: document.documentElement.scrollWidth, documentHeight: document.documentElement.scrollHeight };
           });
-          // an image opens in a new tab, downloads (a new tab in an installed app need not save it) and closes
-          assert.equal(geometry.controls.length, 3, label);
+          // an image opens in a new tab, downloads (a new tab in an installed app need not save it) and
+          // closes; up to 600px the first two are in More
+          assert.equal(geometry.controls.length, scenario.width <= 600 ? 2 : 3, label);
           assert.ok(geometry.dialog.x >= -1 && geometry.dialog.right <= scenario.width + 1, `${label}: dialog fits width`);
           assert.ok(geometry.dialog.y >= -1 && geometry.dialog.bottom <= limit + 1, `${label}: dialog fits usable height`);
           for (const control of geometry.controls) {
@@ -166,8 +168,8 @@ async function checkLayout(): Promise<void> {
         }
       } finally { await context.close(); }
     }
-    // A text file adds Copy to Open in a new tab and Download: on a phone the name keeps the first row with Close in its
-    // corner, and the actions share the second row inside the dialog.
+    // A text file adds Copy to Open in a new tab and Download: on a phone the header is one row, the
+    // name, Copy and More (new tab, download) and Close in its corner, all inside the dialog.
     const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: "en-US" });
     try {
       const page = await phone.newPage();
@@ -181,22 +183,24 @@ async function checkLayout(): Promise<void> {
       await sheetsSettled(page);
       const dialog = await page.locator(".file-viewer").boundingBox();
       assert.ok(dialog, "text: dialog is laid out");
-      const buttons = page.locator(".file-viewer-actions .icon-button");
-      assert.equal(await buttons.count(), 3, "text: Open in a new tab, Download and Copy");
+      const buttons = page.locator(".file-viewer-actions .icon-button:visible");
+      assert.deepEqual(await buttons.evaluateAll((all) => all.map((button) => button.getAttribute("aria-label"))), ["Copy file", "More"], "text: Copy and More; new tab and download wait in More");
       const title = (await page.locator(".file-viewer-title").boundingBox())!;
       const close = (await page.getByRole("button", { name: "Close file", exact: true }).boundingBox())!;
-      assert.ok(close.y < title.y + title.height && close.y + close.height > title.y, "text: Close shares the name's row");
+      const middle = (box: { y: number; height: number }) => box.y + box.height / 2;
+      assert.ok(Math.abs(middle(close) - middle(title)) < 4, "text: Close shares the name's row");
       assert.ok(close.x + close.width >= dialog.x + dialog.width - 32, "text: Close sits in the right corner");
-      for (let index = 0; index < 3; index++) {
+      for (let index = 0; index < 2; index++) {
         const box = await buttons.nth(index).boundingBox();
         assert.ok(box, `text: button ${index} is laid out`);
-        assert.equal(box.y, (await buttons.nth(0).boundingBox())!.y, `text: button ${index} shares the row`);
-        assert.ok(box.y >= title.y + title.height, `text: button ${index} below the name`);
-        assert.ok(box.x >= dialog.x && box.x + box.width <= dialog.x + dialog.width, `text: button ${index} inside the dialog`);
+        assert.ok(Math.abs(middle(box) - middle(title)) < 4, `text: button ${index} shares the name's row`);
+        assert.ok(box.x >= title.x + title.width - 1 && box.x + box.width <= close.x + 1, `text: button ${index} between the name and Close`);
       }
       assert.ok((await page.locator(".file-viewer-title .modal-title").innerText()).endsWith(".ts"), "text: the extension stays in the title");
+      await page.getByRole("button", { name: "More", exact: true }).tap();
+      assert.deepEqual((await page.getByRole("menuitem").allTextContents()).map((item) => item.trim()), ["Open in a new tab", "Download"], "text: More holds new tab and download");
       assert.deepEqual(errors, []);
-      console.log("PASS text: name and Close on the first row, the actions on the second, at 390px");
+      console.log("PASS text: the name, Copy, More and Close on one row at 390px; new tab and download in More");
     } finally { await phone.close(); }
   } finally {
     await browser?.close();

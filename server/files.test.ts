@@ -56,11 +56,68 @@ describe("paneFiles", () => {
     expect(files).toContain("line\nbreak.txt");
   });
 
+  it("matches a Unicode query across normalization forms", async () => {
+    const root = fixture();
+    const name = "문서.md".normalize("NFD");
+    writeFileSync(join(root, name), "fixture");
+    clearFileCache();
+    expect(await paneFiles(root, "문서".normalize("NFC"))).toContain(name);
+  });
+
+  it("preserves existing ASCII matches and scores for decomposed names", async () => {
+    const root = mkdtempSync(join(tmpdir(), "files-unicode-search-"));
+    roots.push(root);
+    for (const name of [
+      "abc/x.md",
+      "café.txt".normalize("NFD"),
+      "docs/readme.md",
+      "ée/x.md",
+      "éé/x.md".normalize("NFD"),
+      "src/main.ts",
+      "x.md",
+      "메모.md",
+      "문서.md".normalize("NFD"),
+    ]) {
+      const path = join(root, name);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, "fixture");
+    }
+    clearFileCache();
+    expect(await paneFiles(root, "cafe", 100)).toContain("café.txt".normalize("NFD"));
+    expect(await paneFiles(root, "x", 100)).toEqual([
+      "x.md",
+      "ée/x.md",
+      "abc/x.md",
+      "éé/x.md".normalize("NFD"),
+      "café.txt".normalize("NFD"),
+    ]);
+    expect(await paneFiles(root, "md", 100)).toEqual([
+      "x.md",
+      "메모.md",
+      "ée/x.md",
+      "abc/x.md",
+      "문서.md".normalize("NFD"),
+      "éé/x.md".normalize("NFD"),
+      "docs/readme.md",
+    ]);
+  });
+
   it("honors git ignores from a nested working directory", async () => {
     const root = fixture();
     expect(Bun.spawnSync(["git", "init", "-q", root]).exitCode).toBe(0);
     writeFileSync(join(root, ".gitignore"), "src/secret.txt\n");
     writeFileSync(join(root, "src", "secret.txt"), "private");
     expect(await paneFiles(join(root, "src"), "", 100)).toEqual(["api.ts", "components/PromptCard.tsx"]);
+  });
+
+  it("keeps files listed after a folder of thousands in the git inventory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "files-search-"));
+    roots.push(root);
+    mkdirSync(join(root, "a-data"));
+    for (let index = 0; index < 5_100; index += 1) writeFileSync(join(root, "a-data", `page-${index}.txt`), "");
+    mkdirSync(join(root, "docs", "design"), { recursive: true });
+    writeFileSync(join(root, "docs", "design", "11_two-version-design.md"), "# design");
+    expect(Bun.spawnSync(["git", "init", "-q", root]).exitCode).toBe(0);
+    expect(await paneFiles(root, "two-version", 20)).toEqual(["docs/design/11_two-version-design.md"]);
   });
 });

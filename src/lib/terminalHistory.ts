@@ -89,3 +89,12 @@ export function accumulateHistoryWheel(remainder: number, deltaRows: number, spe
   const lines = Math.trunc(total);
   return { lines, remainder: total - lines };
 }
+
+/** Map physical wheel, trackpad and page deltas to local ANSI history rows. */
+export function semanticWheelDeltaLines(deltaY: number, deltaMode: number, rows: number): number {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return 0;
+  if (deltaMode === 1) return deltaY;
+  if (deltaMode === 2) return deltaY * Math.max(1, rows);
+  // A Windows 100–120px wheel notch is around three terminal rows.
+  return deltaY / 40;
+}

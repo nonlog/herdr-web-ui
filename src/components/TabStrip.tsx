@@ -1,12 +1,15 @@
 /**
  * Herdr's tab row, visible for a single tab too. Left-click selects; right-click opens
- * New tab / Rename / Close at the pointer. Pane actions belong to PaneCanvas.
- * A phone keeps an ellipsis on the selected tab as a touch entry to its trimmed menu. Where the
- * canvas shows a split tab's panes one at a time (SOLO_PANE_QUERY), that menu lists them first.
+ * New tab with agent / Rename / Close at the pointer. The + opens a shell tab at once, as herdr's
+ * own new tab does. Pane actions belong to PaneCanvas.
+ * The selected tab carries an ellipsis that opens its trimmed menu: a phone keeps it in view as a
+ * touch entry, a desktop with a mouse draws it when the strip is hovered or the tab has keyboard
+ * focus (TabStrip.css), so the menu is never only behind a right-click. Where the canvas shows a
+ * split tab's panes one at a time (SOLO_PANE_QUERY), that menu lists them first.
  * That menu also carries the open pane's actions, so a lone pane shows no ellipsis of its own.
  */
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
-import { ArrowLeft, ArrowRight, Ellipsis, Pencil, Plus, Terminal, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { ArrowLeft, ArrowRight, Bot, Ellipsis, Pencil, Plus, Terminal, X } from "lucide-react";
 
 import "./TabStrip.css";
 
@@ -40,21 +43,30 @@ export interface TabStripProps {
   workspace: WorkspaceInfo;
   selectedPane: PaneInfo;
   onSelectPane: (paneId: string) => void;
+  /** the New tab dialog, where an agent is picked */
   onNewTab: () => void;
+  /** a shell tab in this workspace, with no dialog; rejects with herdr's refusal */
+  onNewTerminal: () => Promise<void>;
   /** the open pane's actions (PaneCanvas), offered in the touch menu */
   paneActions?: (paneId: string) => RowMenuItem[];
   /** the panel the tabs control: each half of a split view has its own (lib/split.ts) */
   panelId?: string;
   /** a tab dragged out of the strip may open its pane in half of the pane area (lib/paneDrag.ts) */
   splitDrag?: boolean;
+  /** drawn at the row's far end, outside the scrolling tabs: a split view half's close (App) */
+  end?: ReactNode;
 }
 
-export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNewTab, paneActions, panelId = PANE_TABPANEL_ID, splitDrag = false }: TabStripProps) {
+export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNewTab, onNewTerminal, paneActions, panelId = PANE_TABPANEL_ID, splitDrag = false, end }: TabStripProps) {
   const t = useT();
   const { settings } = useSettings();
   const machineId = useMachineId();
   const { closeTab, renameTab, moveTab } = useMachineApi();
   const touchMenu = useMediaQuery("(pointer: coarse), (max-width: 768px)");
+  // a mouse on a wide screen gets the same ellipsis, drawn while the strip is hovered or the tab
+  // has keyboard focus (TabStrip.css): the tab's menu is never only behind a right-click
+  const hoverMenu = useMediaQuery("(hover: hover) and (pointer: fine) and (min-width: 769px)");
+  const menuButton = touchMenu || hoverMenu;
   const soloPanes = useMediaQuery(SOLO_PANE_QUERY);
   // a short phone screen (landscape, a small phone) has no height to spare: a lone tab is not
   // drawn there, so an approval card keeps its options in reach; its actions stay in the header
@@ -117,11 +129,11 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     if (confirm && !here(confirm.tab.tab_id)) setConfirm(null);
     if (sent && tabs.find((tab) => tab.tab_id === sent.tabId)?.label.trim() === sent.label) setSent(null);
   });
-  // A touch-only trigger can disappear without crossing RowMenu's narrower sheet breakpoint.
+  // The ellipsis can disappear without crossing RowMenu's narrower sheet breakpoint.
   // Its tab remains the focus return target even after the ellipsis is removed.
   useLayoutEffect(() => {
-    if (picker?.touch && (!touchMenu || picker.tab.tab_id !== selectedPane.tab_id)) setPicker(null);
-  }, [touchMenu, selectedPane.tab_id, picker]);
+    if (picker?.touch && (!menuButton || picker.tab.tab_id !== selectedPane.tab_id)) setPicker(null);
+  }, [menuButton, selectedPane.tab_id, picker]);
   useLayoutEffect(() => {
     if (editing || !refocus.current) return;
     strip.current?.querySelector<HTMLElement>(`[role="tab"][data-tab-id="${CSS.escape(refocus.current)}"]`)?.focus();
@@ -183,7 +195,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   useLayoutEffect(() => {
     scroll.current = stripSelected(scroll.current);
   }, [selectedPane.tab_id]);
-  useLayoutEffect(bringOpenTab, [selectedPane.tab_id, tabs.length, shown, touchMenu]);
+  useLayoutEffect(bringOpenTab, [selectedPane.tab_id, tabs.length, shown, menuButton]);
   // A face that arrives after that (lib/fontFaces.ts) redraws every name wider or narrower with
   // no tab added or opened, so the open tab is brought into view again for each: unless the user
   // has scrolled the strip themselves since a tab was last opened (lib/tabStripScroll.ts), and is
@@ -332,17 +344,17 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
         current: pane.pane_id === selectedPane.pane_id, run: () => onSelectPane(pane.pane_id),
       })),
       paneItems,
-      tabActions(tab, touch),
+      tabActions(tab),
     ].filter((group) => group.length > 0);
     return groups.flatMap((group, at) => at === 0 ? group : group.map((item, index) => index === 0 ? { ...item, divider: true } : item));
   };
-  // the strip's + sits beside the ⋯, so its menu does not repeat New tab
-  const tabActions = (tab: HerdrTab, touch = false): RowMenuItem[] => [
+  // the strip's + opens a shell tab; the menu keeps the dialog, where an agent is picked
+  const tabActions = (tab: HerdrTab): RowMenuItem[] => [
     ...(!reorder.moving && tabs.findIndex((entry) => entry.tab_id === tab.tab_id) > 0
       ? [{ id: "move-left", label: t("Move tab left"), icon: ArrowLeft, run: () => reorder.moveAdjacent(tab.tab_id, -1) }] : []),
     ...(!reorder.moving && tabs.findIndex((entry) => entry.tab_id === tab.tab_id) < tabs.length - 1
       ? [{ id: "move-right", label: t("Move tab right"), icon: ArrowRight, run: () => reorder.moveAdjacent(tab.tab_id, 1) }] : []),
-    ...(touch ? [] : [{ id: "new-tab", label: t("New tab"), icon: Plus, run: onNewTab }]),
+    { id: "new-agent-tab", label: t("New tab with agent…"), icon: Bot, run: onNewTab },
     { id: "rename-tab", label: t("Rename tab"), icon: Pencil, run: () => beginRename(tab) },
     { id: "close-tab", label: t("Close tab"), icon: X, danger: true, run: () => requestClose(tab) },
   ];
@@ -351,8 +363,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   // only while the pane's own tab is in this snapshot (paneTabPanelLabel); the same call answers
   // here, so a tab never claims to control a panel that is not standing there as one.
   const panePanel = paneTabPanelLabel(snapshot, selectedPane, t) !== null ? panelId : undefined;
-  return (
-    <>
+  const row = (
       <div ref={strip} className="tab-strip" role="tablist" aria-label={t("Tabs of {workspace}", { workspace: workspace.label })} aria-busy={reorder.moving} onKeyDown={onKeyDown} onScroll={onScroll}
         onFocus={(event) => { if (event.target.getAttribute("role") === "tab") focusedTab.current = event.target; }}
         onBlur={(event) => { if (event.relatedTarget !== null) focusedTab.current = null; }}>
@@ -421,17 +432,22 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
                   <span className="tab-strip-label">{name}</span>
                 </button>
               )}
-              {touchMenu && active && editing?.tabId !== tab.tab_id && <button type="button" className="tab-strip-menu" aria-label={t("Actions for {tab}", { tab: name })} aria-haspopup="menu" aria-expanded={pickerOpen} onClick={(event) => openPicker(event, tab)}>
+              {menuButton && active && editing?.tabId !== tab.tab_id && <button type="button" className="tab-strip-menu" aria-label={t("Actions for {tab}", { tab: name })} title={t("Actions for {tab}", { tab: name })} aria-haspopup="menu" aria-expanded={pickerOpen} onClick={(event) => openPicker(event, tab)}>
                 <Ellipsis aria-hidden="true" />
               </button>}
             </div>
           );
         })}
-        <button type="button" className="tab-strip-add" aria-label={t("New tab")} title={t("New tab")} onClick={onNewTab}>
+        <button type="button" className="tab-strip-add" aria-label={t("New terminal")} title={t("New terminal")}
+          onClick={() => { setError(null); void onNewTerminal().catch((reason: unknown) => setError(t("New terminal failed: {reason}", { reason: said(reason) }))); }}>
           <Plus aria-hidden="true" />
         </button>
         {error && <span className="tab-strip-error" role="alert">{error}</span>}
       </div>
+  );
+  return (
+    <>
+      {end === undefined ? row : <div className="tab-strip-row">{row}<div className="tab-strip-end">{end}</div></div>}
       {picker && <RowMenu anchor={picker.anchor} point={picker.point} restoreFocusTo={picker.previousFocus}
         title={nameOf(picker.tab)} items={pickerItems(picker.tab, picker.touch)} align="start" onClose={() => setPicker(null)} />}
       {confirm && <ConfirmDialog title={confirm.title} body={confirm.body} confirmLabel={t("Close tab")} onConfirm={async () => { await close(confirm.tab); setConfirm(null); }} onClose={() => setConfirm(null)} />}

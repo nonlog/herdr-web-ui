@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import type { HerdrPane, InteractivePrompt, PromptAnswer } from "../shared/protocol.ts";
+import type { HerdrPane, InteractivePrompt, InteractivePromptAnswer, PromptAnswer } from "../shared/protocol.ts";
 import { codexTranscriptPath, paneCodexHome, unansweredCodexQuestions, type QueuedQuestion } from "./codex.ts";
 import { HerdrError, paneRead, paneScrollInfo, paneSendKeys, paneSendText, sessionSnapshot } from "./herdr/client.ts";
 import { omoTranscriptForPane } from "./omo.ts";
@@ -10,9 +10,16 @@ import { claudePlanFile } from "./claude-plan.ts";
 
 const ANSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const SELECTED_RE = /^[❯›>]\s*/;
+const OMP_OPTION_MARKER_RE = /^([ \t]*)(?:[❯›>]\s*)?([○●◉◯☐☑☒✓])/;
 const DIVIDER_RE = /^[\s╭╮╰╯├┤┬┴┼─━═╌▔]+$/;
-const OMP_SINGLE_HINT_RE = /enter select.*↑\/↓ move.*esc cancel/i;
-const OMP_MULTI_HINT_RE = /space\/enter toggle.*↑\/↓ move.*esc cancel/i;
+const OMP_SINGLE_HINT_RE = /(?:enter|⏎)\s+select.*↑\/↓\s*move.*(?:esc|⎋)\s*cancel/i;
+// A legacy single-question footer can clip after the Tab keys or inside the cancel label.
+const OMP_SINGLE_CLIPPED_HINT_RE = /enter select.*n note.*↑\/↓ move.*(?:tab\/←\/→|esc(?: c(?:a(?:n(?:c(?:e(?:l)?)?)?)?)?)?)(?:…|\.{3})$/i;
+// A narrow footer can cut the question-navigation word at any letter, followed by an ellipsis.
+const OMP_CLIPPED_SINGLE_HINT_RE = /(?:enter|⏎)\s+select.*\bn\s+note.*↑\/↓\s*move.*(?:tab|⇥).*\b(?:question…?|(?:q|qu|que|ques|quest|questi|questio)…)(?=\s|$)/i;
+const OMP_MULTI_HINT_RE = /(?:space\/enter toggle|(?:space|␠|␣)\s+toggle.*(?:enter|⏎)\s+(?:submit|next)).*↑\/↓\s*move.*(?:esc|⎋)\s*cancel/i;
+const OMP_REVIEW_HINT_RE = /(?:enter|⏎)\s+submit.*↑\/↓\s*scroll.*(?:esc|⎋)\s*cancel/i;
+const OMP_TABS_HINT_RE = /(?:tab|⇥).*?(?:←|left).*?(?:→|right)|(?:←|left).*?(?:→|right).*?(?:tab|⇥)/i;
 // the last of several questions submits them all
 const CODEX_ASK_HINT_RE = /tab to add notes.*enter to submit (?:answer|all).*esc to interrupt/i;
 const CODEX_ASYNC_ASK_HINT_RE = /(?:enter|return).*submit.*(?:ctrl\s*\+\s*\]|skip)/i;
@@ -68,6 +75,17 @@ const OMO_OWN_ANSWER = "Type your own answer...";
 const OMO_HINT_LINES = 5;
 /** lines of OmO's footer under the form's rule, at most: cwd and context, then model (one may wrap) */
 const OMO_FOOTER_LINES = 3;
+/**
+ * A row of OmO's omo-task widget under the input box (omo-ai plugin/extensions/omo-task.js): a live row
+ * `<spinner> <task> · <route> · <state>[ · <elapsed>]` with the route `agent:X`, `category:X` or `task`,
+ * a finished row `<task>|<route> <mode> <status>`, or the `+N more` line after five rows.
+ */
+const OMO_TASK_ROW_RE = /^(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏‖] .+? · (?:agent:|category:|task(?: ·|$))|[^|]+\|(?:agent:|category:|task\b)|\+\d+ more$)/u;
+/** a spinner row with no task route: another program's output, never the widget */
+const OMO_SPINNER_ROW_RE = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏‖] /u;
+/** a narrow pane wraps a task row's last fields (ending in the elapsed time) onto one more short line */
+const OMO_TASK_TAIL_RE = /^(?:[^\u00b7]+ \u00b7 )*\d+[hms](?: \d+[hms])*$/u;
+const OMO_TASK_WRAP_MAX = 32;
 /** where each of the form's hints ends, however a narrow pane wraps it */
 const OMO_HINT_END_RE = /\besc (?:cancel|back|discard)$/;
 /** never a line of OmO's footer: an input box (`>`, `❯`) or a shell's prompt */
@@ -120,8 +138,10 @@ type Responder =
   | "pi-confirm"
   | "pi-input"
   | "pi-model"
+  | "omo-model"
   | "hermes-question"
   | "hermes-input"
+  | "omp-submit"
   | "fallback-menu"
   | "fallback-gjc-menu"
   | "fallback-keys";
@@ -205,18 +225,149 @@ function nearestQuestion(lines: string[], beforeIndex: number): string | null {
   return null;
 }
 
-function parseBorderMenu(lines: string[], startDivider: number, endDivider: number): MenuRow[] {
+/** OMP options have a marker; their descriptions and wrapped labels are indented below them. */
+function parseOmpRows(lines: string[], startDivider: number, endDivider: number): MenuRow[] | null {
   const rows: MenuRow[] = [];
+  const marker = "○●◉◯☐☑☒✓";
+  const selectedRows = lines.slice(startDivider + 1, endDivider).map((line, index) => {
+    const raw = line.replace(ANSI_RE, "").replace(/^\s*│/, "").replace(/│\s*$/, "");
+    const match = raw.match(/^\s*(?:❯|›|>)\s*[○●◉◯☐☑☒✓]/);
+    return match ? { raw, lineIndex: startDivider + 1 + index, markerColumn: match[0].search(/[○●◉◯☐☑☒✓]/) } : null;
+  }).filter((row): row is { raw: string; lineIndex: number; markerColumn: number } => row !== null);
+  if (selectedRows.length !== 1) return null;
+  const markerColumn = selectedRows[0]!.markerColumn;
   for (let index = startDivider + 1; index < endDivider; index += 1) {
-    let text = cleanLine(lines[index]!);
-    if (!text || isDivider(text)) continue;
-    const selected = SELECTED_RE.test(text);
-    text = text.replace(SELECTED_RE, "").trim();
-    const checked = /^[☑☒✓]/.test(text);
-    text = text.replace(/^[○●◉◯☐☑☒✓]\s*/, "").trim();
-    if (text) rows.push({ label: normalizeText(text), selected, checked, lineIndex: index });
+    const raw = lines[index]!.replace(ANSI_RE, "").replace(/^\s*│/, "").replace(/│\s*$/, "");
+    const prefix = raw.slice(0, markerColumn);
+    const glyph = raw[markerColumn] ?? "";
+    const option = marker.includes(glyph) && (/^\s*$/.test(prefix) || /^\s*(?:❯|›|>)\s*$/.test(prefix));
+    if (option) {
+      const label = normalizeText(raw.slice(markerColumn + 1));
+      if (label) rows.push({
+        label, selected: /(?:❯|›|>)\s*$/.test(prefix), checked: /^[☑☒✓]/.test(glyph), lineIndex: index,
+      });
+      continue;
+    }
+    const row = rows.at(-1);
+    if (!row) continue;
+    const description = raw.match(/^\s*↳\s*(.*)$/);
+    const indentation = raw.match(/^\s*/)?.[0].length ?? 0;
+    const continuation = raw.trim();
+    if (description) row.description = normalizeText([row.description, description[1]!].filter(Boolean).join(" "));
+    else if (row.description && indentation >= markerColumn + 4 && continuation) row.description = normalizeText(`${row.description} ${continuation}`);
+    else if (!row.description && indentation >= markerColumn + 4 && continuation) row.description = normalizeText(continuation);
+    else if (!row.description && indentation >= markerColumn + 2 && continuation) row.label = normalizeText(`${row.label} ${continuation}`);
+    else if (continuation) return null;
   }
   return rows;
+}
+
+function ompQuestionText(lines: string[], startDivider: number, hasQuestionTabs: boolean): string | null {
+  const panelTop = findLastIndex(lines, (_, index) => index < startDivider && /^\s*╭/.test(lines[index]!));
+  const headerDivider = panelTop >= 0 ? panelTop
+    : findLastIndex(lines, (_, index) => index < startDivider && isDivider(lines[index]!));
+  if (headerDivider < 0) return nearestQuestion(lines, startDivider);
+  const headerRows = lines.slice(headerDivider + 1, startDivider);
+  // With question navigation, OMP draws its tab bar before the question title. Drop its leading
+  // rows by position and the tab cells' extra left padding, not by their text: the strip can wrap
+  // to one cell per row or clip its final tab, and the question can itself end in `Submit`.
+  const firstHeaderRow = headerRows.findIndex((line) => cleanLine(line));
+  let tabRows = 0;
+  if (hasQuestionTabs) {
+    for (let index = firstHeaderRow; index >= 0 && index < headerRows.length; index += 1) {
+      if (!isOmpTabStripRow(headerRows[index]!)) break;
+      tabRows += 1;
+      if (isOmpSubmitTabRow(headerRows[index]!)) break;
+    }
+  }
+  const header = headerRows.map((line, index) => ({ line: cleanLine(line), index })).filter(({ line, index }) => line
+    && !(hasQuestionTabs && index >= firstHeaderRow && index < firstHeaderRow + tabRows)
+    && !/^[←→].*Submit/i.test(line) && !/^[☐☑✔]\s+\S/.test(line) && !/^Question \d+\/\d+/i.test(line)).map(({ line }) => line);
+  return header.length > 0 ? normalizeText(header.join(" ")) : nearestQuestion(lines, startDivider);
+}
+
+/** The panel adds one space; TabBar cells start with one space, plus a wrapped separator when present. */
+function isOmpTabStripRow(rawLine: string): boolean {
+  const raw = ompTabRowText(rawLine);
+  const indentation = raw.match(/^\s*/)?.[0].length ?? 0;
+  return (indentation === 2 || indentation === 4) && Boolean(raw.trim());
+}
+
+/** Stop at the final visible tab so following indented question text is never consumed as tabs. */
+function isOmpSubmitTabRow(rawLine: string): boolean {
+  const cells = ompTabRowText(rawLine).trim().split(/\s{2,}/).map((cell) => cell.trim());
+  return cells.at(-1) === "Submit";
+}
+
+function ompTabRowText(rawLine: string): string {
+  return rawLine.replace(ANSI_RE, "").replace(/^\s*│/, "").replace(/│\s*$/, "");
+}
+
+const OMP_REVIEW_ROW_RE = /^\d+\.\s+(.*?):(?:\s+(.*))?$/;
+const OMP_REVIEW_NOTE_RE = /^Note:\s*(.*)$/;
+
+/**
+ * omp's review: a row per question (`1. Transport: Remote relay`), a `Note: …` under an answer
+ * given one. omp cuts a long row at the pane's edge instead of wrapping it. Null when a line is
+ * neither, so the panel is shown as drawn.
+ */
+function ompReviewAnswers(panel: string[]): InteractivePromptAnswer[] | null {
+  const answers: InteractivePromptAnswer[] = [];
+  for (const line of panel) {
+    const row = OMP_REVIEW_ROW_RE.exec(line);
+    const note = OMP_REVIEW_NOTE_RE.exec(line);
+    if (row) answers.push({ question: row[1]!.trim(), answer: row[2]?.trim() || null });
+    else if (note && answers.length > 0 && answers.at(-1)!.note === undefined) answers.at(-1)!.note = note[1]!.trim();
+    // the warning over the rows ("1 unanswered question; Enter still submits.") stays the body
+    else if (answers.length > 0) return null;
+  }
+  return answers.length > 0 ? answers : null;
+}
+
+/** The Submit tab is a separate review state: Enter submits, Esc cancels the native dialog. */
+function parseOmpSubmit(screen: string): ParsedPrompt | null {
+  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const hintIndex = findLastIndex(lines, (_, index) => OMP_REVIEW_HINT_RE.test(wrapped(lines, index)));
+  if (hintIndex < 0) return null;
+  const panelTop = findLastIndex(lines, (_, index) => index < hintIndex && /^\s*╭/.test(lines[index]!));
+  if (panelTop < 0) return null;
+  const heading = findLastIndex(lines, (line, index) => index > panelTop && index < hintIndex && cleanLine(line) === "Review answers");
+  if (heading < 0) return null;
+  const submitRows = lines.flatMap((line, index) => {
+    if (index <= heading || index >= hintIndex) return [];
+    return /^\s*[❯›>]\s*Submit\s*$/i.test(cleanLine(line)) ? [index] : [];
+  });
+  if (submitRows.length !== 1) return null;
+  const submitRow = submitRows[0]!;
+  const panel = lines.slice(heading + 1, submitRow).map(cleanLine).filter((line) => line && !isDivider(line));
+  const answers = ompReviewAnswers(panel);
+  // without answers read, the panel as it is drawn; with them, only what is not an answer (the
+  // unanswered-questions warning)
+  const body = (answers ? panel.filter((line) => !OMP_REVIEW_ROW_RE.test(line) && !OMP_REVIEW_NOTE_RE.test(line)) : panel).join("\n");
+  return finishPrompt("omp", {
+    kind: "menu", title: "Review answers", question: "Submit these answers?", body: body || null,
+    ...(answers ? { answers } : {}),
+    options: [{ label: "Submit", description: null }, { label: "Cancel", description: null }],
+    multi_select: false, custom_option_index: null,
+  }, {
+    responder: "omp-submit", menuLabels: ["Submit", "Cancel"], selectedIndex: 0,
+    checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: 1,
+  });
+}
+
+/** A clipped legacy footer is enough to identify a menu only when every parsed row
+ * starts with an option marker in the cursor row's physical column. */
+function ompRowsHaveAlignedMarkers(lines: string[], rows: MenuRow[]): boolean {
+  const markerColumn = (lineIndex: number): number | null => {
+    let line = lines[lineIndex]?.replace(ANSI_RE, "") ?? "";
+    if (line.startsWith("│")) line = line.slice(1);
+    const match = OMP_OPTION_MARKER_RE.exec(line);
+    return match ? match[1]!.length + (match[0].length - match[1]!.length - match[2]!.length) : null;
+  };
+  const selected = rows.filter((row) => row.selected);
+  if (selected.length !== 1) return false;
+  const selectedColumn = markerColumn(selected[0]!.lineIndex);
+  return selectedColumn !== null && rows.every((row) => markerColumn(row.lineIndex) === selectedColumn);
 }
 
 function findMenuDividers(lines: string[], hintIndex: number): [number, number] | null {
@@ -303,6 +454,7 @@ function publicPrompt(parsed: ParsedPrompt): InteractivePrompt {
     custom_option_index: parsed.custom_option_index,
     ...(parsed.queued ? { queued: parsed.queued } : {}),
     ...(parsed.steps ? { steps: parsed.steps } : {}),
+    ...(parsed.answers ? { answers: parsed.answers } : {}),
     ...(parsed.fallback ? { fallback: true as const } : {}),
   };
   parsedByPublicPrompt.set(prompt, parsed);
@@ -311,26 +463,56 @@ function publicPrompt(parsed: ParsedPrompt): InteractivePrompt {
 
 function parseOmpQuestion(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
-  const hintIndex = findLastIndex(lines, (_, index) => OMP_SINGLE_HINT_RE.test(wrapped(lines, index)) || OMP_MULTI_HINT_RE.test(wrapped(lines, index)));
+  const clippedHintIndex = findLastIndex(lines, (_, index) => OMP_SINGLE_CLIPPED_HINT_RE.test(wrapped(lines, index)));
+  const hintIndex = findLastIndex(lines, (_, index) => OMP_SINGLE_HINT_RE.test(wrapped(lines, index))
+    || OMP_CLIPPED_SINGLE_HINT_RE.test(wrapped(lines, index)) || OMP_SINGLE_CLIPPED_HINT_RE.test(wrapped(lines, index)) || OMP_MULTI_HINT_RE.test(wrapped(lines, index)));
   if (hintIndex < 0) return null;
   const dividers = findMenuDividers(lines, hintIndex);
   if (!dividers) return null;
   const [startDivider, endDivider] = dividers;
-  const rows = parseBorderMenu(lines, startDivider, endDivider);
+  const rows = parseOmpRows(lines, startDivider, endDivider);
+  if (!rows) return null;
   const selectedIndex = rows.findIndex((row) => row.selected);
+  if (rows.filter((row) => row.selected).length !== 1) return null;
   const customIndex = rows.findIndex((row) => /^Other \(type your own\)$/i.test(row.label));
   const optionRows = rows.filter((_, index) => index !== customIndex);
-  const multiSelect = OMP_MULTI_HINT_RE.test(cleanLine(lines[hintIndex]!));
-  const question = nearestQuestion(lines, startDivider);
-  if (!question || selectedIndex < 0 || optionRows.length === 0 || customIndex < 0) return null;
+  const hint = wrapped(lines, hintIndex);
+  const multiSelect = OMP_MULTI_HINT_RE.test(hint);
+  const currentMulti = /(?:space|␠|␣)\s+toggle.*(?:enter|⏎)\s+(?:submit|next)/i.test(hint);
+  const question = ompQuestionText(lines, startDivider, OMP_TABS_HINT_RE.test(hint));
+  if (!question || selectedIndex < 0 || optionRows.length === 0 || customIndex !== rows.length - 1
+    || (hintIndex === clippedHintIndex && !ompRowsHaveAlignedMarkers(lines, rows))) return null;
   return finishPrompt("omp", {
     kind: "question", title: multiSelect ? "Multiple choice" : "Question", question, body: null,
-    options: optionRows.map((row) => ({ label: row.label.replace(/ \(Recommended\)$/i, ""), description: null })),
+    options: optionRows.map((row) => ({ label: row.label.replace(/ \(Recommended\)$/i, ""), description: row.description ?? null })),
     multi_select: multiSelect, custom_option_index: multiSelect ? null : optionRows.length,
   }, {
     responder: "omp-question", menuLabels: rows.map((row) => row.label), selectedIndex,
     checkedOptionIndices: optionRows.flatMap((row, index) => row.checked ? [index] : []),
     customMenuIndex: customIndex, rejectWithEscapeIndex: null,
+    // OMP's Other row opens its own text prompt on Enter. The ordinary Enter in
+    // the question dialog selects an option, so keep the activation step explicit.
+    ...(!multiSelect ? { customSteps: (text: string) => [
+      ...keySteps(navigationKeys(customIndex - selectedIndex)),
+      ...keySteps([KEY.enter]), { text }, ...keySteps([KEY.enter]),
+    ] } : {}),
+    ...(currentMulti ? { multiSteps: (choices: number[]) => {
+      const desired = new Set(choices);
+      const checked = new Set(optionRows.flatMap((row, index) => row.checked ? [index] : []));
+      const toggles = optionRows.flatMap((_, index) => desired.has(index) !== checked.has(index) ? [index] : []);
+      let cursor = selectedIndex;
+      const keys: string[] = [];
+      for (const index of toggles) {
+        keys.push(...navigationKeys(index - cursor), KEY.space);
+        cursor = index;
+      }
+      // Current OMP advances/finishes the active question on Enter. Tab changes
+      // the active question and would make that Enter answer a different row.
+      // Enter on the Other row opens its text editor instead of advancing.
+      if (cursor === customIndex) keys.push(KEY.up);
+      keys.push(KEY.enter);
+      return keySteps(keys);
+    } } : {}),
   });
 }
 
@@ -566,7 +748,8 @@ function parseClaudeQuestion(screen: string): ParsedPrompt | null {
   return finishPrompt("claude", {
     kind: "question", title, question, body: null,
     options: optionRows.map((row) => ({ label: row.label, description: row.description ?? null })),
-    multi_select: multiSelect, custom_option_index: multiSelect || preview ? null : customIndex,
+    // a multiple choice takes its typed answer where its Submit row shows: Enter there sends it
+    multi_select: multiSelect, custom_option_index: preview || (multiSelect && !submit) ? null : customIndex,
   }, {
     responder: "claude-question",
     menuLabels: submit ? [...rows.slice(0, -1).map((row) => row.label), "Submit", rows.at(-1)!.label] : rows.map((row) => row.label),
@@ -577,8 +760,8 @@ function parseClaudeQuestion(screen: string): ParsedPrompt | null {
     // emptied first, after the cursor and before it (ctrl+k, ctrl+u; measured on 2.1.295)
     ...(drafted ? {
       customSteps: (text: string) => [
-        ...keySteps([...navigationKeys(customIndex - rowAt), "ctrl+k", "ctrl+u"]),
-        { text }, ...keySteps([KEY.enter]),
+        ...keySteps([...navigationKeys(customIndex - selectedIndex), "ctrl+k", "ctrl+u"]),
+        { text }, ...keySteps(multiSelect ? [KEY.down, KEY.enter] : [KEY.enter]),
       ],
     } : {}),
   });
@@ -627,6 +810,45 @@ function claudeQuestionText(lines: string[], tabsIndex: number, firstRow: number
 }
 
 /**
+ * Claude's review lists each question (`● …`) over its answer (`→ …`), both indented and wrapped at
+ * the pane's edge: an indented line that opens neither goes on the one above. What Claude draws at
+ * the panel's edge instead (its "You have not answered all questions" warning over the list, a
+ * permission note under it) is no answer's and stays the card's text. A review cut off at the top
+ * can open on the rest of a question or answer, its start out of view.
+ */
+function claudeReviewAnswers(panel: string[], width: number): { answers: InteractivePromptAnswer[]; notes: string[] } | null {
+  const items: { question: string[]; answer: string[] | null }[] = [];
+  const notes: string[] = [];
+  // indented lines over the first marker, which a cut-off review opens on: the rest of a question
+  // (an answer follows) or of an answer (a question follows)
+  const lead: string[] = [];
+  for (const raw of panel) {
+    const line = cleanLine(raw);
+    if (!line || isDivider(line) || /^Review your answers$/i.test(line)) continue;
+    const open = items.at(-1);
+    if (/^●\s/.test(line)) {
+      if (!open && lead.length > 0) items.push({ question: [], answer: lead.splice(0) });
+      items.push({ question: [raw], answer: null });
+    } else if (/^→\s/.test(line)) {
+      if (open && open.answer === null) open.answer = [raw];
+      else items.push({ question: open ? [] : lead.splice(0), answer: [raw] });
+    } else if (!/^\s|^│/.test(raw.replace(ANSI_RE, ""))) notes.push(line);
+    else if (open) (open.answer ?? open.question).push(raw);
+    else lead.push(raw);
+  }
+  if (items.length === 0) return null;
+  // what the top cut off starts with "…": the rest of a question or answer is not all of it
+  const cut = (text: string, whole: boolean): string | null => text === "" ? null : whole ? text : `…${text}`;
+  return {
+    answers: items.map((item) => ({
+      question: cut(joinWrapped(item.question, width, /^●\s+/), /^●\s/.test(cleanLine(item.question[0] ?? ""))),
+      answer: item.answer ? cut(joinWrapped(item.answer, width, /^→\s+/), /^→\s/.test(cleanLine(item.answer[0] ?? ""))) : null,
+    })),
+    notes,
+  };
+}
+
+/**
  * After several questions Claude shows the answers and asks before sending them. The review is one
  * panel from its tabs down to its question, with no rule inside it. A review taller than the pane
  * (long answers, a phone-width pane) is cut off at the top, tabs and heading out of view: then the
@@ -643,11 +865,14 @@ function parseClaudeSubmit(screen: string): ParsedPrompt | null {
   if (!sequentialRows(rows) || rows.length < 2 || rows.filter((row) => row.selected).length !== 1) return null;
   if (tabsIndex < 0 && (!panel.some((line) => /^→\s/.test(cleanLine(line)))
     || rows.map((row) => row.label).join("\n") !== "Submit answers\nCancel")) return null;
-  const body = panel.map(cleanLine)
+  const review = claudeReviewAnswers(panel, screenWidth(lines));
+  const answers = review?.answers;
+  const body = review ? review.notes.join("\n") : panel.map(cleanLine)
     .filter((line) => line && !isDivider(line) && !/^Review your answers$/i.test(line)).join("\n");
   return finishPrompt("claude", {
     // a menu, not a question: a typed pick submits every answer at once, so it waits for Confirm
     kind: "menu", title: "Review your answers", question: cleanLine(lines[questionIndex]!), body: body || null,
+    ...(answers ? { answers } : {}),
     options: rows.map((row) => ({ label: row.label, description: null })), multi_select: false, custom_option_index: null,
   }, {
     responder: "claude-submit", menuLabels: rows.map((row) => row.label), selectedIndex: rows.findIndex((row) => row.selected),
@@ -1800,27 +2025,35 @@ function parseClaudeModel(screen: string): ParsedPrompt | null {
  *
  * ▲ stands over the level the slider is on. The levels are the card's options, picked with ←/→
  * and `s`, never Enter. Ultracode is left to the terminal.
+ *
+ * 2.1.301 describes the level ▲ is over between the names and the hint, after a blank line:
+ * "~1.5x the estimated cost of medium (the default)", or two lines at max.
  */
 const CLAUDE_EFFORT_LEVEL_RE = /\b(?:low|medium|high|xhigh|max)\b/g;
 /** how far ▲ may stand from the middle of a level's name and still be over it */
 const CLAUDE_EFFORT_ALIGN = 3;
-/** blank lines between the level names and the hint, at most */
-const CLAUDE_EFFORT_UNDER_LINES = 3;
+/** lines between the level names and the hint, at most: blank ones, or the level's description that a narrow pane wrapped */
+const CLAUDE_EFFORT_UNDER_LINES = 8;
+/** a line of level names and nothing else (the toggle's hint aside) */
+const claudeEffortLevelsOnly = (line: string): boolean =>
+  line.trim() !== "" && line.replace(CLAUDE_EFFORT_LEVEL_RE, "").replace(/Tab to toggle/i, "").trim() === "";
 
 function parseClaudeEffort(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trimEnd());
   const hintIndex = findLastIndex(lines, (_, index) => CLAUDE_EFFORT_HINT_RE.test(wrapped(lines, index)));
   if (hintIndex < 0) return null;
-  let labelsIndex = hintIndex - 1;
-  while (labelsIndex > 0 && lines[labelsIndex]!.trim() === "") labelsIndex -= 1;
-  const labels = lines[labelsIndex] ?? "";
+  // the names: the nearest line of them above the hint with a blank line under it, which also
+  // passes over a level's description. Names cut or wrapped by a narrow pane are not read
+  let labelsIndex = -1;
+  for (let index = hintIndex - 1; index > 0 && hintIndex - index <= CLAUDE_EFFORT_UNDER_LINES + 1; index -= 1) {
+    if (claudeEffortLevelsOnly(lines[index]!) && lines[index + 1]!.trim() === "") { labelsIndex = index; break; }
+  }
+  if (labelsIndex < 0) return null;
+  const labels = lines[labelsIndex]!;
   const track = lines[labelsIndex - 1] ?? "";
   const scale = /^\s*[─▲]+/.exec(track)?.[0] ?? "";
   const titled = lines.slice(Math.max(0, labelsIndex - 4), Math.max(0, labelsIndex - 1)).some((line) => line.trim() === "Effort");
-  // a line of level names and nothing else (the toggle's hint aside), cut or wrapped by a narrow pane: not read
-  const onlyLevels = labels.replace(CLAUDE_EFFORT_LEVEL_RE, "").replace(/Tab to toggle/i, "").trim() === "";
-  // two blank lines stand between the level names and the hint as Claude draws it
-  if (hintIndex - labelsIndex > CLAUDE_EFFORT_UNDER_LINES + 1 || !titled || !onlyLevels || scale.split("▲").length !== 2) return null;
+  if (!titled || scale.split("▲").length !== 2) return null;
   const arrow = track.indexOf("▲");
   const levels = [...labels.matchAll(CLAUDE_EFFORT_LEVEL_RE)].map((match) => ({ name: match[0], middle: match.index + match[0].length / 2 }));
   if (levels.length < 2 || new Set(levels.map(({ name }) => name)).size !== levels.length) return null;
@@ -1891,8 +2124,10 @@ function omoFooterIsActive(lines: string[]): boolean {
   let rules = 0;
   let footer = 0;
   let widget = false;
+  let tail = false;
   for (const line of lines) {
     if (!line) continue;
+    if (OMO_SPINNER_ROW_RE.test(line) && !OMO_TASK_ROW_RE.test(line)) return false;
     if (SOLID_RULE_RE.test(line)) {
       if (rules > 0 || footer > 0) return false;
       rules = 1;
@@ -1900,9 +2135,16 @@ function omoFooterIsActive(lines: string[]): boolean {
       /^(?:[▶◌✗✓] .*\bcategory:|▶ .* \bwave \d+\/\d+\b)/.test(line)
       || (widget && /^(?:\d+[hms]\s*)+$/.test(line))
     )) {
+      tail = false;
       // A duration may wrap off the task row. Only these status rows precede the native footer;
       // arbitrary output, a second rule, or another program's input still invalidates the form.
       widget = true;
+    } else if (rules > 0 && footer === 0 && !OMO_NOT_FOOTER_RE.test(line) && (
+      OMO_TASK_ROW_RE.test(line)
+      || (tail && line.length <= OMO_TASK_WRAP_MAX && OMO_TASK_TAIL_RE.test(line))
+    )) {
+      // a task row, or the one short line it wrapped onto
+      tail = OMO_TASK_ROW_RE.test(line);
     } else if (rules === 0 || ++footer > OMO_FOOTER_LINES || OMO_NOT_FOOTER_RE.test(line)) return false;
   }
   return rules === 1;
@@ -1920,7 +2162,8 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // the last one, never for a hint that ended above later output (an answered, stale menu).
   const ends = (re: RegExp): boolean => [1, 2, 3].some((span) =>
     re.test(shown.slice(-span).join(" ")) && (span === 1 || !re.test(shown.slice(-span, -1).join(" "))));
-  if (prompt.responder === "omp-question") return ends(OMP_SINGLE_HINT_RE) || ends(OMP_MULTI_HINT_RE);
+  if (prompt.responder === "omp-question") return ends(OMP_SINGLE_HINT_RE) || ends(OMP_CLIPPED_SINGLE_HINT_RE) || ends(OMP_SINGLE_CLIPPED_HINT_RE) || ends(OMP_MULTI_HINT_RE);
+  if (prompt.responder === "omp-submit") return ends(OMP_REVIEW_HINT_RE);
   // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
@@ -1930,7 +2173,9 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   if (prompt.responder === "claude-question") return ends(CLAUDE_ASK_HINT_RE);
   if (prompt.responder === "claude-submit") return CLAUDE_SUBMIT_TAIL_RE.test(last);
   // the last row carries the cursor once a move has put it there
-  if (prompt.responder === "codex-approval") return ends(/press enter to confirm|esc to cancel|enter continue.*esc back|^(?:[›>❯]\s*)?\d+\.\s+(?:No|Reject|Cancel|Deny)\b/i);
+  // Codex's folder trust prompt ends "enter continue · esc back" or, from 0.163, "· esc quit".
+  // Only those two: its update prompt ends "· esc skip" and must not read as an approval.
+  if (prompt.responder === "codex-approval") return ends(/press enter to confirm|esc to cancel|enter continue\s*·\s*esc (?:back|quit)$|^(?:[›>❯]\s*)?\d+\.\s+(?:No|Reject|Cancel|Deny)\b/i);
   if (prompt.responder === "omp-approval") return ends(/^(?:[›>❯•]\s*)?(?:Approve|Deny)$|esc.*cancel/i);
   // Claude Code 2.1.29x ends with "Esc to cancel", optionally followed by its stop-agents
   // chord. Anchor that suffix so arbitrary trailing text cannot keep an old approval live.
@@ -1966,6 +2211,7 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // hint sits near the end without being it. A dialog already answered leaves its hint far
   // above whatever came after, which is what keeps this window narrow.
   if (prompt.responder === "pi-model") return hintAtEnd(shown, PI_MODEL_HINT_AT_END_RE, PI_FOOTER_LINES);
+  if (prompt.responder === "omo-model") return omoModelListWaits(screen);
   if (prompt.responder === "pi-question" || prompt.responder === "pi-confirm" || prompt.responder === "pi-input") {
     return hintAtEnd(shown, PI_MENU_HINT_AT_END_RE, PI_FOOTER_LINES, 4)
       || hintAtEnd(shown, PI_INPUT_HINT_AT_END_RE, PI_FOOTER_LINES, 4);
@@ -2089,7 +2335,7 @@ function piDialogRows(lines: string[], hintIndex: number): { rows: { line: strin
 /** a catalogue row names the provider serving the model, in brackets */
 const PI_MODEL_PROVIDER_RE = /\[[^\]]+\]/;
 /** the tail of a model's name a narrow pane wrapped onto its own line: only the provider's bracket */
-const PI_MODEL_TAIL_RE = /^\[[^\]]+\](\s*\u00b7\s*default)?$/;
+const PI_MODEL_TAIL_RE = /^\[[^\]]+\](\s*\u00b7\s*default)?(\s*[\u2713\u2714])?$/;
 
 /**
  * The catalogue `/model` lists under its filter line: every row names its provider in brackets,
@@ -2099,7 +2345,7 @@ const PI_MODEL_TAIL_RE = /^\[[^\]]+\](\s*\u00b7\s*default)?$/;
  * wrap is joined back first, and a row that still ends without its provider voids the reading,
  * because offering half a name would switch pi to a model that does not exist.
  */
-function piModelRows(lines: string[], startIndex: number): { label: string; cursor: boolean; current: boolean }[] | null {
+function piModelRows(lines: string[], startIndex: number, minRows = 2): { label: string; cursor: boolean; current: boolean }[] | null {
   const rows: { label: string; cursor: boolean; current: boolean }[] = [];
   // pi leaves a blank between its filter line and what still matches it
   let start = startIndex;
@@ -2143,7 +2389,7 @@ function piModelRows(lines: string[], startIndex: number): { label: string; curs
   // A name wrapped in the middle of its bracket is not a model pi can be switched to, and joining
   // what is left would invent one, so any row still missing its provider voids the whole reading.
   if (!rows.every((row) => PI_MODEL_PROVIDER_RE.test(row.label))) return null;
-  return rows.length >= 2 && rows.some((row) => row.cursor) ? rows : null;
+  return rows.length >= minRows && rows.some((row) => row.cursor) ? rows : null;
 }
 
 function parsePiModel(screen: string): ParsedPrompt | null {
@@ -2176,6 +2422,95 @@ function parsePiModel(screen: string): ParsedPrompt | null {
     responder: "pi-model", menuLabels: labels, selectedIndex, checkedOptionIndices: [], customMenuIndex: null,
     rejectWithEscapeIndex: null,
   });
+}
+
+/**
+ * OmO's `/model` (omo 5.1.30 and 5.1.32, engine senpi): pi's model selector as OmO draws it,
+ * fullscreen or not. Its keys stand over the filter line instead of under the catalogue —
+ *
+ *   enter select  ctrl+s select as default  ctrl+f favorite
+ *   > gpt
+ *   →   gpt-5.5 [chatgpt-subscription]
+ *       gpt-6-sol [chatgpt-subscription]
+ *     … 14 more below
+ *     Model Name: GPT-5.5
+ *
+ * — it ticks the model in use after its name (`claude-opus-4-8 [anthropic] ✓`), and it counts the
+ * rows below the window instead of numbering them. The rows are pi's catalogue rows
+ * (piModelRows): a narrow pane drops the provider's bracket onto a line of its own, and it is
+ * joined back the same way. herdr names the pane `omo`, or `pi`, `claude` or nothing at times
+ * (parsePrompt), so the hint, which no other program draws, is what tells the list apart.
+ */
+const OMO_MODEL_HINT_RE = /^enter select\s+ctrl\+s select as default\s+ctrl\+f favorite$/i;
+/** the filter line right under the hint: what was typed to narrow the catalogue, if anything */
+const OMO_MODEL_FILTER_RE = /^[\u203a>\u276f](?:\s+(.*))?$/;
+/** OmO's notes about its catalogue, which a pane may set at column zero */
+const OMO_MODEL_NOTE_RE = /^(?:Could not refresh|Refreshing model catalogs|Model catalogs refreshed)/i;
+/** OmO's tick on the model in use, after its name */
+const OMO_MODEL_TICK_RE = /\s*[\u2713\u2714]$/;
+
+function omoModelList(lines: string[]): { filterAt: number; rows: { label: string; cursor: boolean; current: boolean }[] } | null {
+  // the hint on one line, or wrapped onto a second by a narrow pane
+  let hintEnd = -1;
+  for (let index = lines.length - 1; index >= 0 && hintEnd < 0; index -= 1) {
+    const line = cleanLine(lines[index]!);
+    if (!line) continue;
+    if (OMO_MODEL_HINT_RE.test(line)) hintEnd = index;
+    else if (index + 1 < lines.length && OMO_MODEL_HINT_RE.test(`${line} ${cleanLine(lines[index + 1]!)}`)) hintEnd = index + 1;
+  }
+  if (hintEnd < 0) return null;
+  let filterAt = hintEnd + 1;
+  while (filterAt < lines.length && !cleanLine(lines[filterAt]!)) filterAt += 1;
+  if (filterAt >= lines.length || !OMO_MODEL_FILTER_RE.test(cleanLine(lines[filterAt]!))) return null;
+  // a filter can leave a single model, which is still a list to pick from
+  const rows = piModelRows(lines, filterAt + 1, 1);
+  if (rows === null) return null;
+  return { filterAt, rows: rows.map((row) => ({ ...row, label: row.label.replace(OMO_MODEL_TICK_RE, "") })) };
+}
+
+function parseOmoModel(screen: string): ParsedPrompt | null {
+  const list = omoModelList(screen.replace(ANSI_RE, "").split(/\r?\n/));
+  if (list === null) return null;
+  const labels = list.rows.map((row) => row.label);
+  const current = list.rows.find((row) => row.current);
+  return finishPrompt("omo", {
+    kind: "question",
+    title: "",
+    question: current ? `Select model (currently ${current.label})` : "Select model",
+    body: null,
+    options: labels.map((label) => ({ label, description: null })),
+    multi_select: false,
+    custom_option_index: null,
+  }, {
+    responder: "omo-model", menuLabels: labels, selectedIndex: list.rows.findIndex((row) => row.cursor), checkedOptionIndices: [], customMenuIndex: null,
+    rejectWithEscapeIndex: null,
+  });
+}
+
+/**
+ * Whether OmO's model list still holds the end of the screen: under its catalogue only OmO's own
+ * notes (`… 14 more below`, `Model Name: …`, indented), then one rule and the footer. A list
+ * answered or dismissed leaves no hint over a filter line, and one quoted elsewhere has
+ * something else under it.
+ */
+function omoModelListWaits(screen: string): boolean {
+  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const list = omoModelList(lines);
+  if (list === null) return false;
+  let rules = 0;
+  let footer = 0;
+  for (const raw of lines.slice(list.filterAt + 1)) {
+    const line = cleanLine(raw);
+    if (!line) continue;
+    if (SOLID_RULE_RE.test(line)) {
+      if (rules > 0 || footer > 0) return false;
+      rules = 1;
+    } else if (rules === 0) {
+      // the catalogue's rows, a wrapped provider tail, or one of OmO's notes under them
+      if (!/^\s/.test(raw) && !/^[\u2192\u276f\u279c]/.test(line) && !PI_MODEL_TAIL_RE.test(line) && !OMO_MODEL_NOTE_RE.test(line)) return false;
+    } else if (++footer > OMO_FOOTER_LINES || OMO_NOT_FOOTER_RE.test(line)) return false;
+  }
+  return rules === 1;
 }
 
 function parsePiDialog(screen: string, moved = false): ParsedPrompt | null {
@@ -2330,19 +2665,19 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
   const candidates = agent === "codex"
     ? [parseCodexContinueMenu(screen), parseCodexQuestion(screen), parseCodexAsyncQuestion(screen), parseCodexApproval(screen), parseCodexModel(screen)]
     : agent === "omp"
-      ? [parseOmpQuestion(screen), parseOmpApproval(screen)]
+      ? [parseOmpQuestion(screen), parseOmpSubmit(screen), parseOmpApproval(screen)]
       // herdr names an omo pane `pi` while omo waits (or no agent at all, as it can for an omo
       // started in the pane's shell), `claude` while its claude-sdk child runs. A pane named
       // `pi` reads pi's own dialogs first: pi's hint is its own, so an omo form never matches
       // it and falls through to omo()'s parsers.
       : agent === "claude"
-        ? [parseClaudeQuestion(screen), parseClaudeSubmit(screen), parseClaudeApproval(screen), parseClaudeConfirm(screen), parseClaudeModel(screen), parseClaudeEffort(screen), parseClaudeHeld(screen, sent, working), ...omo()]
+        ? [parseClaudeQuestion(screen), parseClaudeSubmit(screen), parseClaudeApproval(screen), parseClaudeConfirm(screen), parseClaudeModel(screen), parseClaudeEffort(screen), parseClaudeHeld(screen, sent, working), parseOmoModel(screen), ...omo()]
         : agent === "pi"
-          ? [parsePiModel(screen), parsePiDialog(screen), ...omo()]
+          ? [parsePiModel(screen), parseOmoModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
           ? [parseHermesClarify(screen)]
         : agent === "omo" || agent === ""
-          ? omo()
+          ? [parseOmoModel(screen), ...omo()]
           : [];
   return candidates.find((candidate): candidate is ParsedPrompt => candidate !== null && promptTailIsActive(candidate, screen)) ?? null;
 }
@@ -2402,8 +2737,11 @@ export function answerKeys(prompt: InteractivePrompt, answer: Pick<PromptAnswer,
   if (answer.custom_text !== undefined) {
     if (typeof answer.custom_text !== "string") throw new InvalidAnswer("Custom text must be a string.");
     const text = answer.custom_text.trim();
-    if (!text || parsed.customMenuIndex === null || parsed.multi_select) throw new InvalidAnswer("This prompt does not accept a custom answer.");
+    if (!text || parsed.customMenuIndex === null || (parsed.multi_select && parsed.responder !== "claude-question")) throw new InvalidAnswer("This prompt does not accept a custom answer.");
     if (parsed.customSteps) return parsed.customSteps(text);
+    // Claude's multiple choice: typing into the row ticks it, and Enter on Submit, the row under
+    // it, sends the choice (→ in the row would move the text's cursor; measured on 2.1.301)
+    if (parsed.multi_select) return [...keySteps(navigationKeys(parsed.customMenuIndex - parsed.selectedIndex)), { text }, ...keySteps([KEY.down, KEY.enter])];
     const navigation = navigationKeys(parsed.customMenuIndex - parsed.selectedIndex);
     // Codex's queue types into its last row once it is selected: no enter first. pi's text
     // dialog is the same but for a worse reason: its `>` line already owns the input, so an
@@ -2818,6 +3156,25 @@ const SUGGESTION_READ_MS = 1_500;
 const CLAUDE_TIP_RE = /^Try "/;
 
 /**
+ * Claude Code's IDE pill, drawn right after the `❯` while an editor is connected: `[⧉ 3 lines
+ * selected] ` or `[⧉ In src/foo.ts] ` (Claude Code 2.1.302 matches it as `\[⧉ [^\]\n]+\]`). It is
+ * painted in the theme's IDE color, not dim, yet it is no input: typing and Ctrl+K/Ctrl+U leave it.
+ */
+const CLAUDE_IDE_PILL_RE = /^[ \u00a0]?\[⧉ [^\]\n]+\] ?/;
+
+/** The text after the `❯` of an input row with Claude's IDE pill (CLAUDE_IDE_PILL_RE) taken out. */
+const withoutIdePill = (afterPrompt: string): string => afterPrompt.replace(CLAUDE_IDE_PILL_RE, " ");
+
+/**
+ * How many characters after the `❯` of a plain input row Claude's IDE pill takes, with the space
+ * before it: what a walk over that row skips. 0 without a pill.
+ */
+function idePillChars(afterPrompt: string): number {
+  const match = CLAUDE_IDE_PILL_RE.exec(afterPrompt);
+  return match === null ? 0 : Array.from(match[0]).length;
+}
+
+/**
  * Whether each character of an ANSI line is drawn dim (SGR 2) and inverse (SGR 7), as
  * [text, dim, inverse] runs. Only SGR sequences change the state; 38/48 colors are skipped whole,
  * so the 2 of `38;2;r;g;b` is a color mode, not dim. Other escapes are dropped.
@@ -2874,9 +3231,12 @@ function claudeGreyInput(ansi: string): string | null {
   let text = "";
   let seenPrompt = false;
   let cursor = false;
+  // Claude's IDE pill before the grey text is neither typed nor suggested
+  let pill = idePillChars(plain[index]!.slice(plain[index]!.indexOf("❯") + 1));
   for (const [run, dim, inverse] of sgrRuns(lines[index]!)) {
     for (const character of run) {
       if (!seenPrompt) { if (character === "❯") seenPrompt = true; continue; }
+      if (pill > 0) { pill--; continue; }
       const blank = character.trim() === "" || character === "\u00a0";
       // the cursor Claude draws itself sits inverse on the first grey character
       if (!dim && !blank && !(inverse && text.trim() === "" && !cursor)) return null;
@@ -3010,7 +3370,9 @@ export function claudeInputDraft(live: string, colors: string | null): boolean {
   const box = claudeInputBox(live);
   if (box === null) return false;
   if (box === "clipped" || !box.plain[0]?.startsWith("❯")) return true;
-  if (box.plain.join("\n").slice(1).replace(/\u00a0/g, " ").trim() === "") return false;
+  // Claude's IDE pill after the `❯` is no input (#1096): a box holding only it is empty
+  const afterPill = withoutIdePill(box.plain[0]!.slice(1));
+  if ([afterPill, ...box.plain.slice(1)].join("\n").replace(/\u00a0/g, " ").trim() === "") return false;
   // a paste or an image Claude folded into a placeholder is content, however it is colored
   if (/\[(?:Pasted text #\d+|Image #\d+)/.test(box.plain.join(" "))) return true;
   if (colors === null) return true;
@@ -3018,8 +3380,9 @@ export function claudeInputDraft(live: string, colors: string | null): boolean {
   if (shown === null || shown === "clipped" || shown.plain.join("\n") !== box.plain.join("\n")) return true;
   // Under NO_COLOR (#926) the tip is not dim: only its exact form as the box's whole one row, on a
   // screen drawn without any color, tells it from typed words. Typed `Try "…"` reads the same there.
-  if (box.plain.length === 1 && CLAUDE_TIP_ROW_RE.test(box.plain[0]!.slice(1).replace(/\u00a0/g, " ").trim()) && colorless(colors)) return false;
+  if (box.plain.length === 1 && CLAUDE_TIP_ROW_RE.test(afterPill.replace(/\u00a0/g, " ").trim()) && colorless(colors)) return false;
   let prompt = false;
+  let pill = idePillChars(box.plain[0]!.slice(1));
   let first = true;
   let cursor = false;
   let grey = false;
@@ -3027,6 +3390,7 @@ export function claudeInputDraft(live: string, colors: string | null): boolean {
     for (const [run, dim, inverse] of sgrRuns(row)) {
       for (const character of run) {
         if (!prompt) { prompt = character === "❯"; continue; }
+        if (pill > 0) { pill--; continue; }
         if (character.trim() === "" || character === "\u00a0") continue;
         if (dim) grey = true;
         // the cursor Claude draws itself sits inverse on the first grey character
@@ -3067,7 +3431,10 @@ export function claudeClearableDraft(live: string, colors: string | null): strin
   const row = rowText(box.raw[0]!);
   const shown = claudeInputBox(colors);
   if (shown === null || shown === "clipped" || shown.raw.length !== 1 || rowText(shown.raw[0]!) !== row) return null;
-  const draft = row.slice(1).replace(/^[ \u00a0]/, "");
+  // Claude's IDE pill is not the user's text, and the clearing keys leave it
+  const afterPrompt = row.slice(1);
+  const pill = CLAUDE_IDE_PILL_RE.exec(afterPrompt)?.[0];
+  const draft = pill === undefined ? afterPrompt.replace(/^[ \u00a0]/, "") : afterPrompt.slice(pill.length);
   return draft.trim() === "" ? null : draft;
 }
 
@@ -3133,7 +3500,7 @@ export function claudeRestoredDraft(live: string, colors: string | null, sent: s
   // each row's own words exactly (the box's U+00A0 as a space), its marker, indentation and padding
   // aside; where the terminal wrapped, a word split in two joins with nothing between, and a wrap
   // between words with one space or line break. Any other change to the spaces is the user's edit.
-  const rows = box.plain.map((row, index) => (index === 0 ? row.slice(1) : row).replace(/\u00a0/g, " ").trim());
+  const rows = box.plain.map((row, index) => (index === 0 ? withoutIdePill(row.slice(1)) : row).replace(/\u00a0/g, " ").trim());
   // walked row by row over the set of places the sent text can be at, never a regex: one built from
   // the rows backtracks exponentially over a box of blank rows
   const text = sent.replace(/\u00a0/g, " ").trim();
@@ -3536,7 +3903,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         // Claude's unnumbered rows and pi's models are read with no number to aim at: looked at
         // again before the Enter even when it needs no move. So is Claude's model list, picked
         // with a letter: typed after the list has gone, it would stand in the agent's own prompt
-        let moved = responder === "claude-confirm" || responder === "pi-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu";
+        let moved = responder === "claude-confirm" || responder === "pi-model" || responder === "omo-model" || responder === "omo-question" || responder === "claude-model" || responder === "claude-effort" || responder === "codex-model" || responder === "fallback-gjc-menu";
         // Claude's and Codex's model lists: a window on a list, picked with a letter; Claude's effort
         // slider the same way, its levels side by side
         const list = responder === "claude-model" || responder === "claude-effort" || responder === "codex-model";
@@ -3551,7 +3918,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           // rows on screen, and with them the card's id, change on the way down: what must
           // hold is the model under the cursor, by name. A wrong model, unlike a wrong menu
           // entry, answers every later turn silently
-          if (responder === "pi-model") return shown?.responder === "pi-model" && shown.options[shown.selectedIndex]?.label === parsed.options[cursor]?.label;
+          if (responder === "pi-model" || responder === "omo-model") return shown?.responder === responder && shown.options[shown.selectedIndex]?.label === parsed.options[cursor]?.label;
           // Claude's list is a window too, drawn with fewer rows in a pane made shorter meanwhile:
           // the model under the cursor, by its number in the list, its name and what the row says
           // Codex's lists the same way, the list's title with the row: the reasoning levels of
