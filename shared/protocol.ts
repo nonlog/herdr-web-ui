@@ -728,6 +728,18 @@ export interface FileInfo {
   kind: FileKind;
 }
 
+/**
+ * GET /api/fs/favicon?root=: the icon the project in folder `root` keeps, or null. The PC looks
+ * through every place a project keeps one (`FAVICON_CANDIDATES` in server/project-favicon.ts),
+ * best first, each read as /api/fs/stat reads `<root>/<place>`, and answers once: a folder with
+ * no icon is `{ icon: null }`, never a 404. 400 missing_root; the access rules of /api/fs/stat
+ * (no watching device, no other site's page).
+ */
+export interface ProjectFavicon {
+  /** the image found; `path` opens it through /api/fs/file */
+  icon: FileInfo | null;
+}
+
 /** Which two states of a repository are compared. */
 export type RepoDiffScope = "workspace" | "staged" | "commit";
 

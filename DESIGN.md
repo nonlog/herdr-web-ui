@@ -937,6 +937,20 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   authoritative when the agent roster and pane status differ. The workspace and agent lists
   share the existing combined machine roster and its SSE updates; neither adds a status subscription.
   A disconnected PC's saved workspace and agent rows are dimmed, inert and draw no state until that PC reconnects.
+- What herdr plugins report on a pane (its `tokens`, `herdr pane report-metadata --token`: the Quota
+  plugin's usage left, a task's progress) is a line of its own under an agent row's place, on One
+  line and Two lines alike, only where the pane has one (`.agent-tokens`: `--fs-xs` in
+  `--text-dim`, tabular digits, the values joined by ` · ` and cut with an ellipsis). It follows
+  herdr's own sidebar, the design's reference here: the row draws the `$name` tokens the user's
+  `[ui.sidebar.agents]` `rows` (or that agent's `rows_by_agent`) name, in their order, and a rule
+  with `hide = true` takes its token off; herdr's colors and weights are not drawn, the line keeps
+  the app's dim. Where herdr's config names no rows, the row draws every token, by name. The rows
+  are this server's herdr config, as herdr's sidebar is the client's, and apply to every PC's agents
+  (server/herdr-sidebar.ts, told on the machine events). The values are text, never markup; a blank
+  or missing token draws nothing; the row's tooltip, and a phone's ⋯ sheet under its place
+  (`.row-sheet-detail`, wrapped), say each whole. A PC that is away draws none, as it draws no
+  state. A plugin's line for the agent (`display_agent`) leads the place, as before, where it says
+  more than the mark and the title; it changes live like the tokens.
 - The Agents list is flat and every row names its own place. Pinned agents (pinned from a row's
   menu) stand first, in the order they were pinned, in a card (a `--hairline` `--border` edge,
   `--radius-lg`, no fill, so hover and selection read inside it as elsewhere),

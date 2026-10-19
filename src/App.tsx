@@ -37,6 +37,7 @@ import { headerCrumb, showsChat } from "./lib/headerCrumb.ts";
 import { LOCAL_MACHINE, paneStorageId, type Machine, type MachineEvent } from "../shared/machines.ts";
 import { takeAuthTokenFromUrl } from "./lib/authLink.ts";
 import { applyPaneStatus } from "./lib/snapshot.ts";
+import { setAgentRowTokens } from "./lib/agentRowTokens.ts";
 import { rosterPanes } from "./lib/dagPane.ts";
 import { SnapshotRequests } from "./lib/snapshotRequests.ts";
 import { alertPrefs, useSettings } from "./lib/settings.ts";
@@ -669,6 +670,7 @@ export function App() {
       let payload: MachineEvent;
       try { payload = JSON.parse(event.data); } catch { return; }
       if (payload.type === "preferences") { receivePreferencesRef.current(payload.preferences); return; }
+      if (payload.type === "herdr-sidebar") { setAgentRowTokens(payload.agents); return; }
       // A poll started before this event can carry an older roster or pane status.
       snapshotRequests.current.invalidate();
       if (payload.type === "machines") {
