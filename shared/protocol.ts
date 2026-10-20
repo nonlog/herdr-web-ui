@@ -19,13 +19,12 @@ export type {
   PaneScrollInfo,
   ReadFormat,
   ReadSource,
-  SessionSnapshot,
   Subscription as HerdrSubscriptionSpec,
   TabInfo,
   WorkspaceInfo,
 } from "./herdr-api.generated.ts";
 
-import type { AgentStatus, PaneInfo, PaneScrollInfo, SessionSnapshot, TabInfo, WorkspaceInfo } from "./herdr-api.generated.ts";
+import type { AgentStatus, PaneInfo, PaneScrollInfo, SessionSnapshot as HerdrSnapshot, TabInfo, WorkspaceInfo } from "./herdr-api.generated.ts";
 
 /** Friendly aliases used across the UI. */
 export type HerdrWorkspace = WorkspaceInfo;
@@ -35,7 +34,17 @@ export type HerdrTab = TabInfo;
  * `background_wait`: the pane is at rest while work its turn started still runs, and the turn goes on when it ends (server/background-wait.ts); absent when not.
  * `plan`: how far the pane's agent's task list or checklist has progressed; absent when it keeps none.
  */
-export type HerdrPane = PaneInfo & { background_tasks?: number; background_wait?: true; plan?: PlanSummary };
+export type HerdrPane = PaneInfo & {
+  background_tasks?: number; background_wait?: true; plan?: PlanSummary;
+  /** This bridge's counter of transitions into displayed DONE, scoped by finish_epoch. */
+  finish_id?: number;
+};
+/** Missing finish fields on an older bridge mean no finish can be acknowledged here. */
+export type SessionSnapshot = Omit<HerdrSnapshot, "panes"> & {
+  panes: HerdrPane[];
+  /** Random per bridge start and observed herdr socket/marker replacement, independently per PC. */
+  finish_epoch?: string;
+};
 
 export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAction, BridgeIdentity, BridgeHealth } from "./machines.ts";
 
@@ -76,6 +85,9 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *  POST   /api/updates/install           -> 202 { accepted: true }
  *         Update POSTs require X-Herdr-Update: 1, same-origin browser requests,
  *         and the usual token gate. Managed starts only; status is polled during restart.
+ *  POST   /api/connection-diagnostics    -> 204; ClientConnectionTrace, metadata only, same-origin
+ *         and authenticated (watch devices included). 400 invalid_trace, 413 trace_too_large,
+ *         429 trace_rate_limited. At most 16 events and 8192 bytes; never input or credentials.
  *  GET    /api/telemetry                 -> TelemetryStatus (shared/telemetry.ts), no-store
  *  POST   /api/telemetry                 -> TelemetryStatus; TelemetryChange (shared/telemetry.ts):
  *         { enabled?, notice_seen?: true, notice_version?, settings? }. A notice acknowledgement
@@ -180,7 +192,7 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *         patch; `path` and, for a rename, `old_path` are the list's own, relative to the
  *         repository root. The patch is whole or null: `unavailable` says why it is null, and no
  *         cut hunk is ever sent. 400 invalid_path, 404 not_found when nothing changed there)
- *  GET    /api/pane/prompt?pane_id=     -> { prompt: InteractivePrompt | null, suggestion: string | null, restored: string | null }
+ *  GET    /api/pane/prompt?pane_id=     -> PanePromptResponse
  *         (the agent's TUI question/approval menu currently on screen, parsed from the visible pane
  *         text; with no menu, the next prompt Claude Code suggests, grey in its empty input box, and
  *         `restored`: the chat's last message when Claude Code put it back as typed text in that box,
@@ -597,9 +609,15 @@ export interface ConversationResponse {
   activity?: "thinking" | "working" | "idle";
   /** Stable across appends; changes on transcript replacement or native context clear. */
   history_id?: string;
-  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript" | "scrollback";
+  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript" | "scrollback";
   turns: ConversationTurn[];
   metadata?: ConversationMetadata;
+  /**
+   * `metadata` was read off the agent's own screen: a conversation not begun, or a Codex that has
+   * reported no session (whose scrollback answer carries `metadata` only so). No file records it
+   * and the pane's output can change it, so the chat re-reads on terminal output.
+   */
+  screen?: true;
   /**
    * Where the first turn sits in the transcript: pass it as `before` for the page
    * of turns before these (with `since`, never reaching back past that cursor), or
@@ -726,6 +744,18 @@ export interface FileInfo {
   modified: string;
   mime: string;
   kind: FileKind;
+}
+
+/**
+ * GET /api/fs/favicon?root=: the icon the project in folder `root` keeps, or null. The PC looks
+ * through every place a project keeps one (`FAVICON_CANDIDATES` in server/project-favicon.ts),
+ * best first, each read as /api/fs/stat reads `<root>/<place>`, and answers once: a folder with
+ * no icon is `{ icon: null }`, never a 404. 400 missing_root; the access rules of /api/fs/stat
+ * (no watching device, no other site's page).
+ */
+export interface ProjectFavicon {
+  /** the image found; `path` opens it through /api/fs/file */
+  icon: FileInfo | null;
 }
 
 /** Which two states of a repository are compared. */
@@ -1015,14 +1045,81 @@ export interface SlashCommand {
   name: string;
   description: string;
   source: "builtin" | "user" | "project" | "skill" | "plugin";
-  /** `$`: typed as `$name` (Codex skills); otherwise `/name` */
-  trigger?: "$";
+  /** `$`: typed as `$name` (Codex skills); `@`: typed as `@name`; otherwise `/name` */
+  trigger?: "$" | "@";
   /**
    * where a skill comes from, for every agent: `user` is the person's own (the agent's own
    * directory or ~/.agents/skills), `project` the checkout's, `bundled` ships with the agent,
    * `plugin` comes with one of its plugins
    */
   origin?: "user" | "project" | "bundled" | "plugin";
+  /** how the command behaves per typed form (bare, with a subcommand, anything else) */
+  forms?: CommandForm[];
+  /** `terminal`: only works in the terminal; `agent-hidden`: the agent's own menu hides it, it still sends when typed */
+  visibility?: "offered" | "terminal" | "agent-hidden";
+  /** where this row came from, and whether it was checked against the running agent version */
+  provenance?: {
+    /** how the row was found: `scan` read from disk, `static` shipped with the bridge, `native` asked of the agent */
+    transport: "scan" | "static" | "native";
+    /** whether the row was checked against the running agent's version */
+    verified: boolean;
+  };
+  /** a skill or custom command that has the same name as a builtin */
+  shadows?: "builtin";
+  /** stable identity: the canonical path for a skill or custom command file, the qualified name otherwise */
+  id?: string;
+}
+
+/** One way a command can be typed and what it needs from the user. */
+export interface CommandForm {
+  /** `bare`: no argument; `{ sub }`: that subcommand; `other`: any other argument */
+  match: "bare" | {
+    /** the subcommand this form applies to */
+    sub: string;
+  } | "other";
+  /** what the form needs from the user: `none` means its effect is persisted where the bridge reads it, `terminal` also covers output the agent never persists */
+  interaction: "none" | "dialog" | "terminal" | "unknown";
+  /** the dialog this form opens, when `interaction` is `dialog` */
+  dialog?: string;
+}
+
+/** What the bridge knows about a command a user sent: accepted is never the same as done. */
+export interface CommandOutcome {
+  /** the outcome's own id, referenced by PendingMessage.outcome_id */
+  id: string;
+  /** the pane the command was sent to */
+  pane_id: string;
+  /** the command text as sent */
+  text: string;
+  /** how far the command is known to have got; `accepted` only means the bridge sent it */
+  state: "accepted" | "interaction-required" | "result-observed" | "terminal-required" | "unknown";
+  /** what showed the state, and when (ISO time) */
+  evidence: {
+    /** where the evidence was read from */
+    kind: "transcript" | "dialog" | "recognized-result" | "native" | "side-store";
+    /** when it was seen (ISO time) */
+    at: string;
+  }[];
+  /** a passing view of the result, never merged into history */
+  preview?: string;
+  /** the command changed the agent's command list: refetch it */
+  catalog_changed?: true;
+  /** when the outcome was created (ISO time) */
+  created_at: string;
+  /** when the outcome last changed (ISO time) */
+  updated_at: string;
+}
+
+/** GET /api/pane/prompt response; `suggestion` and `restored` are absent from older servers. */
+export interface PanePromptResponse {
+  /** the waiting TUI menu, or null when none is on screen */
+  prompt: InteractivePrompt | null;
+  /** the next prompt the agent suggests when no menu waits */
+  suggestion?: string | null;
+  /** the chat's last message, when the agent put it back as typed text in its input box */
+  restored?: string | null;
+  /** the pane's tracked command outcomes */
+  outcomes?: CommandOutcome[];
 }
 
 /**
@@ -1044,6 +1141,8 @@ export interface InteractivePrompt {
   body: string | null;
   options: InteractivePromptOption[];
   multi_select: boolean;
+  /** Native OpenCode question explicitly marked required: false; an empty answer skips it. */
+  optional?: true;
   /** index of the "type your own answer" option, when the menu has one */
   custom_option_index: number | null;
   /** a question in Codex's queue while Codex keeps working: only the card answers it. Collapsed,
@@ -1056,6 +1155,14 @@ export interface InteractivePrompt {
   /** the answers a review asks to submit (Claude, omp), each question with what was picked for it,
    * read whole where the terminal wrapped them. A question cut off above the pane's top is null */
   answers?: InteractivePromptAnswer[];
+  /** whether the prompt can step back to a previous question in a multi-step form */
+  can_step_back?: boolean;
+  /** previously selected option index for a single-select step, if any */
+  default_option_index?: number | null;
+  /** previously selected option indices for a multi-select step, if any */
+  default_option_indices?: number[];
+  /** previously entered custom text for a step, if any */
+  default_custom_text?: string;
   /** the last-resort card for a blocked pane no reader knows: answered with its own buttons only,
    * so a message typed in the chat still goes to the agent as typed */
   fallback?: true;
@@ -1081,13 +1188,17 @@ export interface InteractivePromptOption {
   description: string | null;
 }
 
-/** POST /api/pane/prompt/answer body. Exactly one of option_index / option_indices / custom_text. */
+/** POST /api/pane/prompt/answer body. One answer or navigation action; native OpenCode multiselect may combine option_indices and custom_text. */
 export interface PromptAnswer {
   pane_id: string;
   prompt_id: string;
   option_index?: number;
   option_indices?: number[];
   custom_text?: string;
+  step_back?: boolean;
+  step_index?: number;
+  /** Unsent edits for the current OpenCode step, saved only when navigating back. */
+  draft?: { option_indices: number[]; custom_text: string };
 }
 
 /**
@@ -1147,6 +1258,8 @@ export interface PendingMessage {
   state: "queued" | "sending" | "held" | "uncertain";
   created_at: string;
   error?: { code: string; message: string };
+  /** the CommandOutcome this message's command is tracked by */
+  outcome_id?: string;
 }
 
 export type ClientMessage =
@@ -1214,6 +1327,32 @@ export type ClientMessage =
    * PC's socket relays it unchanged, so the remote server's snapshot decides whether it is sent. */
   | { type: "ping"; id: number };
 
+/** Local-only diagnostic metadata. This contract never contains a message, URL or credential. */
+export type ClientConnectionEventKind = "connect" | "open" | "connect_timeout" | "close" | "socket_error"
+  | "pagehide" | "pageshow" | "hidden" | "visible" | "online" | "probe" | "probe_retry"
+  | "probe_overdue" | "probe_drop" | "pong" | "submit_sent" | "submit_result" | "submit_timeout"
+  | "submit_disconnect" | "input_held" | "probe_input_blocked" | "closing_wait";
+export interface ClientConnectionEvent {
+  seq: number;
+  at: number;
+  connection: number;
+  kind: ClientConnectionEventKind;
+  socket_state: number | null;
+  visibility: "visible" | "hidden" | "unknown";
+  online: boolean | null;
+  code?: number;
+  elapsed_ms?: number;
+  pending?: number;
+  request_id?: number;
+  attempt?: number;
+  result?: "ok" | "refused";
+}
+export interface ClientConnectionTrace {
+  client_id: string;
+  target: "local" | "remote";
+  events: ClientConnectionEvent[];
+}
+
 /** What a server supports beyond the base protocol, listed in its first snapshot; older bridges list nothing. */
 export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "watch" | "conversation-watch" | "ping";
 
@@ -1243,7 +1382,7 @@ export type ServerMessage =
   | { type: "pending-messages"; pane_id: string; messages: PendingMessage[]; removed?: Array<{ id: string; outcome: "sent" | "discarded" }> }
   | { type: "secret-result"; id: number; pane_id: string; ok: boolean; code?: string }
   /** agent-status push for ANY pane, attached or not (server-side status collector) */
-  | { type: "pane-status"; pane_id: string; agent_status: AgentStatus; /** a pane's running background tasks (OmO's, or a Claude Code pane's subagents and commands), when the frame is about them: it changes no status */ background_tasks?: number; /** every frame says it: absent, the pane does not wait on its turn's background work */ background_wait?: true; /** a pane's plan, when the frame is about it (null: it keeps none now); it changes no status */ plan?: PlanSummary | null }
+  | { type: "pane-status"; pane_id: string; agent_status: AgentStatus; finish_id?: number; finish_epoch?: string; /** a pane's running background tasks (OmO's, or a Claude Code pane's subagents and commands), when the frame is about them: it changes no status */ background_tasks?: number; /** every frame says it: absent, the pane does not wait on its turn's background work */ background_wait?: true; /** a pane's plan, when the frame is about it (null: it keeps none now); it changes no status */ plan?: PlanSummary | null }
   /** Native transcript invalidation for an interested attached pane; signature is opaque, not a REST ETag. Refetch the existing conversation endpoint. */
   | { type: "conversation-changed"; pane_id: string; signature: string }
   /** a pane's process exited (pushed even when nobody is attached to it) */

@@ -90,6 +90,10 @@ const plainError = (cause: unknown): string => {
 };
 
 export interface PaneTerminalProps {
+  /** App's content lifetime, including the current finish identity. */
+  presentationKey?: string;
+  finishEpoch?: string;
+  finishId?: number;
   /** The pane this terminal attaches to; null renders the placeholder. */
   paneId: string | null;
   /** A restored pane keeps its ID but gets a new terminal after herdr restarts. */
@@ -122,6 +126,8 @@ export interface PaneTerminalProps {
   machineName?: string;
   /** the lens over the pane: the chat transcript, or the live xterm grid (App remembers it per pane) */
   view: PaneView;
+  /** switches this pane to its terminal lens: where the chat's composer sends a terminal command on */
+  onOpenTerminal?: () => void;
   findRequest?: number;
   controls?: { current: PaneControls | null };
   /** Only the selected tile may take keyboard focus after async work or a lens change. */
@@ -156,6 +162,9 @@ export interface PaneTerminalProps {
 const heldRowNotes = new Map<string, { owner: string; id: string; text: string }>();
 
 export function PaneTerminal({
+  presentationKey,
+  finishEpoch,
+  finishId,
   paneId,
   terminalId = null,
   mirrored = false,
@@ -182,6 +191,7 @@ export function PaneTerminal({
   theme,
   palette,
   role = "interact",
+  onOpenTerminal,
   onRoleAck,
   onConnectionChange,
   onServerMessage,
@@ -271,6 +281,9 @@ export function PaneTerminal({
   /** The PC session's epoch: a receipt belongs to the connection on which its request left. */
   const pendingEpochRef = useRef(0);
   const [outputReady, setOutputReady] = useState(false);
+  const outputTarget = JSON.stringify([paneId, terminalId]);
+  const outputTargetRef = useRef(outputTarget); outputTargetRef.current = outputTarget;
+  const [parsedTarget, setParsedTarget] = useState<string>();
   const [ended, setEnded] = useState(false);
   const [inputError, setInputError] = useState<string | null>(null);
   const [inputReady, setInputReady] = useState(false);
@@ -1336,6 +1349,10 @@ export function PaneTerminal({
     // a socket this page was connected to before this mount (a switch back to the PC): a wait is a reconnect
     setConnectedBefore(connectedSockets.has(socket));
     let outputGeneration = 0;
+    // Bumped by readiness receipts: revokes only the proof that queued output is current, never
+    // the parse itself (a masked prompt must still keep typing out of every draft).
+    let outputLifetime = 0;
+    let outputRecovering = false;
     let deferredAttach = false;
     const off = session.on((message, sent) => {
       onServerMessageRef.current?.(message);
@@ -1366,6 +1383,19 @@ export function PaneTerminal({
         setChatInvalidation((current) => current + 1);
       }
       if (paneRef.current) setInputReady(socket.canInput(paneRef.current));
+      if (message.type === "input-ready") {
+        if (message.ready === false) {
+          outputRecovering = true;
+          outputLifetime++;
+          setOutputReady(false);
+          setParsedTarget(undefined);
+        } else if (outputRecovering) {
+          // Recovery revokes parses queued before this receipt too. The new stream, not
+          // input permission (which observers never have), proves the screen is current.
+          outputRecovering = false;
+          outputLifetime++;
+        }
+      }
       if (message.type === "pty-data") {
         if (message.pane_id !== paneRef.current || releasedRef.current) return;
         // Reading older rows is a frozen per-client snapshot while the live pane advances.
@@ -1378,6 +1408,8 @@ export function PaneTerminal({
         const acknowledge = socket.outputAcknowledgement(message);
         const owner = message.pane_id;
         const generation = outputGeneration;
+        const lifetime = outputLifetime;
+        const target = outputTargetRef.current;
         term.write(message.data, () => {
           acknowledge?.();
           if (disposed) return;
@@ -1388,7 +1420,10 @@ export function PaneTerminal({
             modifyOtherKeysRef.current = 0;
             return;
           }
-          setOutputReady(true);
+          if (lifetime === outputLifetime && !outputRecovering) {
+            setOutputReady(true);
+            setParsedTarget(target);
+          }
           followCursor();
           const lines: string[] = [];
           const buffer = term.buffer.active;
@@ -1480,6 +1515,7 @@ export function PaneTerminal({
           if (message.pane_id !== undefined && message.pane_id !== paneRef.current) return;
           // not an end: the server attaches as soon as the other bridge lets go
           setHeld(true);
+          setOutputReady(false);
           term.options.disableStdin = true;
           setConnected(socket.connected);
           return;
@@ -1525,6 +1561,7 @@ export function PaneTerminal({
       pendingScopeRef.current = session.scope;
       pendingEpochRef.current = session.epoch;
       outputGeneration++;
+      outputRecovering = false;
       setOutputReady(false);
       setInputReady(false);
       setConnected(false);
@@ -2083,6 +2120,9 @@ export function PaneTerminal({
       setHeld(false);
       // the pane's screen starts again from the new attach, as on a pane switch
       const generation = ++outputGeneration;
+      // A new attach owns a new output lifetime. The server's readiness receipt precedes
+      // replay, so a recovering attach will revoke this again before any retained bytes.
+      outputRecovering = false;
       // Reset in stream order: synchronous reset would let old queued writes draw afterward.
       if (!cachedReleaseRef.current) {
         term.write("\x1bc", () => {
@@ -2878,6 +2918,7 @@ export function PaneTerminal({
           () => { setPromptRefresh((key) => key + 1); return true; },
           (cause: unknown) => {
             setPromptRefresh((key) => key + 1);
+            if (cause instanceof ApiError && cause.code === "reply_unconfirmed") return t("OpenCode did not confirm the answer. Check the question before sending again.");
             return cause instanceof ApiError && cause.status === 409 ? t("The question on screen changed; check it and answer again.") : plainError(cause);
           },
         );
@@ -3040,7 +3081,8 @@ export function PaneTerminal({
 
   return (
     // data-direct-typing: xterm's own field raises the soft keyboard here (lib/viewport.ts)
-    <div ref={stackRef} className={`terminal-stack${chatView ? " is-chat" : ""}${greeted ? " is-greeted" : ""}`} data-pane-owner={paneId === null ? undefined : paneStorageId(machineId, paneId)} data-direct-typing={coarse && directTyping && !chatView ? "" : undefined}>
+    <div ref={stackRef} className={`terminal-stack${chatView ? " is-chat" : ""}${greeted ? " is-greeted" : ""}`} data-pane-owner={paneId === null ? undefined : paneStorageId(machineId, paneId)} data-direct-typing={coarse && directTyping && !chatView ? "" : undefined}
+      data-pane-content={!chatView && paneId !== null && active && presented && shown && connected && outputReady && parsedTarget === outputTarget && !held && !ended && !released && !unsupported && !outputError ? presentationKey : undefined}>
       {paneId === null && restoreError !== null && (
         <div className="terminal-placeholder is-restore-error" role="status">
           <div className="terminal-placeholder-inner">
@@ -3186,6 +3228,9 @@ export function PaneTerminal({
               The session herdr reports is left out of the key: it can change while the
               conversation stays (a shared Codex daemon), and the chat follows history_id itself */}
           <ChatView
+            presentationKey={presentationKey}
+            finishEpoch={finishEpoch}
+            finishId={finishId}
             key={paneId}
             paneId={paneId}
             active={active}
@@ -3329,6 +3374,8 @@ export function PaneTerminal({
           suggestion={chatPrompt?.pane !== paneId && chatSuggestion?.pane === paneId ? chatSuggestion.value : null}
           restored={chatPrompt?.pane !== paneId && chatRestored?.pane === paneId ? chatRestored.value : null}
           notices={composerNotices}
+          role={observing ? "observe" : role}
+          onOpenTerminal={onOpenTerminal}
           greeting={greetingDue ? (
             <div className={`composer-greeting${greeted ? "" : " is-out"}`} ref={greetingRef} aria-hidden={greeted ? undefined : true}>
               <p className="composer-greeting-title">{t("What should {agent} do in {folder}?", { agent: agentDisplayLabel(agent), folder })}</p>

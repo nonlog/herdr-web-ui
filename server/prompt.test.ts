@@ -4783,6 +4783,58 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     });
   });
 
+  describe("picker cancellation matches the parent move boundaries", () => {
+    const providerList = (agent: "pi" | "omo", at: number) => {
+      const rows = ["gpt-5.5", "gpt-6-sol", "gpt-6-astra"].map((name, row) =>
+        `${at === row ? "→" : " "}   ${name} [chatgpt-subscription]`).join("\n");
+      return agent === "omo"
+        ? `enter select  ctrl+s select as default  ctrl+f favorite\n>\n${rows}\n${"─".repeat(40)}\n/tmp/fixture\n(OmO Native)\n`
+        : `>\n${rows}\nEnter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n${"─".repeat(40)}\n/tmp/fixture\n0.0%/215k (auto)\n`;
+    };
+    const cases = [
+      { id: "omo-model", agent: "omo", move: "down", rereadMoves: false, draw: (at: number) => providerList("omo", at) },
+      { id: "pi-model", agent: "pi", move: "down", rereadMoves: false, draw: (at: number) => providerList("pi", at) },
+      { id: "claude-model", agent: "claude", move: "down", rereadMoves: true, draw: claudeModelList },
+      { id: "claude-effort", agent: "claude", move: "right", rereadMoves: true, draw: claudeEffort },
+      { id: "codex-model", agent: "codex", move: "down", rereadMoves: true, draw: codexModels },
+    ];
+    for (const fixture of cases) for (const during of ["first move", "next read", "commit read", "asking ended"]) {
+      test(`${fixture.id} preserves parent navigation when cancelled during ${during}`, async () => {
+        await withPane(fixture.agent, "idle", fixture.draw(0), async (pane) => {
+          const prompt = (await card())!;
+          const abort = new AbortController();
+          let at = 0;
+          pane.onSent = (sent) => {
+            if (sent !== fixture.move) return;
+            at += 1;
+            pane.screen = fixture.draw(at);
+            if (at === 1 && during === "first move") abort.abort();
+            if (at === 1 && during === "asking ended") promptWaitEnded("p_1");
+          };
+          // Abort within the exact read, after onRow's entry guard but before it returns.
+          pane.onRead = () => {
+            if ((at > 0 && during === "next read") || (at === 2 && during === "commit read")) abort.abort();
+          };
+          const result = await answer(prompt.id, { option_index: 2 }, { signal: abort.signal });
+          const moves = during === "asking ended" || (during === "first move" && fixture.rereadMoves) ? 1 : 2;
+          expect(pane.sent, `${fixture.id} must keep the parent's reversible keys without a commit`).toEqual(Array.from({ length: moves }, () => fixture.move));
+          expect(result).toEqual({ status: 409, code: "prompt_changed" });
+        });
+      });
+    }
+  });
+
+  test("an interaction plan sends no commit when Claude's highlight moves past the requested model", async () => {
+    await withPane("claude", "idle", claudeModelList(1), async (pane) => {
+      const prompt = (await card())!;
+      // A deterministic terminal move races our one Down: the requested row is 2, not 3.
+      pane.onSent = (sent) => { if (sent === "down") pane.screen = claudeModelList(3); };
+      const result = await answer(prompt.id, { option_index: 2 });
+      expect(pane.sent, "a changed highlight must not receive the session commit s").toEqual(["down"]);
+      expect(result).toEqual({ status: 409, code: "prompt_changed" });
+    });
+  });
+
   test("sets Claude's effort with ←/→ and s only where the slider still stands over that level", async () => {
     await withPane("claude", "idle", claudeEffort(2), async (pane) => {
       let at = 2;

@@ -8,8 +8,10 @@ import type { HerdrPane } from "../../shared/protocol.ts";
 import { secretPrompt } from "../../shared/secret-prompt.ts";
 import { agentPrompt, HerdrError, paneGet, paneRead, paneScrollInfo, paneSendKeys, paneSendText } from "../herdr/client.ts";
 import { mirrorInput } from "../mirror-input.ts";
-import { paneContext } from "../pane-routes.ts";
-import { CLAUDE_CLEAR_INPUT_KEYS, claudeClearableDraft, claudeInputBoxContent, claudeInputDraft, claudeInputEmpty, claudeRestoredDraft, codexQuestionsCollapsed, heldCandidate, hermesInputDraft, lastChatSubmitted, modelListWaits, noteSubmitted, parseInteractivePrompt, viewportShowsLive } from "../prompt.ts";
+import { paneAgentOf, resolveAgent, typingRoots } from "../pane-context.ts";
+import { paneProcessRoots } from "../conversation.ts";
+import { CLAUDE_CLEAR_INPUT_KEYS, claudeClearableDraft, claudeInputBoxContent, claudeInputDraft, claudeInputEmpty, claudeRestoredDraft, codexQuestionsCollapsed, heldCandidate, hermesInputDraft, lastChatSubmitted, noteSubmitted, parseInteractivePrompt, viewportShowsLive } from "../prompt.ts";
+import { registry } from "../dialogs/registry.ts";
 import { type PendingIdentity, PendingInputError } from "../pending-input.ts";
 
 const CLAUDE_INPUT_DRAFT_MESSAGE = "Claude Code's input box is not empty (a draft, bash mode, or a box that could not be read); send or clear it in the terminal, then send this message";
@@ -57,13 +59,19 @@ export async function blockedOnlyByCodexQueue(paneId: string): Promise<boolean> 
     if (error instanceof HerdrError && error.code === "pane_not_found") return undefined;
     throw error;
   });
-  if ((pane?.agent ?? pane?.agent_session?.agent) !== "codex") return false;
+  if (!(await paneIs(pane, "codex"))) return false;
   // A collapsed queue in scrollback must not bypass an approval on the live screen.
   return codexQuestionsCollapsed((await paneRead({ paneId, source: "detection", format: "text" })).text);
 }
 
+/** Is this pane's agent `kind`? The omo probe is spent only where the label already says so. */
+async function paneIs(pane: HerdrPane | undefined, kind: string): Promise<boolean> {
+  if (!pane || resolveAgent(pane).agent !== kind) return false;
+  return resolveAgent(pane, typingRoots(await paneProcessRoots(pane.pane_id, kind))).agent === kind;
+}
+
 export const pendingIdentity = (pane: HerdrPane): PendingIdentity => ({
-  agent: pane.agent ?? pane.agent_session?.agent ?? null, terminalId: pane.terminal_id,
+  agent: resolveAgent(pane).agent, terminalId: pane.terminal_id,
   session: pane.agent_session ? `${pane.agent_session.kind}:${pane.agent_session.source}:${pane.agent_session.value}` : null,
 });
 
@@ -221,7 +229,10 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
             throw new HerdrError("pending_target_changed", "The refused message's Claude terminal or session changed; nothing was sent");
           }
         }
-        if ((pane?.agent ?? pane?.agent_session?.agent) === "claude" && !sendAnyway) {
+        const claude = await paneIs(pane, "claude");
+        // the process lookup waited on herdr: the device may have lost its access meanwhile
+        inTime();
+        if (claude && !sendAnyway) {
           if (clearDraft === undefined) {
             try {
               await freeClaudeBox(paneId, pane?.agent_status === "working", authorize, arrivedAt + (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS));
@@ -242,7 +253,7 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
             reads = await claudeBoxReads(paneId);
             if (secretPrompt(reads[0], attachments.get(paneId)?.cols) !== null
               || parseInteractivePrompt("claude", reads[0], null, true, [], heldCandidate(paneId)) !== null
-              || modelListWaits("claude", reads[0]) || current.agent_status === "blocked") {
+              || registry.waits("claude", reads[0]) || current.agent_status === "blocked") {
               throw new HerdrError("agent_blocked", "The terminal is waiting for an answer; its draft was not cleared");
             }
             if (!["working", "idle", "done"].includes(current.agent_status)) {
@@ -286,7 +297,9 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
           if (clearDraft !== undefined && !claudeInputEmpty(...reads)) throw new InputDraftError(null);
         }
         // a clear request or send anyway reached a Hermes pane only to be refused above: both are Claude's
-        if ((pane?.agent ?? pane?.agent_session?.agent) === "hermes") {
+        const hermes = await paneIs(pane, "hermes");
+        inTime();
+        if (hermes) {
           await freeHermesInput(paneId, identity ?? undefined);
           inTime();
         }
@@ -305,7 +318,7 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
       // a mirrored pane's browser never learned the program's paste mode, so `payload` came as bare
       // lines: several of them are shaped here as the same block typed into the mirror is. herdr is
       // asked only for such a block, so a one-line message never waits on it.
-      const shaped = await mirrorInput(closeMention(payload), async () => await terminalAttach() ? null : (await paneContext(paneId)).agent);
+      const shaped = await mirrorInput(closeMention(payload), async () => await terminalAttach() ? null : await paneAgentOf(paneId));
       inTime();
       await paneSendText(paneId, shaped);
       // fixed wait: a TUI busy with the paste takes an Enter in the same chunk for a newline (SUBMIT_DELAY_MS)
