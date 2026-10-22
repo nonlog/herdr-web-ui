@@ -782,10 +782,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   from that same difference, as the palette's filter chips do.
 - The header's Chat/Terminal switch from `769px` drops the track and the glyphs: two words, the
   chosen one on the hover fill. At `<=768px` it keeps the track; at `<=560px` it is glyphs only.
-  On a phone (`<=768px`) its options draw `34px` tall in a `40px` track, clear of the header's rule
-  in either density (the compact bar is `46px`), and reach `--touch-target-header` through the same
-  invisible `::before` expander; a glyph sits in the middle of its `--touch-target-header`-wide
-  option. This follows iOS's segmented control in a navigation bar (UIKit draws it about `32pt`
+  On a phone (`<=768px`) its options draw at the density's option height (`--control-h` less
+  `--segmented-inset`: `28px` in a `34px` track, `26px` in a `32px` track when compact), so the
+  track stands at least `6px` clear of the bar above and below in either density (the compact bar
+  is `46px`), and reach `--touch-target-header` through the same invisible `::before` expander; a
+  glyph sits in the middle of its `--touch-target-header`-wide option. This follows iOS's segmented control in a navigation bar (UIKit draws it about `32pt`
   in a `44pt` bar and takes taps beyond its drawn edge); the Codex and Claude phone apps have no
   view switch in their bar to follow.
 
