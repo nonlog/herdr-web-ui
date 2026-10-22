@@ -1,5 +1,5 @@
 import { ApiError } from "./api.ts";
-import { t } from "./i18n.ts";
+import { t, type Translate } from "./i18n.ts";
 
 export interface UserError {
   message: string;
@@ -68,7 +68,7 @@ const SENTENCE: Record<FailureKind, () => string> = {
   changed: () => t("It changed on the PC while you were acting. Check it and try again."),
   slow: () => t("The PC took too long to answer. Try again."),
   unreachable: () => t("Can't reach the PC. Check your connection, then try again."),
-  refused: () => t("The PC could not do that. Try again; if it keeps failing, restart herdr web ui on the PC."),
+  refused: () => t("The PC could not do that. Try again; if it keeps failing, restart Ovis on the PC."),
   unknown: () => t("Something went wrong. Try again."),
 };
 
@@ -88,7 +88,7 @@ const ADVICE: Record<FailureKind, (() => string) | null> = {
   changed: () => t("Check it and try again."),
   slow: null,
   unreachable: () => t("Check your connection, then try again."),
-  refused: () => t("Try again; if it keeps failing, restart herdr web ui on the PC."),
+  refused: () => t("Try again; if it keeps failing, restart Ovis on the PC."),
   unknown: null,
 };
 
@@ -106,6 +106,20 @@ export function userErrorMessage(cause: unknown): UserError {
  */
 export function saysHerdrAway(words: string): boolean {
   return HERDR_AWAY.test(words);
+}
+
+/**
+ * The server's fixed sentences for another PC's answer it would not hold (server/remote-json.ts).
+ * They reach a PC's error and its setup job's error as they are, so the sidebar and the PC dialog
+ * show them in the user's language; any other words pass through unchanged.
+ */
+export function machineErrorText(words: string, translateIn: Translate): string {
+  const t = translateIn;
+  const known: ReadonlyArray<[string, string]> = [
+    ["The other PC's answer was larger than this app accepts", t("The other PC's answer was larger than this app accepts")],
+    ["The other PC's answer could not be read", t("The other PC's answer could not be read")],
+  ];
+  return known.reduce((text, [english, local]) => text.replaceAll(english, local), words);
 }
 
 /** The failure's parts: the cause when the status or the server's words name one, the advice, the words. */

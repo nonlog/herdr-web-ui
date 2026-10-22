@@ -1,6 +1,21 @@
 // Shared by the app's own pages: the native plugin (ios/App/App/HerdrShellPlugin.swift) and
 // what an address typed or scanned becomes.
 
+/** Whether the phone's first language is Korean, the one language the app's own pages have besides English. */
+export const korean = /^ko\b/i.test(navigator.language ?? "");
+
+/** The text in the phone's language. */
+export function t(en, ko) {
+  return korean ? ko : en;
+}
+
+/** On a Korean phone, puts in each element's data-ko text (markup the page itself carries). */
+export function localize() {
+  if (!korean) return;
+  document.documentElement.lang = "ko";
+  for (const element of document.querySelectorAll("[data-ko]")) element.innerHTML = element.dataset.ko;
+}
+
 /** Calls the native HerdrShell plugin through Capacitor's bridge. */
 export function shell(method, options = {}) {
   return window.Capacitor.nativePromise("HerdrShell", method, options);

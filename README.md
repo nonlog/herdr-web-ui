@@ -1,7 +1,9 @@
-# herdr web ui
+# Ovis
+
+Ovis, the browser and phone client for herdr.
 
 <p align="center">
-  <img src="public/icons/icon-192.png" alt="herdr web ui" width="100">
+  <img src="public/icons/icon-192.png" alt="Ovis" width="100">
 </p>
 
 <p align="center">
@@ -116,7 +118,7 @@ herdr plugin install devswha/herdr-web-ui
 
 An older herdr has to be updated and restarted first. [INSTALL.md](INSTALL.md) walks through each step and what to do when one fails.
 
-With herdr running, use the address the installer prints or opens, normally **[127.0.0.1:7317](http://127.0.0.1:7317)**; the plugin can choose and remember another port if that one is busy. On a plugin-only install, run herdr's **Start herdr web ui** action. On a new install on a PC with a desktop, the installer opens the address in your browser for you; click **Install** in the address bar to add the app. The installed app belongs to that exact address, so keep using it rather than switching between `127.0.0.1` and `localhost`. Set `HERDR_WEB_NO_OPEN=1` before running the installer to skip opening the browser. Pick a pane or start an agent with **New workspace**. To use your phone, scan the installer's QR code (also available from herdr's **Phone setup**) and add the app to your home screen. [Quick start →](docs/guide.md#quick-start)
+With herdr running, use the address the installer prints or opens, normally **[127.0.0.1:7317](http://127.0.0.1:7317)**; the plugin can choose and remember another port if that one is busy. On a plugin-only install, run herdr's **Start Ovis** action. On a new install on a PC with a desktop, the installer opens the address in your browser for you; click **Install** in the address bar to add the app. The installed app belongs to that exact address, so keep using it rather than switching between `127.0.0.1` and `localhost`. Set `HERDR_WEB_NO_OPEN=1` before running the installer to skip opening the browser. Pick a pane or start an agent with **New workspace**. To use your phone, scan the installer's QR code (also available from herdr's **Phone setup**) and add the app to your home screen. [Quick start →](docs/guide.md#quick-start)
 
 The server listens on `127.0.0.1` by default. For access from another device, see [phone setup](docs/guide.md#on-your-phone) and [access and safety](docs/guide.md#access-and-safety).
 

@@ -1,7 +1,7 @@
-# herdr web ui
+# Ovis
 
 <p align="center">
-  <img src="public/icons/icon-192.png" alt="herdr web ui" width="100">
+  <img src="public/icons/icon-192.png" alt="Ovis" width="100">
 </p>
 
 <p align="center">
@@ -118,7 +118,7 @@ herdr plugin install devswha/herdr-web-ui
 
 旧版 herdr 必须先更新并重启。[INSTALL.md](INSTALL.md) 说明了各步操作及失败时的处理方法。
 
-在 herdr 运行时，使用安装程序打印或打开的地址，通常是 **[127.0.0.1:7317](http://127.0.0.1:7317)**；默认端口被占用时，插件会选择并记住其他端口。如果只安装了插件，请在 herdr 中运行 **Start herdr web ui**。首次安装到有桌面环境的电脑时，安装程序会自动打开浏览器；点击地址栏中的 **Install（安装）** 即可添加应用。安装后的应用属于这个确切地址，请继续使用同一地址，不要在 `127.0.0.1` 和 `localhost` 之间切换。安装前设置 `HERDR_WEB_NO_OPEN=1` 可跳过自动打开浏览器。选择一个窗格，或点击 **New workspace（新建工作区）** 启动智能体。在手机上使用时，扫描安装程序的二维码（也可从 herdr 的 **Phone setup** 查看），并将应用添加到主屏幕。[快速入门 →](docs/guide.md#quick-start)
+在 herdr 运行时，使用安装程序打印或打开的地址，通常是 **[127.0.0.1:7317](http://127.0.0.1:7317)**；默认端口被占用时，插件会选择并记住其他端口。如果只安装了插件，请在 herdr 中运行 **Start Ovis**。首次安装到有桌面环境的电脑时，安装程序会自动打开浏览器；点击地址栏中的 **Install（安装）** 即可添加应用。安装后的应用属于这个确切地址，请继续使用同一地址，不要在 `127.0.0.1` 和 `localhost` 之间切换。安装前设置 `HERDR_WEB_NO_OPEN=1` 可跳过自动打开浏览器。选择一个窗格，或点击 **New workspace（新建工作区）** 启动智能体。在手机上使用时，扫描安装程序的二维码（也可从 herdr 的 **Phone setup** 查看），并将应用添加到主屏幕。[快速入门 →](docs/guide.md#quick-start)
 
 服务器默认监听 `127.0.0.1`。如需从其他设备访问，请参阅[手机设置](docs/guide.md#on-your-phone)和[访问与安全](docs/guide.md#access-and-safety)。
 

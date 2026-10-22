@@ -1,4 +1,5 @@
 import type { DialogReader } from "./registry.ts";
+import { pickerPlan } from "./interaction-plan.ts";
 import { type InteractivePromptAnswer } from "../../shared/protocol.ts";
 import { ANSI_RE, KEY, type MenuRow, type ParsedPrompt, cleanLine, findLastIndex, finishPrompt, isDivider, keySteps, navigationKeys, nearestQuestion, normalizeText, wrapped } from "./shared.ts";
 
@@ -250,6 +251,122 @@ function parseOmpApproval(screen: string): ParsedPrompt | null {
   });
 }
 
+/**
+ * omp's session-only model picker (omp 18.11.1), which `/switch` and Alt+P open: a box over the
+ * bottom of the screen, with the screen's last line its bottom border —
+ *
+ *   ╭─ Switch Model ─────────────────────────────────────────────╮
+ *   │  Session-only switch — role models stay unchanged           │
+ *   │  🔍 >                                                       │
+ *   │                                                             │
+ *   │ ❯ anthropic/claude-opus-5-5 ●       5.5s 49t/s  1m ◫  $4/20█ │
+ *   │   openai/gpt-6-sol                        1.1m ◫     $2/10│ │
+ *   │   ───────────────────────────────────────────────────────   │
+ *   │   openai/gpt-oss-120b                      131k ◫ $0.35/0.75│ │
+ *   │                                                             │
+ *   │   Claude Opus 5.5 · 1m ctx · 128k out · $4/20 per M · …     │
+ *   │   ● current · ● default ⟳ · ○ smol · ○ slow                 │
+ *   │ ↑/↓ models · ⏎ use for this session · type to search · @ quick roles · ⎋ close │
+ *   ╰─────────────────────────────────────────────────────────────╯
+ *
+ * The rows are a window on the list, padded with blank lines to its height and followed by a
+ * blank and two lines on the row under the cursor. A list longer than the window draws a
+ * scrollbar after every row. `●` marks the model the session runs; a rule sets recent and role
+ * models apart, and ↑/↓ step over it. A model whose window the conversation already overflows
+ * says `⦸ context>131k`: omp compacts the conversation with the model in use before it switches.
+ * Typing in the box filters the list. A leading `@` lists quick roles and Alt+P lists models for
+ * task subagents: both change the status line or the title, and are not read here. omp's
+ * `/model` opens its Models hub instead, which assigns roles, the default one saved for later
+ * sessions, so no card answers it.
+ */
+const OMP_MODEL_TOP_RE = /^╭─ Switch Model ─/;
+const OMP_MODEL_STATUS_RE = /^Session-only switch\b/;
+/** the search box: omp's search icon, then what was typed */
+const OMP_MODEL_SEARCH_RE = /^\S+ >(?: .*)?$/;
+/** the footer, cut at the pane's edge on a phone */
+const OMP_MODEL_HINT_RE = /^\S+ models · \S+ use for this session(?: ·|…|$)/;
+const OMP_MODEL_BOTTOM_RE = /^╰─+╯$/;
+/** a row: the cursor, `provider/id`, `●` on the model in use, then its figures */
+const OMP_MODEL_ROW_RE = /^(❯ )?(\S+\/\S+)( ●)?(?: |$)/;
+/** the scrollbar's thumb or track after a row */
+const OMP_MODEL_SCROLLBAR_RE = /[█│]$/;
+const OMP_MODEL_OVER_CONTEXT_RE = /⦸ context>(\S+)/;
+
+function ompModelPicker(lines: string[]): { rows: { label: string; cursor: boolean; current: boolean; overContext: string | null }[]; more: boolean } | null {
+  // the bottom border is the screen's last line: the picker is drawn over everything else
+  let bottom = lines.length - 1;
+  while (bottom >= 0 && !lines[bottom]!.trim()) bottom -= 1;
+  if (bottom < 5 || !OMP_MODEL_BOTTOM_RE.test(lines[bottom]!.trim())) return null;
+  const hint = bottom - 1;
+  if (!OMP_MODEL_HINT_RE.test(cleanLine(lines[hint]!))) return null;
+  const top = findLastIndex(lines, (line, index) => index < hint && OMP_MODEL_TOP_RE.test(line.trim()));
+  if (top < 0 || !OMP_MODEL_STATUS_RE.test(cleanLine(lines[top + 1] ?? "")) || !OMP_MODEL_SEARCH_RE.test(cleanLine(lines[top + 2] ?? ""))) return null;
+  // the search box and a blank over the rows; a blank and the two lines on the cursor's row under them
+  const window = lines.slice(top + 4, hint - 3);
+  if (window.length === 0 || cleanLine(lines[top + 3]!) || cleanLine(lines[hint - 3]!)) return null;
+  const rows: { label: string; cursor: boolean; current: boolean; overContext: string | null }[] = [];
+  let more = false;
+  let padding = false;
+  for (const raw of window) {
+    const shown = cleanLine(raw);
+    const line = shown.replace(OMP_MODEL_SCROLLBAR_RE, "").trimEnd();
+    if (line !== shown) more = true;
+    // the window's padding comes after its last row, never between two
+    if (!line) { padding = true; continue; }
+    if (padding) return null;
+    if (isDivider(line)) continue;
+    const row = OMP_MODEL_ROW_RE.exec(line);
+    if (!row) return null;
+    rows.push({ label: row[2]!, cursor: row[1] !== undefined, current: row[3] !== undefined, overContext: OMP_MODEL_OVER_CONTEXT_RE.exec(line)?.[1] ?? null });
+  }
+  return rows.filter((row) => row.cursor).length === 1 ? { rows, more } : null;
+}
+
+function parseOmpModel(screen: string): ParsedPrompt | null {
+  const list = ompModelPicker(screen.replace(ANSI_RE, "").split(/\r?\n/));
+  if (list === null) return null;
+  const labels = list.rows.map((row) => row.label);
+  const current = list.rows.find((row) => row.current);
+  const asked = `Select model for this session${current ? ` (currently ${current.label})` : ""}`;
+  return finishPrompt("omp", {
+    kind: "question",
+    title: "",
+    question: list.more ? `${asked}. More models are listed in the terminal.` : asked,
+    body: null,
+    options: list.rows.map((row) => ({
+      label: row.label,
+      description: row.overContext === null ? null : `The conversation is over its ${row.overContext} context: omp compacts it first`,
+    })),
+    multi_select: false,
+    custom_option_index: null,
+  }, {
+    responder: "omp-model", menuLabels: labels, selectedIndex: list.rows.findIndex((row) => row.cursor), checkedOptionIndices: [], customMenuIndex: null,
+    rejectWithEscapeIndex: null,
+  });
+}
+
+const OMP_HANDOFF_RE = /^\S\s+(Generating handoff…)\s+\((?:⎋|esc|escape)\s+to cancel\)$/i;
+
+/**
+ * omp's /handoff (18.8.7, same in 18.12.3) shows no dialog: one status line while it writes the
+ * handoff document, which Esc cancels. Read only while that line is the live status, right above
+ * omp's status bar and editor; a line left in the transcript above them is history.
+ */
+function parseOmpHandoff(screen: string): ParsedPrompt | null {
+  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trim());
+  const index = findLastIndex(lines, (line) => OMP_HANDOFF_RE.test(line));
+  if (index < 0) return null;
+  const below = lines.slice(index + 1).filter(Boolean);
+  if (below.length < 2 || !below[0]!.startsWith("π >") || !below.slice(1).every((line) => line.startsWith("╰─"))) return null;
+  return finishPrompt("omp", {
+    kind: "menu", title: "Handoff", question: OMP_HANDOFF_RE.exec(lines[index]!)![1]!, body: null,
+    options: [{ label: "Cancel", description: null }], multi_select: false, custom_option_index: null,
+  }, {
+    responder: "omp-handoff", menuLabels: ["Cancel"], selectedIndex: 0,
+    checkedOptionIndices: [], customMenuIndex: null, rejectWithEscapeIndex: 0,
+  });
+}
+
 export const readers: readonly DialogReader[] = [
   {
     id: "omp-question", agents: ["omp"], priority: 10,
@@ -274,5 +391,26 @@ export const readers: readonly DialogReader[] = [
       const parsed = parseOmpApproval(screen);
       return parsed?.responder === "omp-approval" ? parsed : null;
     },
+  },
+  {
+    id: "omp-model", agents: ["omp"], priority: 40,
+    // closed under the moves (Esc in the terminal), the picker leaves omp's input box, which takes
+    // ↑/↓ as its history: every move after the first waits for the picker on the row before it
+    reread: "each-move", list: "none",
+    // ↑/↓ step over the rule between recent and other models, as the rows do. omp reorders its
+    // rows when its catalogue refreshes under them, which the name under the cursor catches
+    interaction: (parsed) => pickerPlan(parsed, parseOmpModel,
+      parsed.options.map((_, index) => keySteps([...navigationKeys(index - parsed.selectedIndex), KEY.enter])),
+      (shown, cursor) => shown.options[cursor]?.label),
+    parse: (screen) => {
+      const parsed = parseOmpModel(screen);
+      return parsed?.responder === "omp-model" ? parsed : null;
+    },
+  },
+  {
+    // Esc only while the handoff is still being written: the loop reads the screen again first
+    id: "omp-handoff", agents: ["omp"], priority: 40,
+    reread: "before-commit", list: "none",
+    parse: parseOmpHandoff,
   },
 ];

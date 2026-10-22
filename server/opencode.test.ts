@@ -207,7 +207,7 @@ describe("OpenCode's rows as a conversation", () => {
         tool("webfetch", { status: "error", input: { url: "https://example.com/" }, error: { type: "unknown", message: "401 GET https://example.com/" } }),
         tool("shell", { status: "completed", input: { command: "false" }, content: [{ type: "text", text: "" }], metadata: { exit: 1 } }),
         tool("skill", { status: "completed", input: { id: "opencode" }, content: [{ type: "text", text: "<skill_content name=\"OpenCode\">…" }] }),
-        tool("websearch", { status: "completed", input: { query: "herdr web ui" }, content: [{ type: "text", text: "results" }] }),
+        tool("websearch", { status: "completed", input: { query: "Ovis" }, content: [{ type: "text", text: "results" }] }),
         tool("read", { status: "completed", input: { path: "big.log" }, content: [{ type: "text", text: "x".repeat(5000) }] }),
       ],
     }, "msg_step1");
@@ -216,7 +216,7 @@ describe("OpenCode's rows as a conversation", () => {
       ["webfetch", "https://example.com/", true],
       ["shell", "false", true],
       ["skill", "opencode", false],
-      ["websearch", "herdr web ui", false],
+      ["websearch", "Ovis", false],
       ["read", "big.log", false],
     ]);
     expect(parts[0]!.output).toBe("401 GET https://example.com/");

@@ -527,6 +527,89 @@ describe("pi's slash commands", () => {
 
 // The catalog reads files above the skill roots; a FIFO named like one of them must not block the
 // server. Discovery runs in a child with a deadline, since a blocking read would hang this process.
+// Command Code's discovery reads settings a repository may commit; it must stay bounded however they
+// are made. In a child with a deadline, since a blocking read or walk would hang this process.
+describe.skipIf(process.platform === "win32")("Command Code discovery stays bounded", () => {
+  const cmdInChild = (home: string, cwd: string) => {
+    const script = `const { AGENT_SOURCES } = await import(${JSON.stringify(join(import.meta.dir, "skills", "index.ts"))});`
+      + `console.log(JSON.stringify(AGENT_SOURCES.cmd.discover(${JSON.stringify({ home, cwd, repoRoot: null, env: null, roots: {}, version: null })}).map((row) => row.name)));`;
+    const child = Bun.spawnSync([process.execPath, "-e", script], { timeout: 5_000, stdout: "pipe", stderr: "pipe" });
+    return { exitCode: child.exitCode, names: child.exitCode === 0 ? JSON.parse(child.stdout.toString()) as string[] : [] };
+  };
+  const repoIn = (root: string) => {
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(join(repo, ".commandcode"), { recursive: true });
+    return repo;
+  };
+
+  it("skips a FIFO committed as the project's settings", () => {
+    const repo = repoIn(temp("cmd-settings-fifo-"));
+    expect(Bun.spawnSync(["mkfifo", join(repo, ".commandcode", "settings.json")]).exitCode).toBe(0);
+    const result = cmdInChild(temp("cmd-home-"), repo);
+    expect(result.exitCode).toBe(0);
+    expect(result.names).toContain("agent-browser");
+  });
+
+  it("walks a configured skill folder whose sibling links share folders in bounded time", () => {
+    const repo = repoIn(temp("cmd-lattice-"));
+    // twenty levels, each linking twice to the next: 2^20 paths to the one skill at the bottom
+    const level = (index: number) => join(repo, "lattice", `l${index}`);
+    for (let index = 0; index <= 20; index += 1) mkdirSync(level(index), { recursive: true });
+    for (let index = 0; index < 20; index += 1) for (const name of ["a", "b"]) symlinkSync(level(index + 1), join(level(index), name), "dir");
+    writeFileSync(join(level(20), "SKILL.md"), "---\nname: deep-skill\ndescription: Deep\n---\n");
+    writeFileSync(join(repo, ".commandcode", "settings.json"), JSON.stringify({ skills: ["./lattice/l0"] }));
+    const result = cmdInChild(temp("cmd-home-"), repo);
+    expect(result.exitCode).toBe(0);
+    expect(result.names).toContain("deep-skill");
+    // the same folder listed a thousand times is walked once, within one budget
+    writeFileSync(join(repo, ".commandcode", "settings.json"), JSON.stringify({ skills: Array.from({ length: 1000 }, () => "./lattice/l0") }));
+    const repeated = cmdInChild(temp("cmd-home-"), repo);
+    expect(repeated.exitCode).toBe(0);
+    expect(repeated.names).toContain("deep-skill");
+  });
+
+  it("counts links back to an ancestor and every project folder up to the root against one budget", () => {
+    const root = temp("cmd-flood-");
+    // a smaller lattice whose last level holds 200 links back to itself
+    const level = (index: number) => join(root, "lattice", `l${index}`);
+    for (let index = 0; index <= 14; index += 1) mkdirSync(level(index), { recursive: true });
+    for (let index = 0; index < 14; index += 1) for (const name of ["a", "b"]) symlinkSync(level(index + 1), join(level(index), name), "dir");
+    for (let index = 0; index < 200; index += 1) symlinkSync(level(14), join(level(14), `self${index}`), "dir");
+    // a repository nesting 24 projects, each linking its skills and commands to the lattice
+    const repo = repoIn(root);
+    let cwd = repo;
+    for (let depth = 0; depth < 24; depth += 1) {
+      mkdirSync(join(cwd, ".commandcode"), { recursive: true });
+      symlinkSync(level(0), join(cwd, ".commandcode", "skills"), "dir");
+      symlinkSync(level(0), join(cwd, ".commandcode", "commands"), "dir");
+      cwd = join(cwd, `p${depth}`);
+      mkdirSync(cwd, { recursive: true });
+    }
+    expect(cmdInChild(temp("cmd-home-"), cwd).exitCode).toBe(0);
+  });
+
+  it("reads custom commands whose header is never closed in bounded time", () => {
+    const home = temp("cmd-unclosed-");
+    // a header cut at the 64 KiB read: its closing `---` lies past what is read
+    for (const name of ["one", "two", "three"]) {
+      mkdirSync(join(home, ".commandcode", "commands"), { recursive: true });
+      writeFileSync(join(home, ".commandcode", "commands", `${name}.md`), `---\n${"\n".repeat(65536)}---\nA normal command body.\n`);
+    }
+    const result = cmdInChild(home, temp("cmd-cwd-"));
+    expect(result.exitCode).toBe(0);
+    expect(result.names).toContain("three");
+  });
+});
+
+it("reads a skill's declared name from a CRLF header", () => {
+  const root = temp("crlf-skill-");
+  mkdirSync(join(root, "folder"), { recursive: true });
+  writeFileSync(join(root, "folder", "SKILL.md"), "---\r\nname: declared-name\r\ndescription: Declared\r\n---\r\nBody\r\n");
+  const walked = walkSkills(root, { depth: "recursive", looseMarkdown: "none", ignoreFiles: false, requireDescription: false });
+  expect(walked.map(({ name }) => name)).toEqual(["declared-name"]);
+});
+
 describe.skipIf(process.platform === "win32")("files that are not regular files", () => {
   const discoverInChild = (agent: string, args: Record<string, unknown>) => {
     const script = `const { AGENT_SOURCES } = await import(${JSON.stringify(join(import.meta.dir, "skills", "index.ts"))});`

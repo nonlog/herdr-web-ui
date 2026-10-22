@@ -1,7 +1,12 @@
 // The connect screen: the app's first page until a PC is chosen. Opening a PC goes through the
 // native HerdrShell plugin, which makes the PC's address the WebView's first page: navigating
 // there from this page would cost every launch about 1.5 s (docs/native-app.md, Spike results).
-import { parseAddress, shell } from "./shell.js";
+import { localize, parseAddress, shell, t } from "./shell.js";
+
+localize();
+
+// only iOS opens a plain http PC slower (docs/native-app.md, The app); Android shows no such delay
+if (window.Capacitor?.getPlatform?.() !== "ios") document.querySelector(".hint")?.remove();
 
 const form = document.getElementById("connect");
 const input = document.getElementById("address");
@@ -9,7 +14,7 @@ const error = document.getElementById("error");
 
 async function open(text) {
   const url = parseAddress(text);
-  if (url === null) { error.textContent = "That is not an http or https address."; input.focus(); return; }
+  if (url === null) { error.textContent = t("That is not an http or https address.", "http 또는 https 주소가 아닙니다."); input.focus(); return; }
   error.textContent = "";
   try { await shell("open", { url: url.href }); }
   catch (err) { error.textContent = String(err?.message ?? err); }
@@ -21,7 +26,7 @@ document.getElementById("scan").addEventListener("click", async () => {
   error.textContent = "";
   try {
     // the plugin's own JS fills these defaults; this page calls the bridge without it
-    const result = await window.Capacitor.nativePromise("CapacitorBarcodeScanner", "scanBarcode", { hint: 0, scanInstructions: "Point at the QR code under Settings → Phone & devices on your PC", scanButton: false, scanText: " ", cameraDirection: 1, scanOrientation: 3 });
+    const result = await window.Capacitor.nativePromise("CapacitorBarcodeScanner", "scanBarcode", { hint: 0, scanInstructions: t("Point at the QR code under Settings → Phone & devices on your PC", "PC의 설정 → 폰 및 기기에 있는 QR 코드를 비추세요"), scanButton: false, scanText: " ", cameraDirection: 1, scanOrientation: 3 });
     if (result?.ScanResult) await open(result.ScanResult);
   } catch (err) {
     error.textContent = String(err?.message ?? err);
@@ -36,13 +41,13 @@ function renderSaved(saved, current) {
     const openButton = document.createElement("button");
     openButton.type = "button";
     openButton.className = "open";
-    openButton.textContent = origin === current ? `${origin} (last opened)` : origin;
+    openButton.textContent = origin === current ? `${origin} ${t("(last opened)", "(마지막으로 연 PC)")}` : origin;
     openButton.addEventListener("click", () => void open(origin));
     const forget = document.createElement("button");
     forget.type = "button";
     forget.className = "forget";
-    forget.textContent = "Forget";
-    forget.setAttribute("aria-label", `Forget ${origin}`);
+    forget.textContent = t("Forget", "지우기");
+    forget.setAttribute("aria-label", t(`Forget ${origin}`, `${origin} 지우기`));
     forget.addEventListener("click", async () => { await shell("forget", { url: origin }); await load(); });
     item.append(openButton, forget);
     list.append(item);

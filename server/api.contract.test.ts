@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { describe, expect, it, beforeAll, afterAll, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
 import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,23 +6,25 @@ import { basename, join } from "node:path";
 import { ConversationMonitor } from "./conversation-monitor.ts";
 import { createServer } from "./index.ts";
 import type { AgentKind, AgentStatus, ApiError, HealthAuth, IntegrationsResponse, LanExposure, PortalStatus, PushKey, RemoteAccess, SessionSnapshot, TabMoved, PaneFindResponse, PaneReadResult, UsageReport, WorkspaceCreated, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../shared/protocol.ts";
+import { SUPPORTED_AGENT_KINDS } from "../shared/supported-agents.ts";
 import { HerdrUpdater } from "./herdr-update.ts";
 import { PortalService } from "./portal.ts";
-import { noInstalledNotes, unmanagedUpdateStatus, type HerdrUpdateStatus, type InstalledNotes, type UpdateNotes } from "../shared/update.ts";
+import { noInstalledNotes, noUpdateNotes, unmanagedUpdateStatus, type HerdrUpdateStatus, type InstalledNotes, type UpdateNotes, type UpdateStatus } from "../shared/update.ts";
 import { USAGE_PROVIDERS, UsageService } from "./usage.ts";
 import { VoiceService } from "./voice.ts";
 import { Telemetry } from "./telemetry.ts";
 import { NOTICE_VERSION, telemetryHarnesses, type TelemetryActive, type TelemetryEvent, type TelemetryStatus } from "../shared/telemetry.ts";
 import { DEFAULT_SETTINGS, telemetrySettingsSnapshot } from "../src/lib/settings.ts";
 import { HerdrSocket } from "../src/lib/ws.ts";
-import { herdrRpc, paneRead, ping, sessionSnapshot, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
+import { HerdrError, herdrRpc, paneRead, ping, sessionSnapshot, tabCreate, workspaceCreate, workspaceClose } from "./herdr/client.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 import { descriptorPath, type BridgeDescriptor } from "./bridge.ts";
 import { handleMachineRequest } from "./machine-api.ts";
 import type { MachineManager } from "./machines.ts";
 import { TailnetIdentitySource } from "./tailscale.ts";
 import { forgetTranscriptState } from "./conversation.ts";
-import type { RepoDiffFileList, RepoDiffFilePatch } from "../shared/protocol.ts";
+import type { RepoDiffFileList, RepoDiffFilePatch, SessionHistoryResponse } from "../shared/protocol.ts";
+import { PendingInputError, PendingInputs } from "./pending-input.ts";
 
 /**
  * Contract test for herdr-web-ui's HTTP + WS surface.
@@ -45,6 +47,18 @@ afterAll(() => {
 });
 
 const base = () => `http://localhost:${server.port}`;
+
+describe("removed Chat rewind API", () => {
+  it("returns 404 for local and machine-prefixed rewind requests", async () => {
+    for (const path of ["/api/pane/rewind", "/api/machines/local/pane/rewind"]) {
+      const response = await fetch(base() + path, {
+        method: "POST", headers: { "content-type": "application/json", "x-herdr-machine": "1" },
+        body: JSON.stringify({ pane_id: "not-a-live-pane", text: "nothing to send" }),
+      });
+      expect(response.status, path).toBe(404);
+    }
+  });
+});
 
 describe("Grok conversation API", () => {
   it.skipIf(process.platform !== "linux")("uses exact process/session evidence, validators and revision-bound output refs", async () => {
@@ -432,6 +446,57 @@ describe("update API", () => {
     const response = await fetch(`${base()}/api/updates/install`, { method: "POST", headers: { "x-herdr-update": "1" } });
     expect(response.status).toBe(409);
     expect((await response.json() as ApiError).error.code).toBe("updates_unmanaged");
+  });
+
+  it("installs only the revision the request names, and tells a release that moved later in the status", async () => {
+    const offered = "a".repeat(40), moved = "b".repeat(40);
+    let status: UpdateStatus = { ...unmanagedUpdateStatus(), managed: true, blocked_reason: null, available: true, latest_revision: offered,
+      latest_version: "9.9.9", current_revision: "c".repeat(40), revision_bound_install: true };
+    const requests: unknown[] = [];
+    const managedState = mkdtempSync(join(tmpdir(), "herdr-update-bound-"));
+    const managed = createServer({ port: 0, stateDir: managedState,
+      updates: { status: () => status, notes: noUpdateNotes, installed: noInstalledNotes, request: (request) => { requests.push(request); } } });
+    const origin = `http://localhost:${managed.port}`;
+    const install = (body: string | undefined, headers: Record<string, string> = { "x-herdr-update": "1", "content-type": "application/json" }) =>
+      fetch(`${origin}/api/updates/install`, { method: "POST", headers, ...(body === undefined ? {} : { body }) });
+    const code = async (response: Response) => ((await response.json()) as ApiError).error.code;
+    try {
+      // a body that names no full commit, or more than an install's 1 KiB
+      for (const body of [undefined, "{}", "not json", JSON.stringify({ expected_revision: "abc" }), JSON.stringify({ expected_revision: offered, pad: "x".repeat(1100) })]) {
+        const response = await install(body);
+        expect(response.status).toBe(400);
+        expect(await code(response)).toBe("invalid_update_install");
+      }
+      // the same-origin gate comes first, whatever the body
+      for (const headers of [{ "content-type": "application/json" }, { "x-herdr-update": "1", origin: "https://untrusted.invalid" }, { "x-herdr-update": "1", "sec-fetch-site": "cross-site" }] as Record<string, string>[]) {
+        expect((await install(JSON.stringify({ expected_revision: offered }), headers)).status).toBe(403);
+      }
+      // reading the status, as a watching device does, asks for nothing
+      expect(((await (await fetch(`${origin}/api/updates`)).json()) as UpdateStatus).revision_bound_install).toBe(true);
+      expect(requests).toEqual([]);
+      // another release on offer already: refused before the supervisor hears of it
+      status = { ...status, latest_revision: moved };
+      const stale = await install(JSON.stringify({ expected_revision: offered }));
+      expect(stale.status).toBe(409);
+      expect(await code(stale)).toBe("update_offer_changed");
+      expect(requests).toEqual([]);
+      // the offer as shown: accepted, and handed on with its revision
+      status = { ...status, latest_revision: offered };
+      const accepted = await install(JSON.stringify({ expected_revision: offered }));
+      expect(accepted.status).toBe(202);
+      expect(requests).toEqual([{ command: "install", expected_revision: offered }]);
+      // a release that moves after the 202 is told by the status, not by the request that finished
+      status = { ...status, phase: "error", latest_revision: moved, error_code: "update_offer_changed", error: "A different release is on offer than the one asked for, so nothing was installed. Review it, then update again." };
+      expect(await (await fetch(`${origin}/api/updates`)).json()).toMatchObject({ phase: "error", error_code: "update_offer_changed", latest_revision: moved });
+      // a supervisor that does not install by revision is sent no install
+      status = { ...status, phase: "idle", error: null, error_code: null, revision_bound_install: undefined };
+      const older = await install(JSON.stringify({ expected_revision: moved }));
+      expect(older.status).toBe(409);
+      expect(await code(older)).toBe("update_restart_required");
+      // a check stays bodyless
+      expect((await fetch(`${origin}/api/updates/check`, { method: "POST", headers: { "x-herdr-update": "1" } })).status).toBe(202);
+      expect(requests).toEqual([{ command: "install", expected_revision: offered }, { command: "check" }]);
+    } finally { managed.stop(); rmSync(managedState, { recursive: true, force: true }); }
   });
 
   it("keeps status and update actions behind the token gate", async () => {
@@ -949,6 +1014,23 @@ describe("agent rename", () => {
     }
   });
 
+  it("answers the new-tab dialog's agent commands to another PC's registered bridge token", async () => {
+    const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-agent-commands-bridge-"));
+    const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: state, tailscaleOwner: null });
+    const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
+    const endpoint = `http://127.0.0.1:${bridge.port}`;
+    const manager = { endpoint: (id: string) => id === "commands-remote" ? { url: endpoint, token: registered.token } : null, trackTerminal: () => () => {} } as unknown as MachineManager;
+    try {
+      expect((await fetch(`${endpoint}/api/agent/commands?agent=claude`)).status).toBe(401);
+      const res = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/commands-remote/agent/commands?agent=claude", { headers: { origin: "http://127.0.0.1" } }), manager);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(((await res.json()) as { commands: unknown[] }).commands)).toBeTrue();
+    } finally {
+      bridge.stop();
+      rmSync(state, { recursive: true, force: true });
+    }
+  });
+
   it("validates the body before asking herdr", async () => {
     for (const [body, code] of [
       [{}, "missing_pane_id"],
@@ -1110,16 +1192,58 @@ describe("tab creation", () => {
     } finally { await workspaceClose(owned.workspace_id); }
   }, 20_000);
 
-  it("returns the created tab when a shell agent is unavailable", async () => {
+  it("refuses a first message without an agent, an empty, oversized or control-laden one, before anything is made", async () => {
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-first-message" });
+    try {
+      const before = (await sessionSnapshot()).tabs.length;
+      for (const [body, reason] of [
+        [{ workspace_id: owned.workspace.workspace_id, agent: null, first_message: "a shell takes no message" }, "no agent"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "   " }, "blank"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "x".repeat(20_001) }, "too long"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "run \u001b[2J this" }, "control characters"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: 42 }, "not a string"],
+      ] as const) {
+        const res = await post(body);
+        expect(res.status, reason).toBe(400);
+        expect(((await res.json()) as ApiError).error.code, reason).toBe("invalid_first_message");
+      }
+      expect((await sessionSnapshot()).tabs.length).toBe(before);
+    } finally {
+      await workspaceClose(owned.workspace.workspace_id);
+    }
+  });
+
+  it("refuses launch arguments the dialog never sends, before anything is made: a tab or line break, a model of two words, an effort the agent does not name", async () => {
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-launch-args" });
+    try {
+      const before = (await sessionSnapshot()).tabs.length;
+      for (const [agent, reason] of [
+        [{ kind: "codex", args: ["--", "run\tthis"] }, "a tab in Codex's prompt"],
+        [{ kind: "codex", args: ["--", "first\nsecond"] }, "a line break in Codex's prompt"],
+        [{ kind: "claude", args: ["--model", "two words"] }, "a model of two words"],
+        [{ kind: "claude", args: ["--effort", "ultra"] }, "an effort Claude Code does not name"],
+        [{ kind: "codex", args: ["-c", "model_reasoning_effort=ultracode"] }, "an effort Codex does not name"],
+      ] as const) {
+        const res = await post({ workspace_id: owned.workspace.workspace_id, agent });
+        expect(res.status, reason).toBe(400);
+        expect(((await res.json()) as ApiError).error.code, reason).toBe("invalid_agent");
+      }
+      expect((await sessionSnapshot()).tabs.length).toBe(before);
+    } finally {
+      await workspaceClose(owned.workspace.workspace_id);
+    }
+  });
+
+  it("returns the created tab when a shell agent is unavailable, and queues no first message for an agent that did not start", async () => {
     const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-shell" });
     const bin = mkdtempSync(join(tmpdir(), "herdr-web-ui-tab-empty-path-"));
     const path = process.env["PATH"];
     try {
       process.env["PATH"] = bin;
-      const res = await post({ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" } });
+      const res = await post({ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "Plan the config file" });
       const failed = await res.json() as WorkspaceCreated;
       expect(res.status).toBe(200);
-      expect(failed).toMatchObject({ workspace_id: owned.workspace.workspace_id, agent_started: false, error: { code: "agent_start_failed" } });
+      expect(failed).toMatchObject({ workspace_id: owned.workspace.workspace_id, agent_started: false, error: { code: "agent_start_failed" }, first_message: null });
       expect(failed.error?.message).toContain("gjc is not on this server's PATH");
       expect(failed.pane_id).not.toBe(owned.root_pane.pane_id);
     } finally {
@@ -1128,6 +1252,32 @@ describe("tab creation", () => {
       rmSync(bin, { recursive: true, force: true });
     }
   });
+
+  it("says when the agent started but its first message could not be queued, apart from an agent that did not start", async () => {
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-first-not-queued" });
+    const made: string[] = [];
+    // the queue's own refusals, past the route's checks: its text rule, and a full list
+    const text = spyOn(PendingInputs.prototype, "enqueue").mockImplementation(() => { throw new HerdrError("invalid_submit_text", "refused by the queue"); });
+    try {
+      const res = await post({ workspace_id: owned.workspace.workspace_id, agent: { kind: "muse" }, first_message: "Plan the config file" });
+      expect(res.status).toBe(200);
+      const tab = await res.json() as WorkspaceCreated;
+      expect(tab).toMatchObject({ agent_started: true, first_message: { error: { code: "invalid_submit_text", message: "refused by the queue" } } });
+      expect(tab.error).toBeUndefined();
+    } finally { text.mockRestore(); }
+    const enqueue = spyOn(PendingInputs.prototype, "enqueue").mockImplementation(() => { throw new PendingInputError("pending_limit", "the list is full"); });
+    try {
+      const res = await fetch(`${base()}/api/workspace/create`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: tmpdir(), label: "herdr-web-ui-test-ws-first-not-queued", agent: { kind: "muse" }, first_message: "Plan the config file" }) });
+      expect(res.status).toBe(200);
+      const created = await res.json() as WorkspaceCreated;
+      made.push(created.workspace_id);
+      expect(created).toMatchObject({ agent_started: true, first_message: { error: { code: "pending_limit", message: "the list is full" } } });
+    } finally {
+      enqueue.mockRestore();
+      await workspaceClose(owned.workspace.workspace_id);
+      for (const id of made) await workspaceClose(id);
+    }
+  }, 30_000);
 });
 
 describe("workspace and discovery endpoints", () => {
@@ -1148,6 +1298,9 @@ describe("workspace and discovery endpoints", () => {
     const { agents } = (await res.json()) as { agents: AgentKind[] };
     expect(agents.some((agent) => agent.kind === "claude")).toBeTrue();
     expect(agents.some((agent) => agent.kind === "omp")).toBeTrue();
+    // omo and gjc are listed only where this server finds them on PATH, so only listed kinds are checked
+    expect(agents.filter((agent) => SUPPORTED_AGENT_KINDS.has(agent.kind) && agent.kind !== "pi" && agent.label === agent.kind).map((agent) => agent.kind)).toEqual([]);
+    expect(agents.find((agent) => agent.kind === "hermes")?.label).toBe("Hermes");
     expect(agents.map((agent) => agent.label)).toEqual([...agents.map((agent) => agent.label)].sort((a, b) => a.localeCompare(b)));
   });
 
@@ -1216,6 +1369,42 @@ describe("workspace and discovery endpoints", () => {
     }
   });
 
+  it("lists an agent's commands for a folder before any pane runs it, locally and through the PC proxy, and refuses what it must", async () => {
+    // GET /api/agent/commands?agent=&cwd=: paneCommands without a pane (the new workspace and tab
+    // dialogs' skill list). A fixture folder with one Codex project skill; the folder is its own
+    // repository boundary, so the scan climbs no further.
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-agent-commands-"));
+    try {
+      mkdirSync(join(root, ".git"));
+      mkdirSync(join(root, ".codex", "skills", "contract-skill"), { recursive: true });
+      writeFileSync(join(root, ".codex", "skills", "contract-skill", "SKILL.md"), "---\nname: contract-skill\ndescription: A fixture skill.\n---\nBody.\n");
+      const query = `?agent=codex&cwd=${encodeURIComponent(root)}`;
+      const listed = await fetch(`${base()}/api/agent/commands${query}`);
+      expect(listed.status).toBe(200);
+      const { commands } = (await listed.json()) as { commands: { name: string; source: string; trigger?: string; origin?: string; provenance?: { verified: boolean } }[] };
+      expect(commands).toContainEqual(expect.objectContaining({ name: "contract-skill", source: "skill", trigger: "$", origin: "project" }));
+      expect(commands.some((command) => command.source === "builtin")).toBeTrue();
+      // no process runs the agent: no row is verified against a version
+      expect(commands.every((command) => command.provenance?.verified === false)).toBeTrue();
+      // the same answer for this PC through the proxy path the remote PCs use
+      const proxied = await fetch(`${base()}/api/machines/local/agent/commands${query}`);
+      expect(proxied.status).toBe(200);
+      expect(await proxied.json()).toEqual({ commands });
+      const refusals: Array<[string, RequestInit | undefined, string]> = [
+        ["", undefined, "missing_agent"],
+        [`?agent=codex&cwd=${encodeURIComponent(join(root, "missing"))}`, undefined, "invalid_cwd"],
+        ["?agent=codex", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }, "method_not_allowed"],
+      ];
+      for (const [refusedQuery, init, code] of refusals) {
+        const refused = await fetch(`${base()}/api/agent/commands${refusedQuery}`, init);
+        expect(refused.status).toBe(400);
+        expect(((await refused.json()) as ApiError).error.code).toBe(code);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a workspace cwd that is not an existing directory", async () => {
     const res = await fetch(`${base()}/api/workspace/create`, {
       method: "POST",
@@ -1263,7 +1452,9 @@ describe("workspace and discovery endpoints", () => {
         body: JSON.stringify(body),
       });
       expect(changed.status).toBe(200);
-      expect(await changed.json()).toEqual({ ok: true });
+      // a move's receipt names it in this server's order (server/order-sequence.ts); the rest answer as before
+      if (path === "/api/workspace/move") expect(await changed.json()).toEqual({ ok: true, order_epoch: expect.any(String), moved_seq: expect.any(Number) });
+      else expect(await changed.json()).toEqual({ ok: true });
     }
 
     const close = await fetch(`${base()}/api/workspace/close`, {
@@ -1667,6 +1858,38 @@ describe("GET /api/pane/read", () => {
   it("rejects a missing pane_id parameter", async () => {
     const res = await fetch(`${base()}/api/pane/read?source=visible`);
     expect(res.status).toBe(400);
+  });
+
+  it("reads omitted, zero and small line counts on a live pane with source and format unchanged", async () => {
+    const { snapshot } = (await (await fetch(`${base()}/api/session`)).json()) as { snapshot: SessionSnapshot };
+    const pane = snapshot.panes[0]!;
+    for (const suffix of ["", "&lines=0", "&lines=1", "&lines=5", "&lines=0400"]) {
+      const res = await fetch(`${base()}/api/pane/read?pane_id=${encodeURIComponent(pane.pane_id)}&source=recent&format=ansi${suffix}`);
+      expect(res.status).toBe(200);
+      const { read } = (await res.json()) as { read: PaneReadResult };
+      expect(read.pane_id).toBe(pane.pane_id);
+      expect(read.source).toBe("recent");
+      expect(read.format).toBe("ansi");
+    }
+  });
+
+  it("refuses invalid line counts with invalid_lines for known and unknown panes and keeps serving", async () => {
+    const { snapshot } = (await (await fetch(`${base()}/api/session`)).json()) as { snapshot: SessionSnapshot };
+    for (const pane of [snapshot.panes[0]!.pane_id, "w9999:p9999"]) {
+      for (const lines of ["", "%20%20", "-1", "0.5", "NaN", "Infinity", "4294967296", "9007199254740993", "0.99999999999999999", "1.0", "1e3", "%2B5"]) {
+        const res = await fetch(`${base()}/api/pane/read?pane_id=${encodeURIComponent(pane)}&lines=${lines}`);
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as ApiError).error.code).toBe("invalid_lines");
+      }
+    }
+    const unknown = await fetch(`${base()}/api/pane/read?pane_id=w9999:p9999&lines=10`);
+    expect(((await unknown.json()) as ApiError).error.code).toBe("pane_not_found");
+    for (const [query, code] of [["source=everything", "invalid_source"], ["format=html", "invalid_format"]] as const) {
+      const res = await fetch(`${base()}/api/pane/read?pane_id=${encodeURIComponent(snapshot.panes[0]!.pane_id)}&lines=10&${query}`);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as ApiError).error.code).toBe(code);
+    }
+    expect((await fetch(`${base()}/api/health`)).status).toBe(200);
   });
 });
 
@@ -3455,6 +3678,38 @@ describe("PC management API", () => {
     expect((await fetch(`${base()}/api/machines/missing/pane/read?pane_id=p1`)).status).toBe(503);
     expect((await fetch(`${base()}/api/machines/missing/auth`)).status).toBe(404);
   });
+  it("answers another PC's oversized or unreadable answer with a safe 502", async () => {
+    const secret = "fixture-contract-secret";
+    let serve = () => new Response("{}");
+    const peer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => serve() });
+    const url = `http://127.0.0.1:${peer.port}`;
+    const manager = { endpoint: (id: string) => id === "capped-remote" ? { url, token: "contract-token" } : undefined, trackTerminal: () => () => {} } as unknown as MachineManager;
+    const ask = (machine: string, path: string, readOnly = false) => handleMachineRequest(new Request(`http://127.0.0.1/api/machines/${machine}/${path}`), manager, undefined, undefined, readOnly);
+    const logged: string[] = [];
+    const error = spyOn(console, "error").mockImplementation((...args: unknown[]) => { logged.push(args.join(" ")); });
+    try {
+      // a watcher's prompt is parsed to remove what it may not see, so it is held to 1 MiB
+      serve = () => new Response(`{"prompt":null,"restored":"${secret}${"x".repeat(1024 * 1024)}"}`);
+      const large = await ask("capped-remote", "pane/prompt?pane_id=p1", true);
+      expect(large.status).toBe(502);
+      const tooLarge = await large.json() as ApiError;
+      expect(tooLarge.error.code).toBe("remote_response_too_large");
+      serve = () => new Response(`{"prompt":{"plan_file":"${secret}"`);
+      const unreadable = await ask("capped-remote", "pane/prompt?pane_id=p1", true);
+      expect(unreadable.status).toBe(502);
+      const invalid = await unreadable.json() as ApiError;
+      expect(invalid.error.code).toBe("remote_response_invalid");
+      for (const text of [JSON.stringify(tooLarge), JSON.stringify(invalid), logged.join("\n")]) {
+        expect(text).not.toContain(secret);
+        expect(text).not.toContain(url);
+        expect(text).not.toContain("contract-token");
+      }
+      // a disconnected PC is refused before any request leaves for it
+      const offline = await ask("missing", "session");
+      expect(offline.status).toBe(503);
+      expect((await offline.json() as ApiError).error.code).toBe("machine_offline");
+    } finally { error.mockRestore(); peer.stop(true); }
+  });
   it("gates PC metadata, setup and SSE behind the existing token", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "herdr-machine-auth-"));
     const gated = createServer({ port: 0, token: "machine-test-secret", stateDir });
@@ -3568,4 +3823,152 @@ describe("repository diff of a pane's folder", () => {
     expect(posted.status).toBe(400);
     expect(((await posted.json()) as ApiError).error.code).toBe("method_not_allowed");
   });
+});
+
+describe("GET /api/sessions/history", () => {
+  it("lists a workspace folder's Codex sessions from the server's store, newest first, and none a link puts outside it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-session-history-contract-"));
+    const project = join(root, "project");
+    mkdirSync(project);
+    const cwd = realpathSync(project);
+    const codexHome = join(root, "codex");
+    const rollout = (day: string, id: string, prompt: string) => {
+      const dir = join(codexHome, "sessions", "2026", "10", day);
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, `rollout-2026-10-${day}T09-00-00-${id}.jsonl`);
+      writeFileSync(path, `${JSON.stringify({ type: "session_meta", payload: { id, timestamp: `2026-10-${day}T09:00:00.000Z`, cwd, source: "cli" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: prompt } })}\n`);
+      return path;
+    };
+    const older = "00000000-0000-4000-8000-000000000001";
+    const newer = "00000000-0000-4000-8000-000000000002";
+    utimesSync(rollout("01", older, "older prompt"), 1_790_000_000, 1_790_000_000);
+    utimesSync(rollout("02", newer, "newer prompt"), 1_790_000_100, 1_790_000_100);
+    const escaped = "00000000-0000-4000-8000-000000000009";
+    const outside = join(root, `rollout-2026-10-03T09-00-00-${escaped}.jsonl`);
+    writeFileSync(outside, `${JSON.stringify({ type: "session_meta", payload: { id: escaped, cwd, source: "cli" } })}\n`);
+    if (process.platform !== "win32") symlinkSync(outside, join(codexHome, "sessions", "2026", "10", "02", basename(outside)));
+    const created = await workspaceCreate({ cwd, label: "herdr-web-ui-test-session-history" });
+    const appState = mkdtempSync(join(tmpdir(), "herdr-web-ui-session-history-state-"));
+    const app = createServer({ port: 0, stateDir: appState, codexHome });
+    try {
+      const res = await fetch(`http://localhost:${app.port}/api/sessions/history?workspace_id=${encodeURIComponent(created.workspace.workspace_id)}&agent=codex`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as SessionHistoryResponse;
+      expect(body.cwd).toBe(cwd);
+      expect(body.sessions.map((row) => [row.id, row.firstMessage, row.resume?.argv])).toEqual([
+        [newer, "newer prompt", ["codex", "resume", newer]],
+        [older, "older prompt", ["codex", "resume", older]],
+      ]);
+      const unknown = await fetch(`http://localhost:${app.port}/api/sessions/history?workspace_id=${encodeURIComponent(created.workspace.workspace_id)}&agent=bash`);
+      expect(unknown.status).toBe(400);
+      // another PC asks with the bridge token this server registered, not a browser's: the proxy's way in
+      const bridgeState = mkdtempSync(join(tmpdir(), "herdr-web-ui-session-history-bridge-"));
+      const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: bridgeState, codexHome, tailscaleOwner: null });
+      try {
+        const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
+        const manager = { endpoint: (id: string) => id === "history-remote" ? { url: `http://127.0.0.1:${bridge.port}`, token: registered.token } : null, trackTerminal: () => () => {} } as unknown as MachineManager;
+        const remote = await handleMachineRequest(new Request(`http://127.0.0.1/api/machines/history-remote/sessions/history?workspace_id=${encodeURIComponent(created.workspace.workspace_id)}&agent=codex`), manager);
+        expect(remote.status).toBe(200);
+        expect(((await remote.json()) as SessionHistoryResponse).sessions.map((row) => row.id)).toEqual([newer, older]);
+      } finally {
+        bridge.stop();
+        rmSync(bridgeState, { recursive: true, force: true });
+      }
+    } finally {
+      app.stop();
+      await workspaceClose(created.workspace.workspace_id);
+      rmSync(appState, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+describe("workspace order evidence", () => {
+  /** the first SSE roster whose local snapshot `check` accepts */
+  async function machinesEvent(origin: string, check: (snapshot: SessionSnapshot) => boolean): Promise<SessionSnapshot> {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 15_000);
+    try {
+      const response = await fetch(`${origin}/api/machines/events`, { signal: abort.signal });
+      const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("event stream ended");
+        buffer += value;
+        let end: number;
+        while ((end = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+          const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("");
+          if (!data) continue;
+          const event = JSON.parse(data) as { type: string; machines?: { id: string; snapshot: SessionSnapshot | null }[] };
+          const local = event.type === "machines" ? event.machines?.find((machine) => machine.id === "local")?.snapshot : null;
+          if (local && check(local)) return local;
+        }
+      }
+    } finally { clearTimeout(timer); abort.abort(); }
+  }
+
+  it("health, session, websocket and move answers share one order per server lifetime", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-order-"));
+    const state = join(root, "state");
+    const first = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-order-first" });
+    const second = await workspaceCreate({ cwd: root, label: "herdr-web-ui-test-order-second" });
+    const managedBoot = process.env["HERDR_WEB_BOOT_ID"];
+    delete process.env["HERDR_WEB_BOOT_ID"];
+    let app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state });
+    try {
+      let origin = `http://127.0.0.1:${app.port}`;
+      const health = async () => ((await (await fetch(`${origin}/api/health`)).json()) as { web_ui: { boot_id: string } }).web_ui.boot_id;
+      const session = async () => ((await (await fetch(`${origin}/api/session`)).json()) as { snapshot: SessionSnapshot }).snapshot;
+      const move = async (workspaceId: string) => {
+        const response = await fetch(`${origin}/api/workspace/move`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace_id: workspaceId, insert_index: 0 }) });
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      const boot = await health();
+      expect(boot).toEqual(expect.any(String));
+      // reads never count: two GETs, then the opening websocket snapshot, all at 0
+      expect(await session()).toMatchObject({ order_epoch: boot, read_seq: 0 });
+      expect(await session()).toMatchObject({ order_epoch: boot, read_seq: 0 });
+      const ws = new WebSocket(`ws://127.0.0.1:${app.port}/ws`);
+      const opening = await new Promise<SessionSnapshot>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("no opening snapshot")), 10_000);
+        ws.addEventListener("message", (event) => {
+          const message = JSON.parse(String(event.data)) as { type: string; snapshot?: SessionSnapshot };
+          if (message.type === "snapshot") { clearTimeout(timer); resolve(message.snapshot!); }
+        });
+      });
+      ws.close();
+      expect(opening).toMatchObject({ order_epoch: boot, read_seq: 0 });
+      expect(await move(second.workspace.workspace_id)).toEqual({ ok: true, order_epoch: boot, moved_seq: 1 });
+      expect(await session()).toMatchObject({ order_epoch: boot, read_seq: 1 });
+      const roster = machinesEvent(origin, (snapshot) => (snapshot.read_seq ?? 0) >= 2);
+      expect(await move(first.workspace.workspace_id)).toEqual({ ok: true, order_epoch: boot, moved_seq: 2 });
+      // the move's own roster read follows it: the manager's copy carries the source's pair as read
+      expect(await roster).toMatchObject({ order_epoch: boot, read_seq: 2 });
+      const machines = (await (await fetch(`${origin}/api/machines`)).json()) as { machines: { id: string; source_boot_id?: string }[]; verified_source_boot?: unknown };
+      expect(machines.machines[0]).toMatchObject({ id: "local", source_boot_id: boot });
+      expect(machines.verified_source_boot).toBeUndefined();
+      const verified = await fetch(`${origin}/api/machines?verify_source_boot=local`);
+      expect(verified.status).toBe(200);
+      expect(((await verified.json()) as { verified_source_boot: unknown }).verified_source_boot).toEqual({ machine_id: "local", boot_id: boot });
+      expect((await fetch(`${origin}/api/machines?verify_source_boot=`)).status).toBe(400);
+      expect((await fetch(`${origin}/api/machines?verify_source_boot=nobody`)).status).toBe(404);
+      // a restart is a new epoch, counted again from 0, and health says the same boot
+      app.stop();
+      app = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: state });
+      origin = `http://127.0.0.1:${app.port}`;
+      const restarted = await health();
+      expect(restarted).not.toBe(boot);
+      expect(await session()).toMatchObject({ order_epoch: restarted, read_seq: 0 });
+      expect(await move(second.workspace.workspace_id)).toEqual({ ok: true, order_epoch: restarted, moved_seq: 1 });
+    } finally {
+      app.stop();
+      if (managedBoot === undefined) delete process.env["HERDR_WEB_BOOT_ID"]; else process.env["HERDR_WEB_BOOT_ID"] = managedBoot;
+      await workspaceClose(first.workspace.workspace_id).catch(() => {});
+      await workspaceClose(second.workspace.workspace_id).catch(() => {});
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

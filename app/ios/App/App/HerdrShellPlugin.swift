@@ -24,14 +24,14 @@ public class HerdrShellPlugin: CAPPlugin, CAPBridgedPlugin {
         ])
     }
 
-    /// `url`: an http or https address; its origin is remembered, and the address itself (a
-    /// pairing link's code included) is the first page.
+    /// `url`: an http or https address; the address itself (a pairing link's code included) is the
+    /// first page. Its origin joins the saved PCs once a page of it has loaded
+    /// (NavigationFailureProxy), so an address that never answered is not kept.
     @objc func open(_ call: CAPPluginCall) {
         guard let text = call.getString("url"), let url = URL(string: text), let origin = PCStore.origin(of: url) else {
             call.reject("That is not an http or https address.")
             return
         }
-        PCStore.remember(origin)
         PCStore.current = origin
         PCStore.last = origin
         PCStore.pendingStart = text

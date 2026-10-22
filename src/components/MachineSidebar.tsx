@@ -9,12 +9,12 @@ import type { AppActions } from "../lib/actions.ts";
 import { useInstallPrompt } from "../lib/install.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import { AgentSidebar } from "./AgentSidebar.tsx";
-import { SidebarActivityProvider, useSidebarActivityState } from "../lib/sidebarActivity.tsx";
+import { SidebarActivityProvider, type SidebarActivity } from "../lib/sidebarActivity.tsx";
 import { UsageMeters } from "./UsageMeters.tsx";
 import "./Machines.css";
 import { useT } from "../lib/i18n.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
-import { saysHerdrAway } from "../lib/userError.ts";
+import { machineErrorText, saysHerdrAway } from "../lib/userError.ts";
 
 /** The PC header's state word; "connected" is the quiet default and shows as a dot alone, every other state also writes its word under the name. */
 export const STATE_WORD: Readonly<Record<MachineState, string>> = {
@@ -25,13 +25,13 @@ export const STATE_WORD: Readonly<Record<MachineState, string>> = {
   error: "Connection error",
 };
 
-interface Props { machines: Machine[]; selectedMachineId: string; selectedPaneId: string | null; presentedPaneId: string | null; paneInFront: () => boolean; actions: AppActions; onSelect(machineId: string, paneId: string | null): void; onNew(machineId: string): void; onSetup(machine: Machine, update?: boolean): void }
+/** `activity`: App's live counters per PC and finishes looked at here; both sidebar lists draw from it */
+interface Props { machines: Machine[]; selectedMachineId: string; selectedPaneId: string | null; activity: SidebarActivity; actions: AppActions; watching?: boolean; onSelect(machineId: string, paneId: string | null): void; onNew(machineId: string): void; onSetup(machine: Machine, update?: boolean): void }
 export function MachineSidebar(props: Props) {
   const t = useT();
   const { canInstall, installed, install, help } = useInstallPrompt();
   const [installHelpOpen, setInstallHelpOpen] = useState(false);
-  // both lists draw from it: live counters per PC and the finishes looked at here (lib/sidebarActivity.tsx)
-  const activity = useSidebarActivityState(props.machines, props.selectedMachineId, props.presentedPaneId, props.paneInFront);
+  const activity = props.activity;
   // the roster's wait is a live region that is in the list from its first render, clipped while empty (never
   // display: none), and its words land a frame after it (lib/useAnnouncedText.ts)
   const loadingWords = useAnnouncedText(props.machines.length === 0 ? t("Loading PCs…") : null);
@@ -112,9 +112,9 @@ function MachineGroup({ machine, ...props }: Props & { machine: Machine }) {
     </header>
     {/* connected is the norm and says nothing new; every other state is spelled out */}
     {noticed && <MachineActionNotice machine={machine} onSetup={props.onSetup} />}
-    <p className={`machine-state is-${machine.state}${online || stateWord === null ? " visually-hidden" : ""}`} role="status" title={noticed ? undefined : machine.error ?? undefined}>
+    <p className={`machine-state is-${machine.state}${online || stateWord === null ? " visually-hidden" : ""}`} role="status" title={noticed || machine.error === null ? undefined : machineErrorText(machine.error, t)}>
       <span className="machine-state-word">{stateWord}</span>
-      {!noticed && machine.error && <span className="machine-state-detail">{machine.error}</span>}
+      {!noticed && machine.error && <span className="machine-state-detail">{machineErrorText(machine.error, t)}</span>}
       {nextStep !== null && <span className="machine-state-next">{nextStep}</span>}
     </p>
     {editing && <div className="machine-controls">
@@ -130,7 +130,7 @@ function MachineGroup({ machine, ...props }: Props & { machine: Machine }) {
     </div>}
     {error && <p className="machine-error" role="alert">{error}</p>}
     {!collapsed && <div className={online ? "" : "machine-offline"} inert={!online}>
-      {!online && !machine.snapshot ? <p className="tree-state machine-empty" role="status">{t("No saved sessions")}</p> : <MachineContext.Provider value={machine.id}><Sidebar snapshot={machine.snapshot} online={online} selectedPaneId={props.selectedMachineId === machine.id ? props.selectedPaneId : null} actions={actions} /></MachineContext.Provider>}
+      {!online && !machine.snapshot ? <p className="tree-state machine-empty" role="status">{t("No saved sessions")}</p> : <MachineContext.Provider value={machine.id}><Sidebar snapshot={machine.snapshot} online={online} selectedPaneId={props.selectedMachineId === machine.id ? props.selectedPaneId : null} actions={actions} watching={props.watching} /></MachineContext.Provider>}
     </div>}
   </section>;
 }
@@ -184,16 +184,16 @@ function MachineActionNotice({ machine, onSetup }: { machine: Machine; onSetup(m
   // another app's bridge runs on this PC: neither an update from here nor an approval fixes that,
   // so it is named as what it is, with the server's reason and a plain reconnect
   if (machine.action_required === "bridge_conflict") return <div className="machine-action" role="alert">
-    <p className="machine-action-text"><strong>{t("Bridge connection conflict")}</strong><span>{t("Update the apps connected to this PC to the same version, or disconnect the other app, then reconnect here. Sessions keep running.")}</span>{machine.error && <span className="machine-action-reason">{machine.error}</span>}</p>
+    <p className="machine-action-text"><strong>{t("Bridge connection conflict")}</strong><span>{t("Update the apps connected to this PC to the same version, or disconnect the other app, then reconnect here. Sessions keep running.")}</span>{machine.error && <span className="machine-action-reason">{machineErrorText(machine.error, t)}</span>}</p>
     <button type="button" className="btn btn-primary" onClick={() => onSetup(machine, false)}>{t("Reconnect")}</button>
   </div>;
   const update = machine.action_required === "update_bridge";
   return <div className={`machine-action${update ? "" : " is-setup"}`} role={update ? "alert" : "status"}>
     <p className="machine-action-text">
       <strong>{t(update ? "Bridge update needed" : "Setup needed")}</strong>
-      <span>{t(update ? "This PC runs a bridge from a different version of herdr web ui. Update it to reconnect; herdr sessions keep running." : "Browser access uses a bridge on this PC. Review any installation or startup changes before connecting.")}</span>
+      <span>{t(update ? "This PC runs a bridge from a different version of Ovis. Update it to reconnect; herdr sessions keep running." : "Browser access uses a bridge on this PC. Review any installation or startup changes before connecting.")}</span>
       {/* the two generic reasons only repeat the sentence above */}
-      {machine.error && !/different version|setup needs approval/.test(machine.error) && <span className="machine-action-reason">{machine.error}</span>}
+      {machine.error && !/different version|setup needs approval/.test(machine.error) && <span className="machine-action-reason">{machineErrorText(machine.error, t)}</span>}
     </p>
     {update ? <div className="machine-action-buttons">
       {/* a PC saved in herdr that has not connected yet is refused a direct update: its dialog connects first */}

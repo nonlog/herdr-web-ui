@@ -1,4 +1,4 @@
-import type { CommandForm, SlashCommand } from "../shared/protocol.ts";
+import type { CommandForm, HerdrPane, SlashCommand } from "../shared/protocol.ts";
 import { AGENT_SOURCES } from "./skills/index.ts";
 import type { AgentCommandSource, ProcessRoots } from "./skills/index.ts";
 import { ancestorsToRepoRoot } from "./skills/walk.ts";
@@ -25,17 +25,40 @@ function visibility(source: AgentCommandSource, name: string): NonNullable<Slash
   return "offered";
 }
 
-export function paneCommands(agent: string | null | undefined, cwd: string | null | undefined, home = globalThis.process.env.HOME ?? "", process: ProcessRoots = {}, version?: string | null): SlashCommand[] {
+/** Static metadata only: safe on the delivery path, with no filesystem or process discovery. */
+export function builtinCommands(agent: string | null | undefined, version?: string | null): SlashCommand[] {
   if (!agent || !Object.hasOwn(AGENT_SOURCES, agent)) return [];
   const source = AGENT_SOURCES[agent];
   if (!source) return [];
   const pinned = majorMinor(source.pin);
   const verified = pinned !== null && pinned === majorMinor(version);
   const builtinNames = [...new Set([...source.builtins, ...(source.terminalBound ?? []), ...(source.agentHidden ?? [])])];
-  const builtins = new Map<string, SlashCommand>(builtinNames.map((name) => [name, {
+  return builtinNames.map((name) => ({
     name, description: source.descriptions?.[name] ?? DESCRIPTIONS[name] ?? `Run /${name}`, source: "builtin",
     forms: [...(source.forms?.[name] ?? UNKNOWN_FORMS)], visibility: visibility(source, name), provenance: { transport: "static", verified },
-  }]));
+  }));
+}
+
+const paneCatalogs = new Map<string, { identity: string; agent: string | null; commands: SlashCommand[] }>();
+const catalogIdentity = (pane: HerdrPane): string => JSON.stringify([pane.terminal_id, pane.agent_session, pane.agent, pane.foreground_cwd ?? pane.cwd]);
+
+/** Remember only catalogs already requested by the browser; never discover during a send. */
+export function rememberPaneCommands(pane: HerdrPane, agent: string | null, commands: SlashCommand[]): void {
+  paneCatalogs.delete(pane.pane_id);
+  paneCatalogs.set(pane.pane_id, { identity: catalogIdentity(pane), agent, commands });
+  if (paneCatalogs.size > 128) paneCatalogs.delete(paneCatalogs.keys().next().value!);
+}
+
+export function cachedPaneCommands(pane: HerdrPane): { agent: string | null; commands: SlashCommand[] } | undefined {
+  const cached = paneCatalogs.get(pane.pane_id);
+  return cached?.identity === catalogIdentity(pane) ? cached : undefined;
+}
+
+export function paneCommands(agent: string | null | undefined, cwd: string | null | undefined, home = globalThis.process.env.HOME ?? "", process: ProcessRoots = {}, version?: string | null): SlashCommand[] {
+  if (!agent || !Object.hasOwn(AGENT_SOURCES, agent)) return [];
+  const source = AGENT_SOURCES[agent];
+  if (!source) return [];
+  const builtins = new Map(builtinCommands(agent, version).map((command) => [command.name, command]));
   const ancestors = cwd ? ancestorsToRepoRoot(cwd) : [];
   const discovered = source.discover({ home, cwd, repoRoot: ancestors.at(-1) ?? null, env: process.environ ?? null, roots: process, version });
   const commands: SlashCommand[] = [];

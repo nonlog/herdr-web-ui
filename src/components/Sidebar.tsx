@@ -1,12 +1,12 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type AnimationEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
-import { ChevronDown, ChevronRight, Ellipsis, Folder, FolderOpen, GitBranch, Layers, ListChecks, Pencil, Pin, PinOff, Plus, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Ellipsis, Folder, FolderOpen, GitBranch, History, Layers, ListChecks, Pencil, Pin, PinOff, Plus, Terminal, Trash2, TriangleAlert, X } from "lucide-react";
 
 import "./Sidebar.css";
 
 import type { AgentStatus, PaneInfo, PlanSummary, SessionSnapshot, WorkspaceInfo } from "../../shared/protocol.ts";
 import { paneTitle } from "../../shared/notify-policy.ts";
 import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
-import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
+import { useMachineApi, useMachineId, useReorderCoordinator } from "../lib/machineContext.tsx";
 import type { AppActions } from "../lib/actions.ts";
 import { indicatorGlyph, knownStatus, rollupStatus, STATUS_WORD } from "../lib/status.ts";
 import { AgentMark } from "./AgentMark.tsx";
@@ -25,6 +25,7 @@ import { useSettings } from "../lib/settings.ts";
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { useWorktreeBranches } from "../lib/useWorktreeBranches.ts";
+import { useSessionHistoryOffered } from "../lib/useSessionHistoryOffered.ts";
 import { watchTouchReorder } from "../lib/touchReorder.ts";
 import { placeBlock, workspaceMoves, worktreeGroups as groupWorktrees } from "../lib/workspaceOrder.ts";
 import { worktreeLabel } from "../lib/worktreeName.ts";
@@ -175,19 +176,23 @@ export interface SidebarProps {
   online: boolean;
   selectedPaneId: string | null;
   actions: AppActions;
+  /** this device only watches: the row's menu offers no earlier sessions, which the server refuses it */
+  watching?: boolean;
 }
 
 /**
  * Spaces follow herdr's workspace roster. A workspace opens its current pane; tabs and split
  * panes are navigated through the tab strip, while Agents is an independent API-backed list.
  */
-export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarProps) {
+export function Sidebar({ snapshot, online, selectedPaneId, actions, watching = false }: SidebarProps) {
   const t = useT();
   const { settings } = useSettings();
   const twoLine = settings.sidebarRows === "two";
   const machineId = useMachineId();
   const activity = useSidebarActivity();
   const { closeWorkspace, listWorktrees, moveWorkspace, removeWorktree, renameWorkspace } = useMachineApi();
+  // the row menu's Earlier sessions needs the PC's bridge to list them (lib/useSessionHistoryOffered.ts)
+  const historyOffered = useSessionHistoryOffered(online);
   // the roster's wait is a live region in the list from its first render, clipped while empty (never
   // display: none); its words land a frame after it (lib/useAnnouncedText.ts)
   const loadingWords = useAnnouncedText(snapshot ? null : t("Loading workspaces…"));
@@ -218,7 +223,12 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
   const [worktreeDialog, setWorktreeDialog] = useState<{ mode: WorktreeDialogMode; workspace: WorkspaceInfo } | null>(null);
   const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null);
   const [workspaceLabel, setWorkspaceLabel] = useState("");
-  const [workspaceOrder, setWorkspaceOrder] = useState<string[]>([]);
+  // the order App's coordinator draws: herdr's, or a drag's until a roster read after its moves comes
+  const reorder = useReorderCoordinator();
+  const orderVersion = useSyncExternalStore(reorder.subscribe, reorder.version, reorder.version);
+  const workspaceOrder = useMemo(() => snapshot ? reorder.order(machineId, snapshot.workspaces.map((workspace) => workspace.workspace_id)) : [],
+    // orderVersion: the coordinator's order changed
+    [reorder, orderVersion, machineId, snapshot]);
   const [dragWorkspaceId, setDragWorkspaceId] = useState<string | null>(null);
   // a finger's drag (lib/touchReorder.ts): the row it holds and the row it is over
   const [touchDrag, setTouchDrag] = useState<{ source: string; over: string | null } | null>(null);
@@ -257,12 +267,7 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
   }, [inlineError]);
 
   useEffect(() => {
-    if (!snapshot) {
-      setWorkspaceOrder([]);
-      return;
-    }
-    const serverOrder = snapshot.workspaces.map((workspace) => workspace.workspace_id);
-    setWorkspaceOrder((current) => current.join("\u0000") === serverOrder.join("\u0000") ? current : serverOrder);
+    if (!snapshot) return;
     // New worktree groups bring their stored fold state after reconnecting or creating a workspace.
     setCollapsedWorktrees((current) => {
       const keys = snapshot.workspaces.flatMap((workspace) => workspace.worktree && !current.has(workspace.worktree.repo_key) ? [workspace.worktree.repo_key] : []);
@@ -413,6 +418,8 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
         ? { id: "unpin-workspace", label: t("Unpin workspace"), icon: PinOff, run: () => togglePin(state) }
         : { id: "pin-workspace", label: t("Pin workspace"), icon: Pin, run: () => togglePin(state) },
       { id: "rename-workspace", label: t("Rename workspace"), icon: Pencil, run: () => beginWorkspaceRename(workspace) },
+      // the folder's earlier sessions, listed for the agent of the pane the row opens
+      ...(historyOffered && !watching ? [{ id: "session-history", label: t("Earlier sessions…"), icon: History, run: () => actions.openSessionHistory({ machineId, workspaceId: workspace.workspace_id, agent: (panes.length > 0 ? currentPane(workspace, panes) : null)?.agent ?? null }) }] : []),
       { ...closeItem, label: t(sameRepo.length > 0 ? "Close group" : "Close workspace"), divider: false },
       ...worktreeItems, ...deleteItems,
       ...(worktrees.length > 0 && repoKey ? [{ id: "fold", label: t(folded ? "Expand" : "Collapse"), icon: folded ? ChevronRight : ChevronDown, run: () => setWorktreeCollapsed(repoKey, !folded) }] : []),
@@ -461,16 +468,9 @@ export function Sidebar({ snapshot, online, selectedPaneId, actions }: SidebarPr
   };
 
   const reorderWorkspaces = (next: string[]): void => {
-    const previous = workspaceOrder;
-    const moves = workspaceMoves(previous, next);
-    if (moves.length === 0) return;
-    setWorkspaceOrder(next);
-    void (async () => {
-      for (const move of moves) await moveWorkspace(move.workspaceId, move.insertIndex);
-    })().catch((reason: unknown) => {
-      // only this move's own optimistic order is rolled back: if a later reorder has landed in
-      // the meantime, its order is the newer one and reverting to `previous` would undo it
-      setWorkspaceOrder((current) => (current.length === next.length && current.every((id, index) => id === next[index]) ? previous : current));
+    if (workspaceMoves(workspaceOrder, next).length === 0) return;
+    // shown at once; only the newest reorder of this PC rolls back or reports its own failure
+    reorder.reorder(machineId, workspaceOrder, next, (move) => moveWorkspace(move.workspaceId, move.insertIndex)).catch((reason: unknown) => {
       const failure = userErrorMessage(reason);
       noteError(t("Reorder failed: {reason}", { reason: failure.message }), undefined, failure.detail);
     });

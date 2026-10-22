@@ -24,6 +24,7 @@ import { checkCtrlEnter } from "./terminal-ctrl-enter-regression.ts";
 import { checkCommandArrows } from "./terminal-command-arrows-regression.ts";
 import { checkFolderFilter, checkNewFolder } from "./folder-filter-regression.ts";
 import { checkPaletteKeys } from "./palette-keys-regression.ts";
+import { checkFollowHerdrFocus } from "./follow-focus-regression.ts";
 import { UsageService } from "../server/usage.ts";
 import { openSettingsPage } from "./settings-page.ts";
 import { assertCspClean, watchCsp } from "./csp-violations.ts";
@@ -317,6 +318,7 @@ try {
   await page.setViewportSize(paletteViewport);
   console.log("PASS palette buttons keep native Enter, IME keeps its keys, and arrow selection stays visible on short desktop and phone lists");
   await checkPaletteKeys(page, { workspaceId: workspaces[1]! });
+  await checkFollowHerdrFocus(page, { workspaceId: workspaces[1]! });
 
   // Hold a real machines response, then deliver a newer status through herdr/SSE.
   const badge = page.locator(".pane-item.is-selected .badge");
@@ -1553,7 +1555,7 @@ try {
   const repoMenu = page.getByRole("menu");
   await repoMenu.waitFor();
   const repoActions = await repoMenu.getByRole("menuitem").allTextContents();
-  assert.deepEqual(repoActions, ["Pin workspace", "Rename workspace", "Close group", "New worktree", "Open worktree…", "Expand"],
+  assert.deepEqual(repoActions, ["Pin workspace", "Rename workspace", "Earlier sessions…", "Close group", "New worktree", "Open worktree…", "Expand"],
     "a folded repository group has native workspace and worktree actions");
   await page.keyboard.press("Escape");
   await repoMenu.waitFor({ state: "detached" });
@@ -1682,7 +1684,7 @@ try {
   const childMenu = page.getByRole("menu");
   await childMenu.waitFor();
   const childActions = await childMenu.getByRole("menuitem").allTextContents();
-  assert.deepEqual(childActions, ["Pin workspace", "Rename workspace", "Close workspace", "Delete worktree checkout…"], "a worktree workspace's menu");
+  assert.deepEqual(childActions, ["Pin workspace", "Rename workspace", "Earlier sessions…", "Close workspace", "Delete worktree checkout…"], "a worktree workspace's menu");
   await page.keyboard.press("Escape");
   await childMenu.waitFor({ state: "detached" });
   await childHeader.locator(".workspace-select").click({ button: "right" });
@@ -2369,7 +2371,7 @@ try {
   const rowMenu = page.getByRole("menu");
   await rowMenu.waitFor();
   const rowActions = await rowMenu.getByRole("menuitem").allTextContents();
-  assert.deepEqual(rowActions, ["Pin workspace", "Rename workspace", "Close workspace"], "the workspace menu keeps workspace scope");
+  assert.deepEqual(rowActions, ["Pin workspace", "Rename workspace", "Earlier sessions…", "Close workspace"], "the workspace menu keeps workspace scope");
   // Escape puts the menu away and the focus back on the row
   await page.keyboard.press("Escape");
   await rowMenu.waitFor({ state: "detached" });

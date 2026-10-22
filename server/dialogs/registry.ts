@@ -1,8 +1,8 @@
 import { readers } from "./index.ts";
 import { claudeModelListWaits, CLAUDE_EFFORT_GUARD_RE } from "./claude.ts";
 import { codexModelListWaits } from "./codex.ts";
-import type { OmoAsk, ParsedPrompt } from "./shared.ts";
-import type { InteractionPlan } from "./interaction-plan.ts";
+import type { DialogReader, OmoAsk } from "./shared.ts";
+export type { DialogReader } from "./shared.ts";
 
 export interface ReaderContext {
   agent: string;
@@ -13,16 +13,6 @@ export interface ReaderContext {
   working: boolean;
   /** Fallback cards are read only after the caller knows the pane is blocked. */
   fallback?: boolean;
-}
-
-export interface DialogReader {
-  id: string;
-  agents: readonly string[];
-  priority: number;
-  parse(screen: string, ctx: ReaderContext): ParsedPrompt | null;
-  reread: "before-commit" | "none";
-  list: "none" | "letter-window" | "slider";
-  interaction?(parsed: ParsedPrompt): InteractionPlan;
 }
 
 export function readersFor(agent: string): readonly DialogReader[] {

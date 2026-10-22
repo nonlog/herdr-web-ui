@@ -1,9 +1,10 @@
 # Native app plan
 
-Status: Phase 1 step 2 built and checked in a simulator (2026-10-19). Branch `feat/native-app`.
-To run it, see [The app (app/)](#the-app-app).
+Status: Phase 1 step 2 built for iOS (checked in a simulator) and Android (checked in an emulator),
+2026-10-19. To run them, see [The app (app/)](#the-app-app) and
+[The Android app](#the-android-app).
 
-herdr-web-ui ships as a store app for iOS first, Android later. The goal is reach: the app is
+Ovis ships as a store app for iOS first, Android later. The goal is reach: the app is
 found in the App Store and installs in one tap, where the web app needs "Add to Home Screen". It
 also opens the door to features a home-screen web app cannot have.
 
@@ -21,7 +22,7 @@ also opens the door to features a home-screen web app cannot have.
 ## How it fits
 
 ```
-PC: herdr-web-ui server ──UI, API, WebSocket──▶ app WebView (the same client as the browser)
+PC: Ovis server ──UI, API, WebSocket──▶ app WebView (the same client as the browser)
 PC: server/push.ts ──encrypted push──▶ relay (Cloudflare Worker) ──▶ APNs ──▶ app
 ```
 
@@ -77,7 +78,8 @@ account. Android (FCM) gets a second route in the same Worker later.
 
 - Live Activity for a running agent, home-screen widgets (both need Swift, and pushes through
   the same relay).
-- Android build and the FCM route.
+- The FCM route for Android pushes. The Android app itself exists already (see
+  [The Android app](#the-android-app)): the maintainer tests on a Galaxy, not an iPhone.
 - Speed: measure what is slow before changing anything; bundling the UI in the app is off the
   table while the PC serves it.
 
@@ -147,7 +149,13 @@ What is there:
 
 - `app/web`: the app's own pages. `index.html` is the connect screen: an address field, Scan QR
   code, the PCs opened before, and Try the demo. `error.html` is shown when a PC cannot be
-  reached, with Try again and Change PC. They are in English only for now.
+  reached, with Try again and Change PC. Both are in English and Korean: an element's
+  `data-ko` attribute holds its Korean text, put in when the phone's first language is Korean
+  (`localize()` in `shell.js`; `error.html` carries its own copy, as it stands alone on Android).
+  The iOS app lists `ko` in `CFBundleLocalizations`, without which its web view reports English
+  to every page, the client included.
+- A PC joins the list of PCs only once a page of it has loaded, so an address that never
+  answered is not kept.
 - `app/scripts/build-web.ts` (`bun run build:web` in `app/`) puts those pages and the demo,
   built from this checkout's client, into `app/www` for Capacitor to copy.
 - `app/ios/App/App/HerdrBridgeViewController.swift`: a Capacitor view controller that opens the
@@ -160,8 +168,15 @@ What is there:
   - Settings → Phone & devices has a Change PC row, and so does the pairing screen (a PC that
     asks for pairing would otherwise leave the app no way out).
   - The app counts as installed, so Install app is not offered.
-- The bundle ID is `dev.herdr.app` and the name is herdr, both placeholders until the store
-  listing.
+- The app is called Ovis (Latin for sheep, the herd herdr tends). Other apps in both stores are
+  already named Ovis, so the store listing can say "Ovis for herdr". The project owns `ovis.sh`,
+  so the bundle ID and Android application ID are `sh.ovis.app`.
+- The icon is a cream sheep with closed eyes on a navy tile (`#2E3A59`), cut from the Figma
+  logo drafts; `app/assets/ovis-sheep.png` is the sheep alone. The connect screen shows the
+  logo, the sheep beside the word Ovis (`app/web/ovis-logo.png`). The PNGs in `app/assets` are
+  the sources for both platforms' icons and splash screens. After changing them, run
+  `npx @capacitor/assets generate --ios --android --iconBackgroundColor '#2E3A59' --splashBackgroundColor '#12100e'`
+  in `app/`, and put back `AndroidManifest.xml` if the tool reformatted it.
 
 Build and run it on a Mac with Xcode:
 
@@ -205,18 +220,93 @@ tests, and the server then falls back to the default session, the user's. Preloa
 
 Still open:
 
-- **A plain `http://` PC loads about 1.5-2 s slower in the app than an `https` one.** In the
-  app, the client's first script ran 1429-2075 ms after navigation start over
-  `http://<tailscale ip>`. Over `https` through `tailscale serve` it ran at 39-51 ms, and Safari
-  on the same `http` address took 100 ms. The cause is not App Transport Security
-  (`NSAllowsArbitraryLoads` changed nothing) and not WebKit's https-first upgrade (turning it
-  off changed nothing either). It happens whether the PC opens at launch or from the connect
-  screen. The connect screen suggests https meanwhile.
+- **A plain `http://` PC loads about 1.9 s slower than an `https` one, in Safari too.**
+  Measured on 2026-10-20 by wall clock, from the moment the server got the page's request to
+  the page's first script, on one Mac's clock: 1.9 s over `http` (an IP or a MagicDNS name
+  alike) and 44 ms over `https` through `tailscale serve`, in the app and in the simulator's
+  Mobile Safari alike; a macOS `WKWebView` took 220 ms and 11 ms. Navigation timing hides the
+  wait (it starts after it), which is why an earlier note had Safari at 100 ms. It is WebKit's
+  plain-http path, not the app: it is not App Transport Security, not the https-first upgrade
+  (no TLS attempt reached the port, and serving 443 changed nothing), and not Safe Browsing
+  (`isFraudulentWebsiteWarningEnabled = false` changed nothing). The connect screen suggests
+  https, on iOS only: Android has no such delay.
 - Each Change PC leaves one blank web view behind: the old page is unloaded, so nothing stays
-  connected to the PC, but Capacitor's bridge keeps the view itself.
-- An address that failed still joins the list of PCs.
+  connected to the PC, but the old view controller and its `WKWebView` stay in memory. Taking
+  away the content controller's handlers and user scripts, the first responder and the view
+  from its superview did not free them (checked with `leaks --traceTree` on the simulator);
+  what holds them is inside Capacitor or UIKit and is not found yet.
 - Not tried: QR scanning (needs a camera), keyboard and IME in the app, a physical iPhone,
   Release signing.
+
+## The Android app
+
+The same `app/` pages and client run in Capacitor's Android shell (`app/android`). The native
+pieces are the Java twins of the iOS ones, in `app/android/app/src/main/java/sh/ovis/app`:
+
+- `MainActivity` builds Capacitor's config at runtime when a PC is chosen. It sets
+  `setServerUrl` to the PC's bare origin (a pairing link's path and query come in through
+  `setStartPath`) and `setErrorPath("error.html")`. It sets no `allowNavigation`: Capacitor turns
+  each entry into another origin for its bridge, and the PC's own links stay in the WebView anyway.
+  Opening or leaving a PC starts the activity again, so the next page is a first load and the
+  old WebView goes with the old activity.
+- `onPause` flushes WebView cookies. Without it, a pairing made a moment before the app was
+  swiped away was lost: the next start asked for pairing again.
+- `HerdrShellPlugin` and `PCStore` (SharedPreferences) mirror the iOS plugin and store. As on
+  iOS, a pairing link stays in memory until a PC page loads.
+- Capacitor injects its bridge only into the PC's origin, so `error.html`, served from the app
+  alone, gets none. `MainActivity` hands that page a small `HerdrErrorPage` JavaScript interface
+  for Try again and Change PC. For the same reason `error.html` carries its own style and
+  script, which `app/scripts/build-web.ts` inlines.
+- The manifest allows cleartext http (a tailnet or LAN IP). `minSdkVersion` is 26 (Android 8),
+  which the QR scanner's library needs.
+- `build-web.ts` leaves out the client build's `.gz` and `.br` sidecars. The app reads files
+  itself, and Android's asset merger takes `x.js` and `x.js.gz` for one asset.
+
+Build and install, on a PC with the Android SDK and JDK 21:
+
+```bash
+bun install && cd app && bun install
+bun run build:web && bunx cap sync android
+cd android && ANDROID_HOME=~/Android/Sdk ./gradlew assembleDebug
+# app/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+For Google Play, `./gradlew bundleRelease` makes `app/build/outputs/bundle/release/app-release.aab`.
+It is signed with the upload key when `OVIS_UPLOAD_PROPERTIES` names a properties file holding
+`storeFile`, `storePassword`, `keyAlias` and `keyPassword`; the key and that file stay outside
+the repository (the maintainer's are in `~/.config/ovis-android`, mode 700). Without it the bundle
+is unsigned. Raise `versionCode` in `app/build.gradle` for every upload.
+
+To put the APK on a phone in the tailnet, use `tailscale file cp app-debug.apk <phone>:`, then
+open it from the phone's Tailscale app. With USB, `adb install -r app-debug.apk` works too. A
+debug APK asks to allow installs from that source.
+
+What was checked on 2026-10-19, on an Android 16 (API 36) emulator against a server on an
+isolated herdr session. Taps and typing were real touches through `adb shell input`; the pages
+were read through the WebView's DevTools socket (`webview_devtools_remote_<pid>`):
+
+- The first start shows the connect screen. Typing the server's address and tapping Open loads
+  the client with Capacitor's bridge (`getPlatform()` is `android`).
+- With the gate closed, the pairing screen shows Change PC. A pairing link typed into the
+  connect screen paired the app. After Home, a force stop and a new start, the client opened
+  without asking again.
+- Settings → Phone & devices shows Change PC; tapping it returns to the connect screen with the
+  PC kept.
+- Try the demo opens the bundled demo; all 14 of its requests stayed on `https://localhost`.
+- A closed port shows `error.html` naming the PC. Try again after the port opened requested
+  `/?pair=123456`, and opening the PC again afterwards requested `/`.
+- No http delay on Android. The client's first script ran 10-60 ms after its HTML arrived, over
+  `http` (first script at 322-584 ms) and `https` (463-874 ms) alike. Most of that time is the
+  emulator's network.
+
+Still open on Android:
+
+- The emulator showed the status bar as a white strip above the dark app. On a Galaxy Z Flip6 it
+  looks right.
+- On Android 12 and later, the system's launch screen shows the icon on a light background
+  before the dark app.
+- `error.html` shows no reason, as Android's error callback gives Capacitor's listeners none.
+- QR scanning and IME were not tried in the emulator; a physical phone should check them.
 
 ## Risks and open questions
 
@@ -231,6 +321,6 @@ Still open:
   Transport Security exception that review must accept. `https` through `tailscale serve` needs
   none.
 - Several PCs: the app should list them, as the remote PCs feature does in the browser.
-- Not decided: the relay's domain, the bundle ID and the app's store name.
+- Not decided: the relay's domain. The app is Ovis, with the ID `sh.ovis.app`.
 - The macbook is shared with other sessions (a ChatGPT CUA was running on 2026-10-18): check it
   is free before booting a simulator there.

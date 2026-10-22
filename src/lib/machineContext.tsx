@@ -1,9 +1,13 @@
 import { createContext, useContext, useMemo } from "react";
 import * as api from "./api.ts";
-import type { CreateWorktreeRequest, OpenWorktreeRequest, PaneDirection, PluginActionRequest, RemoveWorktreeRequest, SplitPaneDirection } from "../../shared/protocol.ts";
+import type { CreateWorktreeRequest, OpenWorktreeRequest, PaneDirection, PluginActionRequest, RemoveWorktreeRequest, SessionHistoryAgent, SplitPaneDirection } from "../../shared/protocol.ts";
 import type { ZoomMode } from "./layoutMap.ts";
+import { ReorderCoordinator } from "./workspaceOrder.ts";
 export const MachineContext = createContext("local");
 export const useMachineId = () => useContext(MachineContext);
+/** App's workspace order for every PC (lib/workspaceOrder.ts); a Sidebar outside App gets its own */
+export const ReorderContext = createContext(new ReorderCoordinator());
+export const useReorderCoordinator = () => useContext(ReorderContext);
 /** Bound functions retain their owner across an async upload or a fast PC switch. */
 export function useMachineApi() {
   const id = useMachineId();
@@ -16,6 +20,7 @@ export function useMachineApi() {
     answerPanePrompt: (answer: Parameters<typeof api.answerPanePrompt>[0]) => api.answerPanePrompt(answer, id),
     uploadPaneImage: (pane: string, image: Blob) => api.uploadPaneImage(pane, image, id),
     fetchPaneCommands: (pane: string) => api.fetchPaneCommands(pane, id),
+    fetchAgentCommands: (agent: string, cwd: string | null) => api.fetchAgentCommands(agent, cwd, id),
     fetchPaneFiles: (pane: string, query: string, limit = 20) => api.fetchPaneFiles(pane, query, limit, id),
     findPane: (request: Parameters<typeof api.findPane>[0]) => api.findPane(request, id),
     fetchPaneScroll: (pane: string) => api.fetchPaneScroll(pane, id),
@@ -50,6 +55,8 @@ export function useMachineApi() {
     fetchRepoDiffFile: (query: api.RepoDiffQuery, path: string, oldPath: string | null) => api.fetchRepoDiffFile(query, path, oldPath, id),
     createWorkspace: (request: api.CreateWorkspaceRequest) => api.createWorkspace(request, id),
     createTab: (request: api.CreateTabRequest) => api.createTab(request, id),
+    fetchSessionHistory: (workspace: string, agent: SessionHistoryAgent) => api.fetchSessionHistory(workspace, agent, id),
+    sessionHistoryOffered: () => api.sessionHistoryOffered(id),
     renameTab: (tab: string, label: string) => api.renameTab(tab, label, id),
     closeTab: (tab: string) => api.closeTab(tab, id),
     moveTab: (tab: string, index: number) => api.moveTab(tab, index, id),

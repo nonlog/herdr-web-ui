@@ -226,11 +226,19 @@ describe("omp builtin registry", () => {
     for (const name of ["compact", "btw", "handoff", "todo", "export", "switch"]) expect(source.terminalBound).not.toContain(name);
   });
 
-  it("gives model, handoff and btw their own forms", () => {
-    // #1377's /switch reader is not on this base, so a bare /model names no dialog yet.
-    expect(source.forms?.model).toEqual([{ match: "bare", interaction: "unknown" }, { match: "other", interaction: "none" }]);
-    expect(source.forms?.handoff).toEqual([{ match: "bare", interaction: "unknown" }]);
-    expect(source.forms?.btw).toEqual([{ match: "bare", interaction: "none" }, { match: "other", interaction: "none" }]);
+  it("gives model, switch, handoff and btw their own forms", () => {
+    // a bare /model reaches omp as /switch, whose session-only picker the omp-model card answers
+    expect(source.forms?.model).toEqual([{ match: "bare", interaction: "dialog", dialog: "omp-model" }, { match: "other", interaction: "none" }]);
+    expect(source.forms?.switch).toEqual(source.forms?.model);
+    expect(source.forms?.handoff).toEqual([
+      { match: "bare", interaction: "dialog", dialog: "omp-handoff" }, { match: "other", interaction: "dialog", dialog: "omp-handoff" },
+    ]);
+    // bare opens the BTW history overlay; a question is answered beside the editor
+    expect(source.forms?.btw).toEqual([{ match: "bare", interaction: "terminal" }, { match: "other", interaction: "none" }]);
+    expect(source.forms?.modelpreset).toEqual([{ match: "bare", interaction: "terminal" }, { match: "other", interaction: "none" }]);
+    expect(source.forms?.move).toEqual([{ match: "bare", interaction: "terminal" }, { match: "other", interaction: "terminal" }]);
+    expect(source.forms?.todo).toContainEqual({ match: { sub: "edit" }, interaction: "terminal" });
+    expect(source.forms?.advisor).toContainEqual({ match: { sub: "configure" }, interaction: "terminal" });
     expect(source.pin).toBe("18.12.3");
   });
 

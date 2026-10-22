@@ -1,7 +1,7 @@
-# herdr web ui
+# Ovis
 
 <p align="center">
-  <img src="public/icons/icon-192.png" alt="herdr web ui" width="100">
+  <img src="public/icons/icon-192.png" alt="Ovis" width="100">
 </p>
 
 <p align="center">
@@ -118,7 +118,7 @@ herdr plugin install devswha/herdr-web-ui
 
 오래된 herdr는 먼저 업데이트하고 다시 시작해야 합니다. 단계별 설치와 문제 해결은 [INSTALL.md](INSTALL.md)를 보세요.
 
-herdr가 실행 중이면 설치 스크립트가 출력하거나 열어 준 주소로 접속하세요. 기본 주소는 **[127.0.0.1:7317](http://127.0.0.1:7317)**이며, 기본 포트가 사용 중이면 플러그인이 다른 포트를 골라 기억합니다. 플러그인만 설치했다면 herdr의 **Start herdr web ui**를 실행하세요. 데스크톱이 있는 PC의 새 설치에서는 브라우저가 자동으로 열립니다. 주소 표시줄의 **설치(Install)**로 앱을 추가하고 같은 주소를 계속 쓰세요. `127.0.0.1`과 `localhost`는 브라우저에서 서로 다른 앱 주소입니다. 자동 열기를 건너뛰려면 설치 전에 `HERDR_WEB_NO_OPEN=1`을 설정하세요. pane을 고르거나 **New workspace**로 에이전트를 시작합니다. 폰에서는 설치 스크립트의 QR 코드(herdr의 **Phone setup**에서도 확인 가능)를 찍고 앱을 홈 화면에 추가하세요. [빠른 시작 →](docs/guide.md#quick-start)
+herdr가 실행 중이면 설치 스크립트가 출력하거나 열어 준 주소로 접속하세요. 기본 주소는 **[127.0.0.1:7317](http://127.0.0.1:7317)**이며, 기본 포트가 사용 중이면 플러그인이 다른 포트를 골라 기억합니다. 플러그인만 설치했다면 herdr의 **Start Ovis**를 실행하세요. 데스크톱이 있는 PC의 새 설치에서는 브라우저가 자동으로 열립니다. 주소 표시줄의 **설치(Install)**로 앱을 추가하고 같은 주소를 계속 쓰세요. `127.0.0.1`과 `localhost`는 브라우저에서 서로 다른 앱 주소입니다. 자동 열기를 건너뛰려면 설치 전에 `HERDR_WEB_NO_OPEN=1`을 설정하세요. pane을 고르거나 **New workspace**로 에이전트를 시작합니다. 폰에서는 설치 스크립트의 QR 코드(herdr의 **Phone setup**에서도 확인 가능)를 찍고 앱을 홈 화면에 추가하세요. [빠른 시작 →](docs/guide.md#quick-start)
 
 서버는 기본적으로 `127.0.0.1`에서만 받습니다. 다른 기기에서 접속하려면 [폰 설정](docs/guide.md#on-your-phone)과 [접근과 보안](docs/guide.md#access-and-safety)을 보세요.
 

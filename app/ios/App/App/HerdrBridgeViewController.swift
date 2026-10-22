@@ -141,8 +141,11 @@ final class NavigationFailureProxy: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         inner?.webView?(webView, didFinish: navigation)
-        // the PC's page is up: a pairing link has done its work
-        if let scheme = webView.url?.scheme, scheme == "http" || scheme == "https" { PCStore.pendingStart = nil }
+        // the PC's page is up: a pairing link has done its work, and the PC is one worth keeping
+        if let url = webView.url, let origin = PCStore.origin(of: url), origin == PCStore.current {
+            PCStore.pendingStart = nil
+            PCStore.remember(origin)
+        }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

@@ -40,9 +40,9 @@ describe("Hermes commands", () => {
     for (const name of ["new", "status", "clear", "reset", "prompt", "compose", "voice", "login", "tasks", "reload_skills"]) expect(names.has(name)).toBeTrue();
     for (const name of ["start", "topic", "pause", "approve", "deny", "sethome", "set-home", "commands", "restart", "platform"]) expect(names.has(name)).toBeFalse();
     for (const name of ["model", "resume", "sessions", "config", "agents", "plugins", "skills", "skin"]) expect(names.has(name)).toBeTrue();
-    expect(source.forms?.status).toEqual([{ match: "bare", interaction: "unknown" }]);
-    for (const name of ["help", "version", "profile", "reload-skills"]) {
-      expect(source.forms?.[name]).toEqual([{ match: "bare", interaction: "unknown" }]);
+    for (const [name, dialog] of [["help", "hermes-help"], ["status", "hermes-status"], ["version", "hermes-version"], ["v", "hermes-version"],
+      ["profile", "hermes-profile"], ["reload-skills", "hermes-reload-skills"], ["reload_skills", "hermes-reload-skills"]]) {
+      expect(source.forms?.[name!]).toEqual([{ match: "bare", interaction: "dialog", dialog }]);
     }
     expect(rows.find((command) => command.name === "reset")?.description).toBe(rows.find((command) => command.name === "new")?.description);
   });
@@ -182,8 +182,23 @@ describe("Hermes commands", () => {
     ]);
   });
 
-  it("declares formerly terminal-bound builtins in the scanner source", () => {
-    expect(source.terminalBound).toEqual(["model", "resume", "sessions", "config", "agents", "plugins", "skills", "skin"]);
+  it("declares formerly terminal-bound builtins and the screens that wait for a key in the scanner source", () => {
+    expect(source.terminalBound).toEqual(["model", "resume", "sessions", "config", "agents", "plugins", "skills", "skin",
+      "reload-mcp", "reload_mcp", "update", "undo", "prompt", "compose", "palette", "tasks", "journey", "learning", "memory-graph",
+      "subscription", "upgrade", "topup", "login", "debug"]);
+  });
+
+  it("keeps new, reset and clear in the terminal unless they are told to skip the confirmation", () => {
+    const rows = fixture().commands();
+    for (const name of ["new", "reset", "clear"]) {
+      expect(rows.find((command) => command.name === name)?.forms).toEqual([
+        { match: "bare", interaction: "terminal" },
+        { match: { sub: "now" }, interaction: "none" }, { match: { sub: "--yes" }, interaction: "none" }, { match: { sub: "-y" }, interaction: "none" },
+        { match: "other", interaction: "terminal" },
+      ]);
+    }
+    expect(source.forms?.curator).toContainEqual({ match: { sub: "purge" }, interaction: "terminal" });
+    expect(source.forms?.curator?.[0]).toEqual({ match: "bare", interaction: "unknown" });
   });
 
   it("emits former screen commands as terminal-visible catalog rows", () => {
@@ -196,10 +211,10 @@ describe("Hermes commands", () => {
     }
   });
 
-  it("compiles Hermes status to its registered unknown bare form", () => {
+  it("compiles Hermes status to its result reader's bare dialog form", () => {
     const f = fixture();
     expect(f.commands().find((command) => command.name === "status")).toMatchObject({
-      forms: [{ match: "bare", interaction: "unknown" }],
+      forms: [{ match: "bare", interaction: "dialog", dialog: "hermes-status" }],
     });
   });
 });
