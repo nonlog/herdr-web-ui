@@ -212,9 +212,15 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *  POST   /api/layout/ratio { tab_id, path: boolean[], ratio } -> { ok: true }
  *         (layout.set_split_ratio: a split in that tab, root at [], false follows the first child,
  *         true the second; finite ratio in 0.1..0.9; an absent split answers split_not_found)
- *  POST   /api/pane/image  { pane_id, content_type, data_base64 } -> { ok: true, path }
+ *  POST   /api/pane/image  { pane_id, content_type, data_base64, name? } -> { ok: true, path }
  *         pasted image -> file under <pane cwd>/.herdr-web-ui/ (under HERDR_WEB_PASTE_DIR when the
- *         server's environment sets it), path for the prompt
+ *         server's environment sets it), path for the prompt. An image/png, image/jpeg, image/gif or
+ *         image/webp upload is named paste-<stamp>.<png|jpg|gif|webp> after the signature of its
+ *         bytes, whichever of the four it claims; bytes with none of those signatures answer 400
+ *         invalid_image ("file does not contain a supported raster image", never the upload's name
+ *         or content) before the pane is looked up or anything is written. A signature check, not
+ *         a decode. Any other type keeps its sanitised `name` (.bin without a usable extension).
+ *         empty_image 400 and image_too_large 413 are checked first.
  *  GET    /api/pane/commands?pane_id=   -> { commands: SlashCommand[] } (the agent's slash
  *         commands: built-ins per agent kind + the user's and the project's custom commands)
  *  GET    /api/pane/omo-tasks?pane_id=  -> OmoActivity (the background tasks and workflows the

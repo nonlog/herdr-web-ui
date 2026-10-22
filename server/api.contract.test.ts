@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeAll, afterAll, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
-import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { ConversationMonitor } from "./conversation-monitor.ts";
 import { createServer } from "./index.ts";
 import type { AgentKind, AgentStatus, ApiError, HealthAuth, IntegrationsResponse, LanExposure, PortalStatus, PushKey, RemoteAccess, SessionSnapshot, TabMoved, PaneFindResponse, PaneReadResult, UsageReport, WorkspaceCreated, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../shared/protocol.ts";
@@ -2006,6 +2006,73 @@ describe("POST /api/pane/image", () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: { code: string; message: string } };
     expect(body.error.code).toBe("pane_not_found");
+  });
+
+  const bytes = (...parts: (string | number[])[]) => Buffer.concat(parts.map((part) => typeof part === "string" ? Buffer.from(part, "latin1") : Buffer.from(part)));
+  const RASTER_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+  const pasted = () => existsSync(join(qaCwd!, ".herdr-web-ui")) ? readdirSync(join(qaCwd!, ".herdr-web-ui")).sort() : [];
+
+  it("names each raster after its signature, whichever supported type it claims", async () => {
+    for (const [extension, data] of [
+      ["png", Buffer.from(TINY_PNG_BASE64, "base64")],
+      ["jpg", bytes([255, 216, 255, 224, 0, 16], "JFIF")],
+      ["gif", bytes("GIF87a", [1, 0, 1, 0])],
+      ["gif", bytes("GIF89a", [1, 0, 1, 0])],
+      ["webp", bytes("RIFF", [4, 0, 0, 0], "WEBP")],
+    ] as const) {
+      for (const content_type of RASTER_TYPES) {
+        const res = await post({ pane_id: qaPaneId, content_type, data_base64: data.toString("base64"), name: "shot.jpeg" });
+        expect(res.status).toBe(200);
+        const { path } = (await res.json()) as { path: string };
+        expect(dirname(path)).toBe(join(qaCwd!, ".herdr-web-ui"));
+        expect(basename(path)).toMatch(new RegExp(`^paste-\\d{8}-\\d{6}-[0-9a-f]{8}\\.${extension}$`));
+        expect(readFileSync(path)).toEqual(data);
+      }
+    }
+  });
+
+  it("refuses a fake raster with invalid_image before the pane lookup, writing nothing", async () => {
+    const before = pasted();
+    for (const data of [
+      bytes("SECRET-UPLOAD-TEXT not an image"),
+      bytes([137, 80, 78, 71, 13, 10, 26]),
+      bytes([255, 216]),
+      bytes("GIF88a"),
+      bytes("RIFF", [4, 0, 0, 0], "WEB"),
+      // GIF87a, GIF89a and RIFF....WEBP with each letter's high bit set
+      bytes([0xc7, 0xc9, 0xc6, 0x38, 0x37, 0xe1]),
+      bytes([0xc7, 0xc9, 0xc6, 0x38, 0x39, 0xe1]),
+      bytes([0xd2, 0xc9, 0xc6, 0xc6, 4, 0, 0, 0, 0xd7, 0xc5, 0xc2, 0xd0]),
+    ]) {
+      for (const content_type of RASTER_TYPES) {
+        for (const pane_id of [qaPaneId, "w9999:p9999"]) {
+          const res = await post({ pane_id, content_type, data_base64: data.toString("base64"), name: "secret-name.png" });
+          expect(res.status).toBe(400);
+          const text = await res.text();
+          expect(JSON.parse(text)).toEqual({ error: { code: "invalid_image", message: "file does not contain a supported raster image" } });
+          for (const leaked of ["SECRET", "secret-name", "path"]) expect(text).not.toContain(leaked);
+        }
+      }
+    }
+    expect(pasted()).toEqual(before);
+    // a real raster for an unknown pane still answers pane_not_found, and size errors still come first
+    const gif = await post({ pane_id: "w9999:p9999", content_type: "image/webp", data_base64: bytes("GIF89a", [1, 0]).toString("base64") });
+    expect([gif.status, ((await gif.json()) as ApiError).error.code]).toEqual([404, "pane_not_found"]);
+    const empty = await post({ pane_id: "w9999:p9999", content_type: "image/png", data_base64: "" });
+    expect([empty.status, ((await empty.json()) as ApiError).error.code]).toEqual([400, "empty_image"]);
+  });
+
+  it("keeps generic uploads under their own names and bytes, even when they look like a raster", async () => {
+    for (const [content_type, name, data, pattern] of [
+      ["application/json", "report.json", bytes('{"month":"2026-09"}'), /^report-.*\.json$/],
+      ["application/zip", "bundle.zip", Buffer.from(TINY_PNG_BASE64, "base64"), /^bundle-.*\.zip$/],
+    ] as const) {
+      const res = await post({ pane_id: qaPaneId, content_type, data_base64: data.toString("base64"), name });
+      expect(res.status).toBe(200);
+      const { path } = (await res.json()) as { path: string };
+      expect(basename(path)).toMatch(pattern);
+      expect(readFileSync(path)).toEqual(data);
+    }
   });
 
   it("stores any other file under its own sanitised name", async () => {
