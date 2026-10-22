@@ -115,6 +115,8 @@ export interface PtyAttachment extends AttachmentState {
 export interface MirrorAttachment extends AttachmentState {
   readonly kind: "mirror";
   process: MirrorSession;
+  /** clients that attached before any screen went out: the first screen they get is their replay */
+  unscreened: Set<Client>;
 }
 
 export type PaneAttachment = PtyAttachment | MirrorAttachment;
@@ -131,7 +133,7 @@ export function createSpawnAttachment({ attachments, retiringAttachments, termin
   isStopped: () => boolean;
   closeAttachment: (paneId: string) => void;
   broadcast: (paneId: string, message: ServerMessage) => void;
-  sendOutput: (client: Client, paneId: string, data: string) => void;
+  sendOutput: (client: Client, paneId: string, data: string, replay?: boolean) => void;
   reconcileOutput: (paneId: string) => void;
   holdPendingPane: (paneId: string, fault: { code: string; message: string }) => void;
   /** the attach took and input flows: a pending message waiting for a typist may go now */
@@ -176,7 +178,7 @@ export function createSpawnAttachment({ attachments, retiringAttachments, termin
     };
 
     if (mirrored) {
-      const attachment: MirrorAttachment = { kind: "mirror", ready: true, process: undefined as unknown as MirrorSession, ...state };
+      const attachment: MirrorAttachment = { kind: "mirror", ready: true, process: undefined as unknown as MirrorSession, unscreened: new Set(), ...state };
       attachments.set(paneId, attachment);
       const mirror = new MirrorSession({
         cols: spawnCols,
@@ -196,7 +198,7 @@ export function createSpawnAttachment({ attachments, retiringAttachments, termin
         write: (data) => paneSendText(paneId, data),
         onData: (frame) => {
           if (attachments.get(paneId) !== attachment) return;
-          for (const client of attachment.clients) sendOutput(client, paneId, frame);
+          for (const client of attachment.clients) sendOutput(client, paneId, frame, attachment.unscreened.delete(client));
           reconcileOutput(paneId);
         },
         onExit: (code) => {

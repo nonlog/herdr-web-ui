@@ -212,9 +212,15 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *  POST   /api/layout/ratio { tab_id, path: boolean[], ratio } -> { ok: true }
  *         (layout.set_split_ratio: a split in that tab, root at [], false follows the first child,
  *         true the second; finite ratio in 0.1..0.9; an absent split answers split_not_found)
- *  POST   /api/pane/image  { pane_id, content_type, data_base64 } -> { ok: true, path }
+ *  POST   /api/pane/image  { pane_id, content_type, data_base64, name? } -> { ok: true, path }
  *         pasted image -> file under <pane cwd>/.herdr-web-ui/ (under HERDR_WEB_PASTE_DIR when the
- *         server's environment sets it), path for the prompt
+ *         server's environment sets it), path for the prompt. An image/png, image/jpeg, image/gif or
+ *         image/webp upload is named paste-<stamp>.<png|jpg|gif|webp> after the signature of its
+ *         bytes, whichever of the four it claims; bytes with none of those signatures answer 400
+ *         invalid_image ("file does not contain a supported raster image", never the upload's name
+ *         or content) before the pane is looked up or anything is written. A signature check, not
+ *         a decode. Any other type keeps its sanitised `name` (.bin without a usable extension).
+ *         empty_image 400 and image_too_large 413 are checked first.
  *  GET    /api/pane/commands?pane_id=   -> { commands: SlashCommand[] } (the agent's slash
  *         commands: built-ins per agent kind + the user's and the project's custom commands)
  *  GET    /api/pane/omo-tasks?pane_id=  -> OmoActivity (the background tasks and workflows the
@@ -1439,7 +1445,12 @@ export type ServerMessage =
   /** `connection`: this socket's id on the PC, for a create request's `first_message_connection`; older bridges send none */
   | { type: "snapshot"; snapshot: SessionSnapshot; features?: ServerFeature[]; connection?: string }
   /** raw PTY bytes: append to the terminal, never repaint over it. A mirrored pane (HerdrIdentity.terminal_mirror) sends whole screens the same way. */
-  | { type: "pty-data"; pane_id: string; data: string; flow?: { stream_id: string; offset: number } }
+  /**
+   * `replay`: these bytes are the screen from before this client attached (the first frame of a new
+   * attach), drawn but never asked again for side effects such as a clipboard write. Live output and
+   * older bridges omit it.
+   */
+  | { type: "pty-data"; pane_id: string; data: string; flow?: { stream_id: string; offset: number }; replay?: true }
   | { type: "pty-exit"; pane_id: string; code: number | null }
   /** a pane that waited for another web bridge to let go of its terminal (error `attach_held`) is attached again */
   | { type: "attach-resumed"; pane_id: string }
