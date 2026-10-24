@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
 import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexOpenRollout, codexTranscriptPath } from "./codex.ts";
-import { processStartedAt, processStartUpperBound } from "./process-start.ts";
+import { asCodexTitle, codexOpenRollout, codexTranscriptPath } from "./codex.ts";
+import * as processStart from "./process-start.ts";
+import { processStartedAt } from "./process-start.ts";
 
 // Native stores and the real RPC client; only herdr's foreground metadata is synthetic.
 // In particular, a real process supplies /proc/cmdline when that metadata omits argv.
@@ -16,12 +17,18 @@ let path: string;
 let screen: string;
 let peerScreens: Map<string, string | Error>;
 let foreground: { pid: number; name?: string; argv?: string[] }[];
+/** A pane's own foreground, where it is not [foreground]. */
+let foregrounds: Map<string, { pid: number; name?: string; argv?: string[] }[]>;
 let listener: ReturnType<typeof Bun.listen>;
 let socketBefore: string | undefined;
+/** The terminal title herdr reports for the pane (Codex's [tui].terminal_title), null for none. */
+let title: string | null;
+/** The pane's folders herdr reports. */
+let agentFolders: { cwd?: string; foreground_cwd?: string };
 const children: ReturnType<typeof Bun.spawn>[] = [];
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "herdr-web-ui-codex-processes-"));
+  root = mkdtempSync(join(tmpdir(), "ovis-codex-processes-"));
   home = join(root, "codex");
   mkdirSync(join(home, "sessions"), { recursive: true });
   path = join(home, "sessions", `rollout-${thread}.jsonl`);
@@ -34,8 +41,11 @@ beforeEach(() => {
   db.query("INSERT INTO threads VALUES (?, ?, ?, 0, NULL, 1, 1, 'cli')").run(thread, path, root);
   db.close();
   screen = "";
+  title = null;
+  agentFolders = {};
   peerScreens = new Map();
   foreground = [];
+  foregrounds = new Map();
   socketBefore = process.env["HERDR_SOCKET"];
   const socket = join(root, "herdr.sock");
   process.env["HERDR_SOCKET"] = socket;
@@ -52,8 +62,8 @@ beforeEach(() => {
           socket.end(`${JSON.stringify({ id: request.id, error: { code: "pane_not_found", message: peerScreen.message } })}\n`);
           return;
         }
-        const result = request.method === "agent.get" ? { agent: {} }
-          : request.method === "pane.process_info" ? { process_info: { foreground_processes: foreground } }
+        const result = request.method === "agent.get" ? { agent: { ...agentFolders, ...(title === null ? {} : { terminal_title: title, terminal_title_stripped: title }) } }
+          : request.method === "pane.process_info" ? { process_info: { foreground_processes: foregrounds.get(request.params?.pane_id ?? "") ?? foreground } }
           : request.method === "pane.read" ? { read: { text: peerScreen ?? screen } }
           : null;
         if (result === null) throw new Error(`unexpected RPC ${request.method}`);
@@ -155,6 +165,225 @@ it("gives a background reader the chat's binding only while no newer thread may 
   expect(await codexOpenRollout(root, root, home)).toBeNull();
 });
 
+/** A thread of another folder, as `codex resume` (the picker) can open from this one (#896). */
+const other = "01a16b22-7e1f-7072-8897-d5e46a0d5f1f";
+const otherAnswer = "An answer of the other folder's conversation, which this pane resumed through the picker.";
+function otherFolderThread(messages: { type: string; message: string }[] = [{ type: "agent_message", message: otherAnswer }]): string {
+  const elsewhere = join(root, "elsewhere");
+  mkdirSync(elsewhere, { recursive: true });
+  const rollout = join(home, "sessions", `rollout-${other}.jsonl`);
+  writeFileSync(rollout, [
+    { type: "session_meta", payload: { id: other, cwd: elsewhere } },
+    ...messages.map((payload) => ({ type: "event_msg", payload })),
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  const db = new Database(join(home, "state_5.sqlite"));
+  db.query("INSERT INTO threads (id, rollout_path, cwd, archived, agent_role, created_at, updated_at, source) VALUES (?, ?, ?, 0, NULL, 2, 2, 'cli')").run(other, rollout, elsewhere);
+  db.close();
+  return rollout;
+}
+
+/** The title Codex 0.163.0 sets with its thread-id item: the id shortened to 29 characters. */
+const shortened = `Use the other folder | elsewhere | ${other.slice(0, 29)}...`;
+const picker = [{ pid: 2147483647, argv: ["codex", "resume", "--all"] }];
+
+it("cleans title text as Codex 0.163.0 does (tui/src/terminal_title.rs, its own test cases)", () => {
+  expect(asCodexTitle("  Project\t|\nWorking\x1b\x07\u009D\u009C |  Thread  ")).toBe("Project | Working | Thread");
+  expect(asCodexTitle("Pro\u202Ej\u2066e\u200Fc\u061Ct\u200B \uFEFFT\u2060itle")).toBe("Project Title");
+  const mixed = " \u25cf \u2807 | \u011b[31m thread \u202e\x07| \u65e5\u672c\u8a9e \u0107af\u00e9  ";
+  expect(asCodexTitle(mixed, true)).toBe("* | | ?[31m thread | ??? ?af?");
+  expect(asCodexTitle(mixed)).toBe("\u25cf \u2807 | \u011b[31m thread | \u65e5\u672c\u8a9e \u0107af\u00e9");
+  expect(asCodexTitle("\u65e5\u672c\u8a9e", true)).toBe("???");
+  expect(asCodexTitle("\x07\x1b\u202E\uFEFF", true)).toBe("");
+});
+
+describe("the thread id a Codex pane's terminal title shows, from another folder (#896)", () => {
+  it("is matched on screen like the pane's own threads, and the match then serves a background reader", async () => {
+    const rollout = otherFolderThread();
+    foreground = picker;
+    title = shortened;
+    screen = otherAnswer;
+    expect(await resolve()).toBe(rollout);
+    expect(await codexOpenRollout(root, root, home)).toBe(rollout);
+  });
+
+  it("is never taken on the title alone: a name that only looks like the id leaves the screen to decide", async () => {
+    otherFolderThread();
+    foreground = picker;
+    title = `Working | ${other}`;
+    expect(await resolve()).toBeNull();
+    expect(await codexOpenRollout(root, root, home)).toBeNull();
+    screen = answer;
+    expect(await resolve()).toBe(path);
+  });
+
+  it("follows the title's thread over the one the command line resumed, as after /new", async () => {
+    const rollout = otherFolderThread();
+    foreground = [{ pid: 2147483647, argv: ["codex", "resume", thread] }];
+    title = `\u280b ${other} | elsewhere`;
+    screen = otherAnswer;
+    expect(await resolve()).toBe(rollout);
+  });
+
+  /** `count` more exchanges of this folder's conversation, two turns each */
+  const later = (from: number, count: number) => `\n${Array.from({ length: count }, (_, index) => [
+    { type: "user_message", message: `Question ${from + index}` },
+    { type: "agent_message", message: `Later answer number ${from + index} of this folder's own conversation.` },
+  ].map((payload) => JSON.stringify({ type: "event_msg", payload })).join("\n")).join("\n")}`;
+
+  it("takes no answer this folder's conversation gave too, however long ago", async () => {
+    otherFolderThread([{ type: "agent_message", message: answer }]);
+    foreground = picker;
+    title = `Working | ${other}`;
+    screen = answer;
+    // past its last eight answers, then past the last hundred turns a chat shows
+    for (const [from, count] of [[0, 8], [8, 60]] as const) {
+      appendFileSync(path, later(from, count));
+      expect(await resolve()).toBeNull();
+      expect(await codexOpenRollout(root, root, home)).toBeNull();
+    }
+  });
+
+  it("leaves an answer both conversations gave lately undecided, rather than this folder's by elimination", async () => {
+    otherFolderThread([{ type: "agent_message", message: answer }]);
+    foreground = picker;
+    title = `Working | ${other}`;
+    screen = answer;
+    expect(await resolve()).toBeNull();
+  });
+
+  it("takes no id that a folder or a thread's name could have put in the title (R1)", async () => {
+    // the pane really runs C, resumed from a folder named after B's id, with no thread-id title item:
+    // the title's project name is B's id, and C and B gave the same answer
+    otherFolderThread([{ type: "agent_message", message: answer }]);
+    const named = join(root, `project-${other}`);
+    mkdirSync(named, { recursive: true });
+    const actual = "01a16b22-7e1f-7072-8897-cccccccccccc";
+    const rollout = join(home, "sessions", `rollout-${actual}.jsonl`);
+    writeFileSync(rollout, [
+      { type: "session_meta", payload: { id: actual, cwd: named } },
+      { type: "event_msg", payload: { type: "agent_message", message: answer } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const db = new Database(join(home, "state_5.sqlite"));
+    db.query("INSERT INTO threads (id, rollout_path, cwd, archived, agent_role, created_at, updated_at, source) VALUES (?, ?, ?, 0, NULL, 2, 2, 'cli')").run(actual, rollout, named);
+    db.close();
+    writeFileSync(path, [
+      { type: "session_meta", payload: { id: thread, cwd: root } },
+      { type: "event_msg", payload: { type: "agent_message", message: "This folder's own conversation answered something else entirely, long enough to count." } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    foreground = picker;
+    screen = answer;
+    title = `Ask about the project | ${other}`;
+    expect(await resolve()).toBeNull();
+    expect(await codexOpenRollout(root, root, home)).toBeNull();
+  });
+
+  it("compares names as Codex writes them into the title, without the characters it drops (R2)", async () => {
+    // C's name (then its folder) is B's id with invisible characters Codex strips from its title
+    otherFolderThread([{ type: "agent_message", message: answer }]);
+    const actual = "01a16b22-7e1f-7072-8897-cccccccccccc";
+    const folder = join(root, "project");
+    mkdirSync(folder, { recursive: true });
+    const rollout = join(home, "sessions", `rollout-${actual}.jsonl`);
+    writeFileSync(rollout, [
+      { type: "session_meta", payload: { id: actual, cwd: folder } },
+      { type: "event_msg", payload: { type: "agent_message", message: answer } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const db = new Database(join(home, "state_5.sqlite"));
+    db.exec("ALTER TABLE threads ADD COLUMN name TEXT");
+    db.query("INSERT INTO threads (id, rollout_path, cwd, archived, agent_role, created_at, updated_at, source) VALUES (?, ?, ?, 0, NULL, 2, 2, 'cli')")
+      .run(actual, rollout, folder);
+    db.close();
+    writeFileSync(path, [
+      { type: "session_meta", payload: { id: thread, cwd: root } },
+      { type: "event_msg", payload: { type: "agent_message", message: "This folder's own conversation answered something else entirely, long enough to count." } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    foreground = picker;
+    screen = answer;
+    title = `${other} | project`;
+    const found: [string, string | null, string | null][] = [];
+    for (const name of [
+      `${other.slice(0, 8)}\u200b${other.slice(8, 20)}\u2061\ufeff${other.slice(20)}`,
+      // a NUL, which SQLite's text functions stop at
+      `${other.slice(0, 8)}\u0000${other.slice(8)}`,
+      // what Codex writes as "-" under GNU Screen (STY)
+      `${other.slice(0, 8)}\u2839${other.slice(9, 13)}\u2826${other.slice(14)}`,
+      // a space Codex drops when the name reaches its 240-character title cap
+      `${other.slice(0, 35)} ${other.slice(35)}`,
+    ]) {
+      const named = new Database(join(home, "state_5.sqlite"));
+      named.query("UPDATE threads SET name = ? WHERE id = ?").run(name, actual);
+      named.close();
+      found.push([JSON.stringify(name), await resolve(), await codexOpenRollout(root, root, home)]);
+    }
+    expect(found.filter(([, chat, reader]) => chat !== null || reader !== null).map(([name]) => name)).toEqual([]);
+  });
+
+  it("compares the pane's folders as Codex writes them into the title too (R2)", async () => {
+    otherFolderThread();
+    foreground = picker;
+    screen = otherAnswer;
+    title = `Working | ${other}`;
+    agentFolders = { cwd: join(root, `${other.slice(0, 13)}\u00ad${other.slice(13)}`), foreground_cwd: root };
+    expect(await resolve()).toBeNull();
+  });
+
+  it("counts an answer another conversation split into parts as given there too", async () => {
+    otherFolderThread([{ type: "agent_message", message: answer }]);
+    const half = answer.indexOf(" ", answer.length / 2);
+    writeFileSync(path, [
+      { type: "session_meta", payload: { id: thread, cwd: root } },
+      { type: "event_msg", payload: { type: "agent_message", message: answer.slice(0, half) } },
+      { type: "event_msg", payload: { type: "agent_message", message: answer.slice(half) } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    foreground = picker;
+    title = shortened;
+    screen = answer;
+    expect(await resolve()).toBeNull();
+  });
+
+  it("drops a binding the title made once the title names another thread", async () => {
+    const rollout = otherFolderThread();
+    foreground = picker;
+    title = shortened;
+    screen = otherAnswer;
+    expect(await resolve()).toBe(rollout);
+    // the same Codex resumed another folder's thread through the picker; none of its answers shows yet
+    const next = "01a16b22-7e1f-7072-8897-eeeeeeeeeeee";
+    const nextRollout = join(home, "sessions", `rollout-${next}.jsonl`);
+    writeFileSync(nextRollout, `${JSON.stringify({ type: "session_meta", payload: { id: next, cwd: join(root, "elsewhere") } })}\n`);
+    const db = new Database(join(home, "state_5.sqlite"));
+    db.query("INSERT INTO threads (id, rollout_path, cwd, archived, agent_role, created_at, updated_at, source) VALUES (?, ?, ?, 0, NULL, 3, 3, 'cli')").run(next, nextRollout, join(root, "elsewhere"));
+    db.close();
+    title = `Another one | elsewhere | ${next.slice(0, 29)}...`;
+    screen = "";
+    expect(await codexOpenRollout(root, root, home)).toBeNull();
+    expect(await resolve()).toBeNull();
+    title = shortened;
+    expect(await codexOpenRollout(root, root, home)).toBeNull();
+  });
+
+  it("offers nothing from another folder without the id in the title, without a Codex process, or for an id the store does not hold", async () => {
+    otherFolderThread();
+    screen = otherAnswer;
+    foreground = picker;
+    title = "Use the other folder | elsewhere";
+    expect(await resolve()).toBeNull();
+    title = shortened;
+    foreground = [{ pid: 2147483647, argv: ["bash"] }];
+    expect(await resolve()).toBeNull();
+    foreground = [];
+    expect(await resolve()).toBeNull();
+    foreground = picker;
+    title = "Use the other folder | elsewhere | 01a16b22-7e1f-7072-8897-ffffffffffff";
+    expect(await resolve()).toBeNull();
+    // an id inside other text, or cut anywhere but where Codex cuts it, is no thread-id item
+    for (const named of [`Use the other folder | proj-${other}`, `Use the other folder | ${other.slice(0, 30)}...`, `${other} | ${other.slice(0, 29)}...`]) {
+      title = named;
+      expect(await resolve()).toBeNull();
+    }
+  });
+});
+
 it("does not guess a session when argv and proc data are unavailable", async () => {
   foreground = [{ pid: 2147483647, name: "codex" }];
   expect(await resolve()).toBeNull();
@@ -179,7 +408,7 @@ it("does not use an alias resume after a newer interactive thread starts", async
 const shortPrompt = "Check fixture";
 const shortAnswer = "The fixture is ready for inspection.";
 const shortScreen = `OpenAI Codex (v1.0)\n\n› ${shortPrompt}\n\n• ${shortAnswer}\n\n› `;
-const shortIt = it.skipIf(process.platform !== "linux");
+const shortIt = it.skipIf(process.platform !== "linux" && process.platform !== "darwin");
 
 function shortRollout(file: string, prompt = shortPrompt, reply = shortAnswer): void {
   writeFileSync(file, [
@@ -276,28 +505,161 @@ shortIt("accepts a headerless peer only with a substantial match to a different 
   }
 });
 
+shortIt("leaves a short first exchange undecided while the title offers another folder's conversation with the same one (#896)", async () => {
+  await shortSession();
+  expect(await resolve()).toBe(path);
+  otherFolderThread([{ type: "user_message", message: shortPrompt }, { type: "agent_message", message: shortAnswer }]);
+  title = `${shortPrompt} | elsewhere | ${other}`;
+  expect(await resolve()).toBeNull();
+});
+
 shortIt("resolves a seconds-only schema when creation is provably after process start", async () => {
   await shortSession(false);
   expect(await resolve()).toBe(path);
 });
 
-shortIt("rejects a pre-start thread but accepts one 542 ms after its precise start bound", async () => {
+shortIt("rejects a thread made before its process could have started, and takes one made as it starts", async () => {
   await shortSession();
-  const startedAt = processStartedAt(foreground[0]!.pid)!;
-  const beforeThreshold = new Database(join(home, "state_5.sqlite"));
-  beforeThreshold.query("UPDATE threads SET created_at = ?, created_at_ms = ?")
-    .run(Math.floor((startedAt - 1) / 1000), startedAt - 1);
-  beforeThreshold.close();
-  expect(await resolve()).toBeNull();
+  // Put the start at a second boundary, independently of btime/ps rounding or fixture setup time.
+  const started = 1_001_000;
+  const bound = spyOn(processStart, "processStartLowerBound").mockReturnValue(started);
+  const setCreated = (created: number) => {
+    const db = new Database(join(home, "state_5.sqlite"));
+    db.query("UPDATE threads SET created_at = ?, created_at_ms = ?").run(Math.floor(created / 1000), created);
+    db.close();
+  };
+  try {
+    setCreated(started - 1);
+    expect(await resolve()).toBeNull();
+    setCreated(started);
+    expect(await resolve()).toBe(path);
+  } finally { bound.mockRestore(); }
+});
 
-  const upper = processStartUpperBound(foreground[0]!.pid);
-  expect(upper).not.toBeNull();
-  const created = upper! + 542;
-  const atThreshold = new Database(join(home, "state_5.sqlite"));
-  atThreshold.query("UPDATE threads SET created_at = ?, created_at_ms = ?")
-    .run(Math.floor(created / 1000), created);
-  atThreshold.close();
-  expect(await resolve()).toBe(path);
+shortIt("takes a seconds-only thread made in its process's second", async () => {
+  await shortSession(false);
+  const bound = spyOn(processStart, "processStartLowerBound");
+  try {
+    // The same stored second must work at its first and last millisecond, but not the next second.
+    const db = new Database(join(home, "state_5.sqlite"));
+    db.query("UPDATE threads SET created_at = 1000").run();
+    db.close();
+    for (const started of [1_000_000, 1_000_999]) {
+      bound.mockReturnValue(started);
+      expect(await resolve()).toBe(path);
+    }
+    bound.mockReturnValue(1_001_000);
+    expect(await resolve()).toBeNull();
+  } finally { bound.mockRestore(); }
+});
+
+// --- after another pane's /new, this pane's one-word exchange still tells ---
+
+const peerThread = "01a0c7a1-56d9-7e20-9f08-f7a2d973bc09";
+const peerPrompt = "explain the cache layer";
+const peerAnswer = "The cache layer keeps each rendered page for ten minutes, keyed by its route and the user's locale, and evicts the oldest first.";
+
+/** The other pane's thread, begun after this pane's Codex started (its /new), answered [reply]. */
+function peerNewThread(created: number, reply = peerAnswer): string {
+  const file = join(home, "sessions", `rollout-${peerThread}.jsonl`);
+  writeFileSync(file, [
+    { type: "session_meta", payload: { id: peerThread, cwd: root } },
+    { type: "event_msg", payload: { type: "user_message", message: peerPrompt } },
+    { type: "event_msg", payload: { type: "agent_message", message: reply } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  addShortThread(peerThread, file, created, peerPrompt);
+  return file;
+}
+
+const peerScreenOf = (reply: string) => `OpenAI Codex (v1.0)\n\n› ${peerPrompt}\n\n• ${reply}\n\n› `;
+
+shortIt("leaves out a thread another pane shows a long answer of below its first prompt, and keeps it theirs", async () => {
+  const created = await shortSession();
+  peerNewThread(created + 1000);
+  peerScreens.set("peer", peerScreenOf(peerAnswer));
+  const panes = [fixturePane(root), fixturePane("peer")];
+  expect(await codexTranscriptPath(root, root, home, panes)).toBe(path);
+  // looked at again within seconds the other pane is not read again: it is bound to that thread now
+  expect(await codexTranscriptPath(root, root, home, panes)).toBe(path);
+});
+
+shortIt("leaves out the rollout herdr reports for another pane", async () => {
+  const created = await shortSession();
+  const theirs = peerNewThread(created + 1000, "ok");
+  peerScreens.set("peer", peerScreenOf("ok"));
+  const peer = { ...fixturePane("peer"), agent_session: { source: "herdr:codex", agent: "codex", kind: "path", value: theirs } };
+  expect(await codexTranscriptPath(root, root, home, [fixturePane(root), peer])).toBe(path);
+});
+
+shortIt("leaves out its only new thread when herdr reports it for another pane", async () => {
+  await shortSession();
+  // the other pane shows another exchange now; herdr says the thread is that pane's conversation
+  peerScreens.set("peer", "OpenAI Codex (v1.0)\n› Other fixture\n• A different short reply.\n› ");
+  const peer = { ...fixturePane("peer"), agent_session: { source: "herdr:codex", agent: "codex", kind: "path", value: path } };
+  expect(await codexTranscriptPath(root, root, home, [fixturePane(root), peer])).toBeNull();
+  // reported for nobody, the same screens tell it is this pane's
+  expect(await codexTranscriptPath(root, root, home, [fixturePane(root), fixturePane("peer")])).toBe(path);
+});
+
+shortIt("still cannot tell when nothing ties the other thread to another pane", async () => {
+  const created = await shortSession();
+  // a one-word answer there too, nothing reported: either pane might have begun it
+  peerNewThread(created + 1000, "ok");
+  peerScreens.set("peer", peerScreenOf("ok"));
+  expect(await codexTranscriptPath(root, root, home, [fixturePane(root), fixturePane("peer")])).toBeNull();
+});
+
+// --- the pane that started first, beside a later pane's short first exchange ---
+
+it("tells the first-started pane's thread once the later pane shows its own first exchange", async () => {
+  // A's Codex started at 1000 s and began its thread at 1001.3; B's started at 1005 and began
+  // its own at 1006.7: both began after A started, so A tells only once B shows its own
+  const starts = new Map([[900001, 1_000_000], [900002, 1_005_000]]);
+  const bound = spyOn(processStart, "processStartLowerBound").mockImplementation((pid) => starts.has(pid) ? starts.get(pid)! : null);
+  try {
+    const db = new Database(join(home, "state_5.sqlite"));
+    db.exec("ALTER TABLE threads ADD COLUMN first_user_message TEXT");
+    db.exec("ALTER TABLE threads ADD COLUMN created_at_ms INTEGER");
+    db.query("UPDATE threads SET created_at = 1001, created_at_ms = 1001300, first_user_message = ?").run(shortPrompt);
+    db.close();
+    shortRollout(path);
+    const theirs = join(home, "sessions", "rollout-bravo.jsonl");
+    writeFileSync(theirs, [
+      { type: "session_meta", payload: { id: "bravo", cwd: root } },
+      { type: "event_msg", payload: { type: "user_message", message: "Reply with exactly one word: bravo" } },
+      { type: "event_msg", payload: { type: "agent_message", message: "bravo" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    addShortThread("bravo", theirs, 1_006_700, "Reply with exactly one word: bravo");
+    foregrounds.set(root, [{ pid: 900001, argv: [join(root, "codex")] }]);
+    foregrounds.set("peer", [{ pid: 900002, argv: [join(root, "codex")] }]);
+    screen = shortScreen;
+    const bravo = "OpenAI Codex (v1.0)\n\n› Reply with exactly one word: bravo\n\n• bravo\n\n› ";
+    peerScreens.set("peer", bravo);
+    const panes = [fixturePane(root), fixturePane("peer")];
+    expect(await codexTranscriptPath(root, root, home, panes)).toBe(path);
+    expect(await codexTranscriptPath("peer", root, home, panes)).toBe(theirs);
+
+    // unsure stays unavailable: B's start unknown, B scrolled past its header, or this
+    // pane showing B's exchange as well
+    starts.delete(900002);
+    expect(await codexTranscriptPath(root, root, home, panes)).toBeNull();
+    starts.set(900002, 1_005_000);
+    peerScreens.set("peer", "› Reply with exactly one word: bravo\n\n• bravo\n\n› ");
+    expect(await codexTranscriptPath(root, root, home, panes)).toBeNull();
+    peerScreens.set("peer", bravo);
+    screen = bravo;
+    expect(await codexTranscriptPath(root, root, home, panes)).toBeNull();
+    // a later exchange of this pane's own is no claim on B's: its first exchange is still its own
+    screen = `${shortScreen}Reply with exactly one word: bravo\n\n• bravo\n\n› `;
+    expect(await codexTranscriptPath(root, root, home, panes)).toBe(path);
+  } finally { bound.mockRestore(); }
+});
+
+shortIt("claims nothing for a long answer another pane shows under some other prompt (pasted, quoted)", async () => {
+  const created = await shortSession();
+  peerNewThread(created + 1000);
+  peerScreens.set("peer", `OpenAI Codex (v1.0)\n\n› what did the other pane say?\n\n• ${peerAnswer}\n\n› `);
+  expect(await codexTranscriptPath(root, root, home, [fixturePane(root), fixturePane("peer")])).toBeNull();
 });
 
 shortIt("handles a Windows stored cwd prefix using a Linux fixture process", async () => {
@@ -474,11 +836,12 @@ shortIt("rejects a thread already bound to another pane outside this directory",
   expect(await codexTranscriptPath(root, root, home, panes)).toBeNull();
 });
 
-shortIt("rejects unavailable process starts and timestamps before the actual process", async () => {
+shortIt("rejects unavailable process starts and timestamps before the process could have started", async () => {
   const created = await shortSession();
   const started = processStartedAt(foreground[0]!.pid)!;
   const db = new Database(join(home, "state_5.sqlite"));
-  db.query("UPDATE threads SET created_at_ms = ?").run(started - 1);
+  // below the start's lower bound on every platform (a tick on Linux, ps's second on macOS)
+  db.query("UPDATE threads SET created_at_ms = ?").run(started - 2500);
   db.close();
   expect(await resolve()).toBeNull();
   const restored = new Database(join(home, "state_5.sqlite"));

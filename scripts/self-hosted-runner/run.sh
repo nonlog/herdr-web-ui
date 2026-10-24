@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Host launcher: keeps N ephemeral runner containers alive, one job per container.
 #
-# Usage: scripts/self-hosted-runner/run.sh [--repo OWNER/NAME] [--count N] [--labels herdr-ci]
+# Usage: scripts/self-hosted-runner/run.sh [--repo OWNER/NAME] [--count N] [--labels self-hosted-ovis]
 #                                          [--build] [--once]
 set -euo pipefail
 
@@ -10,7 +10,7 @@ IMAGE="herdr-ci-runner:local"
 
 REPO=""
 COUNT=1
-LABELS="herdr-ci"
+LABELS="self-hosted-ovis"
 BUILD=0
 ONCE=0
 
@@ -67,13 +67,18 @@ start_netns() {
 slot_loop() {
   local slot="$1" name token container_status
   name="${PREFIX}${slot}"
+  delay=30
   while true; do
     if ! token="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)"; then
-      echo "[$name] could not fetch a registration token; retrying in 30s" >&2
+      echo "[$name] could not fetch a registration token; retrying in ${delay}s" >&2
       [ "$ONCE" = 1 ] && return 1
-      sleep 30
+      sleep "$delay"
+      # every slot asks, and GitHub limits these POSTs per hour: a fixed 30 s keeps the account
+      # over that limit for as long as it lasts, so back off to 10 minutes
+      delay=$(( delay * 2 > 600 ? 600 : delay * 2 ))
       continue
     fi
+    delay=30
     # No docker socket, no host mounts, no privileges. tini is already the entrypoint.
     # The token goes in on stdin (entrypoint.sh), so it is never in the container's environment.
     # a runner started after the namespace container went away would have no network
