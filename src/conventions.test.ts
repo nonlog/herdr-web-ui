@@ -186,9 +186,10 @@ describe("UI wording", () => {
 });
 
 describe("terminal mount", () => {
-  // The attach stream is the only writer of the terminal and herdr owns scrollback (AGENTS.md): xterm
-  // keeps none, or the fit addon reserves a scrollbar column and the last columns go dead.
-  it("creates every xterm Terminal with scrollback: 0", () => {
+  // Herdr owns the LIVE terminal's scrollback: an independent, input-disabled
+  // history snapshot may keep private scrollback in its distinct overlay.
+  // That renderer is never attached to the shared PTY or fitted as its grid.
+  it("keeps every live xterm Terminal at scrollback 0, with only the isolated snapshot exempt", () => {
     const options: string[] = [];
     for (const file of scan("src/**/*.{ts,tsx}").filter((name) => !/\.test\./.test(name))) {
       const source = read(file);
@@ -200,8 +201,16 @@ describe("terminal mount", () => {
       }
     }
     expect(options.length).toBeGreaterThan(0);
-    fail(options.filter((entry) => !/\bscrollback:\s*0\b/.test(entry)).map((entry) => entry.split("\n")[0]!),
-      "Every new Terminal({...}) sets scrollback: 0: herdr owns scrollback, and xterm's own would reserve a scrollbar column (AGENTS.md).");
+    const localHistory = options.filter((entry) => entry.startsWith("src/lib/useTerminalMount.ts:") &&
+      /\bscrollback:\s*20_000\b/.test(entry) && /\bdisableStdin:\s*true\b/.test(entry) &&
+      /\bcursorBlink:\s*false\b/.test(entry));
+    expect(localHistory).toHaveLength(1);
+    const source = read("src/lib/useTerminalMount.ts");
+    expect(source).toContain('historyHost.className = "pane-terminal-local-history"');
+    expect(source).toContain("host.parentElement!.append(historyHost)");
+    fail(options.filter((entry) => !/\bscrollback:\s*0\b/.test(entry) && !localHistory.includes(entry))
+      .map((entry) => entry.split("\n")[0]!),
+      "Only the isolated, read-only history renderer may retain local xterm scrollback; shared live PTYs require scrollback: 0.");
   });
 
   // The mount hook is called before usePaneAttach (whose reset effect cancels pending input before the next task).

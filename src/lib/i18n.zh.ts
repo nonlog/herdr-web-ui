@@ -257,15 +257,6 @@ const BASE: Record<string, string> = {
   // t3code ports (a)
   // t3code ports (d)
   "Change PC": "切换电脑",
-  "Application scroll": "应用内滚动",
-  "Back to live": "返回实时终端",
-  "Cached history": "已缓存历史",
-  "History unavailable; scroll to retry": "历史加载失败，滚动可重试",
-  "Instant local history": "本地即时滚动",
-  "Live": "实时",
-  "Loading history...": "正在加载历史…",
-  "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "本地历史直接滚动缓存内容，不改变其他设备的视图。应用内滚动会向共享程序发送滚轮操作。",
-  "Manual viewport": "手动浏览终端",
 };
 
 /** The parts ZH is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

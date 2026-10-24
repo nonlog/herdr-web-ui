@@ -79,7 +79,7 @@ process.stdout.write(Array.from({ length: 400 }, (_, n) => "history " + n + "\\r
     // The Fork defaults touch clients to isolated local ANSI history. This
     // upstream integration test explicitly exercises APPLICATION wheel routing,
     // so select that existing user-facing mode rather than change its behavior.
-    localStorage.setItem("herdr-web-ui:terminal-scroll-target", "application");
+    localStorage.setItem("ovis:terminal-scroll-target", "application");
     localStorage.setItem("ovis:settings", JSON.stringify({
       language: "en", defaultView: "terminal", terminalInputMode: "direct", terminalWheelSpeed: 2, alertsOn: false,
     }));

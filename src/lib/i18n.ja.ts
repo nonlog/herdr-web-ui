@@ -255,15 +255,6 @@ const BASE: Record<string, string> = {
   // t3code ports (a)
   // t3code ports (d)
   "Change PC": "PCを切り替え",
-  "Application scroll": "アプリ内スクロール",
-  "Back to live": "ライブ表示に戻る",
-  "Cached history": "キャッシュ済み履歴",
-  "History unavailable; scroll to retry": "履歴を取得できません。スクロールして再試行",
-  "Instant local history": "ローカル履歴の即時スクロール",
-  "Live": "ライブ",
-  "Loading history...": "履歴を読み込み中…",
-  "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "ローカル履歴は他の端末の表示を変えず、保存済みの出力を即時スクロールします。アプリ内スクロールは共有プログラムへ操作を送ります。",
-  "Manual viewport": "手動で表示中",
 };
 
 /** The parts JA is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

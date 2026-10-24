@@ -253,15 +253,6 @@ const BASE: Record<string, string> = {
   // t3code ports (a)
   // t3code ports (d)
   "Change PC": "PC 바꾸기",
-  "Application scroll": "앱 내부 스크롤",
-  "Back to live": "실시간 화면으로",
-  "Cached history": "캐시된 기록",
-  "History unavailable; scroll to retry": "기록을 불러올 수 없습니다. 스크롤하여 재시도",
-  "Instant local history": "로컬 기록 즉시 스크롤",
-  "Live": "실시간",
-  "Loading history...": "기록을 불러오는 중…",
-  "Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.": "로컬 기록은 다른 기기의 화면을 변경하지 않고 캐시된 출력을 즉시 스크롤합니다. 앱 내부 스크롤은 공유 프로그램에 휠 입력을 보냅니다.",
-  "Manual viewport": "수동 터미널 보기",
 };
 
 /** The parts KO is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

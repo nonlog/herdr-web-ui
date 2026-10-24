@@ -383,14 +383,14 @@ export function PaneTerminal({
   // Browsing cached ANSI history is private to this client; application mode
   // continues to send wheel input to the shared program.
   const [applicationScroll, setApplicationScroll] = useState(() => {
-    try { const saved = localStorage.getItem("herdr-web-ui:terminal-scroll-target"); if (saved) return saved === "application"; } catch {}
+    try { const saved = localStorage.getItem("ovis:terminal-scroll-target"); if (saved) return saved === "application"; } catch {}
     return !coarse;
   });
   const applicationScrollRef = useRef(applicationScroll); applicationScrollRef.current = applicationScroll;
   const [manualGridPan, setManualGridPan] = useState(false);
   const [historyStatus, setHistoryStatus] = useState<"live" | "reading" | "loading" | "unavailable">("live");
   useEffect(() => {
-    try { localStorage.setItem("herdr-web-ui:terminal-scroll-target", applicationScroll ? "application" : "history"); } catch {}
+    try { localStorage.setItem("ovis:terminal-scroll-target", applicationScroll ? "application" : "history"); } catch {}
     hideLocalHistoryRef.current();
     if (applicationScroll) resumeGridFollowRef.current();
     prefetchHistoryRef.current();
@@ -867,6 +867,25 @@ export function PaneTerminal({
           </div>
         </div>
       )}
+      {presented && !chatView && paneId !== null && !observing && (
+        <div className="terminal-scroll-toolbar">
+          <button type="button" className="btn btn-ghost" aria-pressed={!applicationScroll}
+            title={t("Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.")}
+            onClick={() => setApplicationScroll((current) => !current)}>
+            {t(applicationScroll ? "Application scroll" : "Instant local history")}
+          </button>
+          {!applicationScroll && <span role="status">{t(historyStatus === "loading" ? "Loading history..." : historyStatus === "unavailable" ? "History unavailable; scroll to retry" : historyStatus === "reading" ? "Cached history" : manualGridPan ? "Manual viewport" : "Live")}</span>}
+          {!applicationScroll && (historyStatus !== "live" || manualGridPan) && <button type="button" className="btn btn-ghost"
+            onClick={() => { hideLocalHistoryRef.current(); resumeGridFollowRef.current(); if (!coarseRef.current) termRef.current?.focus(); }}>{t("Back to live")}</button>}
+        </div>
+      )}
+      {/* its own key: under a peek it is the Composer's sibling, which is keyed by the pane too, and
+          two siblings with one key leave stray copies of the bar in the stack */}
+      {presented && findOpen && !chatView && paneId !== null && (
+        <FindBar key={`find:${paneId}`} paneId={paneId} viewportIntent={viewportIntent} onResult={setSearchState} activePane={active} focusRequest={findRequest} disabled={!connected || held || ended || released || !outputReady}
+          onClose={() => { setFindOpen(false); if (activeRef.current && !coarse) termRef.current?.focus(); }} />
+      )}
+      <div className="terminal-surface">
       <div className="terminal-banners">
         {paneId !== null && held && !noticesDocked && (
           <div className="terminal-banner terminal-banner-warning" role="status">
@@ -974,25 +993,6 @@ export function PaneTerminal({
           </div>
         )}
       </div>
-      {presented && !chatView && paneId !== null && !observing && (
-        <div className="terminal-scroll-toolbar">
-          <button type="button" className="btn btn-ghost" aria-pressed={!applicationScroll}
-            title={t("Local history scrolls cached output immediately without moving other clients. Application scroll sends wheel input to the shared program.")}
-            onClick={() => setApplicationScroll((current) => !current)}>
-            {t(applicationScroll ? "Application scroll" : "Instant local history")}
-          </button>
-          {!applicationScroll && <span role="status">{t(historyStatus === "loading" ? "Loading history..." : historyStatus === "unavailable" ? "History unavailable; scroll to retry" : historyStatus === "reading" ? "Cached history" : manualGridPan ? "Manual viewport" : "Live")}</span>}
-          {!applicationScroll && (historyStatus !== "live" || manualGridPan) && <button type="button" className="btn btn-ghost"
-            onClick={() => { hideLocalHistoryRef.current(); resumeGridFollowRef.current(); if (!coarseRef.current) termRef.current?.focus(); }}>{t("Back to live")}</button>}
-        </div>
-      )}
-      {/* its own key: under a peek it is the Composer's sibling, which is keyed by the pane too, and
-          two siblings with one key leave stray copies of the bar in the stack */}
-      {presented && findOpen && !chatView && paneId !== null && (
-        <FindBar key={`find:${paneId}`} paneId={paneId} viewportIntent={viewportIntent} onResult={setSearchState} activePane={active} focusRequest={findRequest} disabled={!connected || held || ended || released || !outputReady}
-          onClose={() => { setFindOpen(false); if (activeRef.current && !coarse) termRef.current?.focus(); }} />
-      )}
-      <div className="terminal-surface">
         {/* xterm hides its rendered rows from assistive technology, so the region around the
             visible grid carries the pane's name: a screen reader announces which pane
             this is. No tabIndex: xterm's helper textarea takes the keyboard here on attach, so a
